@@ -57,6 +57,8 @@ add_library(imgui STATIC
         ${CMAKE_SOURCE_DIR}/dependencies/imgui/imgui_widgets.cpp
         ${CMAKE_SOURCE_DIR}/dependencies/imgui/backends/imgui_impl_glfw.cpp
         ${CMAKE_SOURCE_DIR}/dependencies/imgui/backends/imgui_impl_opengl3.cpp
+        SpiderManTool.h
+        helpers.h
 )
 target_include_directories(imgui PUBLIC
         ${CMAKE_SOURCE_DIR}/dependencies/imgui
@@ -69,6 +71,11 @@ target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 add_executable(USM
         main.cpp
         ${CMAKE_SOURCE_DIR}/dependencies/ImGuiFileDialog/ImGuiFileDialog.cpp
+        SpiderManTool.cpp
+        SpiderManTool.h
+        helpers.h
+        interface.cpp
+        Interface.h
 )
 
 target_compile_definitions(USM PRIVATE USE_STD_FILESYSTEM)
