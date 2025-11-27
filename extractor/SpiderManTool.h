@@ -14,6 +14,14 @@ struct FileEntry {
     std::string name;
     bool isPcm;
     bool isDds;
+    std::vector<std::string> subItems;
+};
+
+struct RenderMesh {
+    unsigned int vao;
+    unsigned int vbo;
+    unsigned int ebo;
+    int indexCount;
 };
 
 class SpiderManTool {
@@ -37,6 +45,15 @@ public:
     int previewWidth = 0;
     int previewHeight = 0;
     bool showPreview = false;
+    bool isModelPreview = false;
+
+    unsigned int modelFbo = 0;
+    unsigned int modelRbo = 0;
+    unsigned int modelProgram = 0;
+    std::vector<RenderMesh> previewMeshes;
+    float modelRotX = 0.0f;
+    float modelRotY = 0.0f;
+    float modelZoom = 1.0f;
 
     void Log(const std::string& msg);
     void SaveConfig();
@@ -46,7 +63,12 @@ public:
     void OpenPCPack(const std::string& path);
     void ExtractPack(const std::string& packPath, bool convertAll = false);
     void ExtractFile(int index);
+
     void LoadPreview(int index);
     void ClosePreview();
+    void InitModelPreview();
+    void LoadModelToGL(int index);
+    void RenderModelPreview();
+
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
 };

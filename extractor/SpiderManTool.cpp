@@ -1,8 +1,9 @@
 #include "SpiderManTool.h"
 #define GL_GLEXT_PROTOTYPES
 #include <GLFW/glfw3.h>
+#include <cmath>
+#include <cstring> // For memcpy
 
-// DDS Structs
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
     uint32_t dwFlags;
@@ -224,8 +225,8 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
 void SpiderManTool::OpenPCPack(const std::string& path) {
     if (loadedPCPackPath == path) return;
 
-    ClosePreview(); // Close existing preview
-    selectedFileIndex = -1; // Reset selection
+    ClosePreview();
+    selectedFileIndex = -1;
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) { Log("Failed to open " + path); return; }
@@ -260,7 +261,6 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     entries.clear();
     if (!found) { Log("Invalid PCPACK header."); return; }
 
-    // Map to track duplicate names: Name -> Count
     std::map<std::string, int> nameCounts;
 
     br.Seek(start);
@@ -281,7 +281,8 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
         if (dictionary.count(hash)) e.name = dictionary[hash];
         else { std::stringstream ss; ss << "Unknown_" << std::hex << hash; e.name = ss.str(); }
 
-        if (fsize > 4) {
+        // Use safe bounds check before reading file magic
+        if (fsize > 4 && e.offset + 4 <= pcPackData.size()) {
             const char* magicSig = (const char*)&pcPackData[e.offset];
             if (strncmp(magicSig, "PCM ", 4) == 0) {
                 e.name += ".pcm";
@@ -294,23 +295,59 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
             else e.name += ".dat";
         }
 
-        // --- Handle Duplicates ---
         std::string originalName = e.name;
         if (nameCounts.count(originalName)) {
             int idx = nameCounts[originalName];
-
-            // Insert suffix before extension
             fs::path p(originalName);
             std::string stem = p.stem().string();
             std::string ext = p.extension().string();
-
             e.name = stem + "_" + std::to_string(idx) + ext;
             nameCounts[originalName]++;
         } else {
             nameCounts[originalName] = 0;
         }
-        // -------------------------
 
+        // Safer PCM parsing using BinaryReader to prevent SIGSEGV
+        if (e.isPcm && e.size > 16) {
+             size_t pcmBase = e.offset;
+             // Ensure we don't read out of bounds
+             if (pcmBase + 16 <= pcPackData.size()) {
+                 br.Seek(pcmBase + 8);
+                 uint32_t num = br.Read<uint32_t>();
+                 uint32_t dirOfs = br.Read<uint32_t>();
+
+                 size_t dirAddr = pcmBase + dirOfs;
+                 if (dirAddr < pcPackData.size()) {
+                     for(uint32_t k=0; k<num; k++) {
+                         // Check if directory entry is within bounds
+                         if (dirAddr + k*12 + 12 > pcPackData.size()) break;
+
+                         br.Seek(dirAddr + k*12 + 2);
+                         uint16_t itemType = br.Read<uint16_t>();
+                         uint32_t objOfs = br.Read<uint32_t>();
+
+                         if (itemType == 512) {
+                             if (pcmBase + objOfs + 4 <= pcPackData.size()) {
+                                 br.Seek(pcmBase + objOfs);
+                                 uint32_t nameOfs = br.Read<uint32_t>();
+
+                                 if (nameOfs != 0 && pcmBase + nameOfs < pcPackData.size()) {
+                                     // Safe string read
+                                     size_t strAddr = pcmBase + nameOfs;
+                                     const char* strStart = (const char*)&pcPackData[strAddr];
+                                     size_t maxLen = pcPackData.size() - strAddr;
+                                     size_t sLen = 0;
+                                     while(sLen < maxLen && strStart[sLen] != 0) sLen++;
+                                     e.subItems.push_back(std::string(strStart, sLen));
+                                 } else {
+                                     e.subItems.push_back("Model_" + std::to_string(e.subItems.size()));
+                                 }
+                             }
+                         }
+                     }
+                 }
+             }
+        }
         entries.push_back(e);
         br.Seek(start + (counter + 1) * 16);
         counter++;
@@ -367,23 +404,214 @@ void SpiderManTool::ExtractFile(int index) {
     }
 }
 
+void SpiderManTool::InitModelPreview() {
+    if (modelFbo != 0) return;
+
+    glGenFramebuffers(1, &modelFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, modelFbo);
+
+    glGenTextures(1, &previewTextureId);
+    glBindTexture(GL_TEXTURE_2D, previewTextureId);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 800, 600, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, previewTextureId, 0);
+
+    glGenRenderbuffers(1, &modelRbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, modelRbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 800, 600);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, modelRbo);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    const char* vShaderCode = "#version 130\n"
+        "in vec3 pos; in vec3 norm; out vec3 Normal; uniform mat4 model; uniform mat4 view; uniform mat4 projection; void main(){ Normal = mat3(model)*norm; gl_Position = projection * view * model * vec4(pos,1.0); }";
+    const char* fShaderCode = "#version 130\n"
+        "in vec3 Normal; out vec4 color; void main(){ vec3 L = normalize(vec3(0.5, 1.0, 1.0)); float diff = max(dot(normalize(Normal), L), 0.2); color = vec4(diff, diff, diff, 1.0); }";
+
+    unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertex, 1, &vShaderCode, NULL);
+    glCompileShader(vertex);
+
+    unsigned int fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragment, 1, &fShaderCode, NULL);
+    glCompileShader(fragment);
+
+    modelProgram = glCreateProgram();
+    glAttachShader(modelProgram, vertex);
+    glAttachShader(modelProgram, fragment);
+    glBindAttribLocation(modelProgram, 0, "pos");
+    glBindAttribLocation(modelProgram, 1, "norm");
+    glLinkProgram(modelProgram);
+
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+}
+
+void SpiderManTool::LoadModelToGL(int index) {
+    if (index < 0 || index >= entries.size()) return;
+    const auto& e = entries[index];
+
+    for (auto& m : previewMeshes) {
+        glDeleteVertexArrays(1, &m.vao);
+        glDeleteBuffers(1, &m.vbo);
+        glDeleteBuffers(1, &m.ebo);
+    }
+    previewMeshes.clear();
+
+    std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+    BinaryReader br(pcmData);
+    br.Seek(8);
+    uint32_t num = br.Read<uint32_t>();
+    uint32_t ofs = br.Read<uint32_t>();
+    br.Seek(ofs);
+    struct Info { uint16_t u1, type; uint32_t offset, u2; };
+    std::vector<Info> infos;
+    for(uint32_t i=0; i<num; i++) {
+        Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
+    }
+
+    struct Vertex { float x,y,z; float nx,ny,nz; };
+
+    for(auto& inf : infos) {
+        if (inf.type != 512) continue;
+        br.Seek(inf.offset);
+        br.Skip(8);
+        uint32_t numSm = br.Read<uint32_t>();
+        uint32_t infSmOfs = br.Read<uint32_t>();
+        br.Seek(infSmOfs);
+        std::vector<uint32_t> smOffsets;
+        for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
+        for(uint32_t smOfs : smOffsets) {
+            br.Seek(smOfs);
+            br.Skip(32); uint32_t itype = br.Read<uint32_t>(); uint32_t inum = br.Read<uint32_t>(); uint32_t iofs = br.Read<uint32_t>();
+            br.Skip(4); uint32_t vnum = br.Read<uint32_t>(); uint32_t vofs = br.Read<uint32_t>();
+            br.Skip(8); uint32_t stride = br.Read<uint32_t>();
+
+            br.Seek(vofs);
+            std::vector<Vertex> vertices;
+            for(uint32_t v=0; v<vnum; v++) {
+                size_t startV = br.Tell();
+                Vertex vert;
+                vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
+                if (stride == 64) {
+                    br.Seek(startV + 12);
+                    vert.nx = br.Read<float>(); vert.ny = br.Read<float>(); vert.nz = br.Read<float>();
+                } else {
+                    vert.nx = 0; vert.ny = 0; vert.nz = 1;
+                }
+                vertices.push_back(vert);
+                br.Seek(startV + stride);
+            }
+            br.Seek(iofs);
+            std::vector<uint16_t> indices;
+            std::vector<uint16_t> rawIndices;
+            for(uint32_t i=0; i<inum; i++) rawIndices.push_back(br.Read<uint16_t>());
+            if (itype != 4) {
+                 for (size_t k = 0; k < rawIndices.size() - 2; k++) {
+                    uint16_t v1 = rawIndices[k], v2 = rawIndices[k+1], v3 = rawIndices[k+2];
+                    if (v1==v2||v2==v3||v1==v3) continue;
+                    if (k%2==0) { indices.push_back(v1); indices.push_back(v2); indices.push_back(v3); }
+                    else { indices.push_back(v1); indices.push_back(v3); indices.push_back(v2); }
+                }
+            } else indices = rawIndices;
+
+            RenderMesh mesh;
+            mesh.indexCount = (int)indices.size();
+            glGenVertexArrays(1, &mesh.vao);
+            glGenBuffers(1, &mesh.vbo);
+            glGenBuffers(1, &mesh.ebo);
+
+            glBindVertexArray(mesh.vao);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+            glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
+
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_STATIC_DRAW);
+
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3 * sizeof(float)));
+            glEnableVertexAttribArray(1);
+
+            glBindVertexArray(0);
+            previewMeshes.push_back(mesh);
+        }
+    }
+}
+
+void SpiderManTool::RenderModelPreview() {
+    if (previewMeshes.empty()) return;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, modelFbo);
+    glViewport(0, 0, 800, 600);
+    glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+
+    glUseProgram(modelProgram);
+
+    float fov = 1.0f;
+    float aspect = 800.0f / 600.0f;
+    float znear = 0.1f, zfar = 100.0f;
+    float proj[16] = {0};
+    float tanHalfFov = tan(fov / 2.0f);
+    proj[0] = 1.0f / (aspect * tanHalfFov);
+    proj[5] = 1.0f / tanHalfFov;
+    proj[10] = -(zfar + znear) / (zfar - znear);
+    proj[11] = -1.0f;
+    proj[14] = -(2.0f * zfar * znear) / (zfar - znear);
+
+    float view[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-10,1};
+    view[14] = -5.0f * (1.0f / modelZoom);
+
+    float cx = cos(modelRotX), sx = sin(modelRotX);
+    float cy = cos(modelRotY), sy = sin(modelRotY);
+    float model[16] = {
+        cy, sx*sy, -cx*sy, 0,
+        0, cx, sx, 0,
+        sy, -sx*cy, cx*cy, 0,
+        0, 0, 0, 1
+    };
+
+    glUniformMatrix4fv(glGetUniformLocation(modelProgram, "projection"), 1, GL_FALSE, proj);
+    glUniformMatrix4fv(glGetUniformLocation(modelProgram, "view"), 1, GL_FALSE, view);
+    glUniformMatrix4fv(glGetUniformLocation(modelProgram, "model"), 1, GL_FALSE, model);
+
+    for (const auto& m : previewMeshes) {
+        glBindVertexArray(m.vao);
+        glDrawElements(GL_TRIANGLES, m.indexCount, GL_UNSIGNED_SHORT, 0);
+    }
+    glBindVertexArray(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 void SpiderManTool::LoadPreview(int index) {
     if (index < 0 || index >= entries.size()) return;
     if (pcPackData.empty()) return;
-
     const auto& e = entries[index];
-    if (!e.isDds) {
-        Log("Not a DDS file.");
+
+    if (e.isPcm) {
+        if (previewTextureId != 0 && !isModelPreview) ClosePreview();
+        isModelPreview = true;
+        InitModelPreview();
+        LoadModelToGL(index);
+        previewWidth = 800;
+        previewHeight = 600;
+        showPreview = true;
+        Log("Model loaded: " + e.name);
         return;
     }
 
+    // ... DDS loading (existing code) ...
+    if (!e.isDds) { Log("Not a DDS/PCM file."); return; }
     if (previewTextureId != 0) ClosePreview();
+    isModelPreview = false;
 
     const uint8_t* data = &pcPackData[e.offset];
     if (e.size < sizeof(DDS_HEADER) + 4) return;
-
     uint32_t magic = *(uint32_t*)data;
-    if (magic != 0x20534444) return; // "DDS "
+    if (magic != 0x20534444) return;
 
     const DDS_HEADER* header = (const DDS_HEADER*)(data + 4);
     previewWidth = header->dwWidth;
@@ -391,42 +619,31 @@ void SpiderManTool::LoadPreview(int index) {
 
     uint32_t fourCC = header->ddspf.dwFourCC;
     GLenum format = 0;
-
-    // DXT1 = "DXT1", DXT3 = "DXT3", DXT5 = "DXT5"
     if (fourCC == 0x31545844) format = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
     else if (fourCC == 0x33545844) format = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
     else if (fourCC == 0x35545844) format = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
 
-    if (format == 0) {
-        Log("Unsupported DXT format.");
-        return;
-    }
-
+    if (format == 0) { Log("Unsupported DXT format."); return; }
     uint32_t blockSize = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
     uint32_t imageSize = ((previewWidth + 3) / 4) * ((previewHeight + 3) / 4) * blockSize;
-
-    if (e.size < 128 + imageSize) {
-        Log("DDS data too small.");
-        return;
-    }
 
     glGenTextures(1, &previewTextureId);
     glBindTexture(GL_TEXTURE_2D, previewTextureId);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
     glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, previewWidth, previewHeight, 0, imageSize, data + 128);
     glBindTexture(GL_TEXTURE_2D, 0);
-
     showPreview = true;
     Log("Preview loaded: " + e.name);
 }
 
 void SpiderManTool::ClosePreview() {
-    if (previewTextureId != 0) {
+    if (previewTextureId != 0 && !isModelPreview) {
         glDeleteTextures(1, &previewTextureId);
         previewTextureId = 0;
     }
+    // Don't delete TextureID if model preview (it belongs to FBO),
+    // unless we destroy FBO, but we reuse FBO.
     showPreview = false;
 }
 

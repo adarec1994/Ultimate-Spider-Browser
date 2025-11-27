@@ -105,39 +105,59 @@ void RenderUI(SpiderManTool& tool) {
             if (tool.selectedFileIndex == -1) ImGui::EndDisabled();
 
             ImGui::SameLine();
-            bool canPreview = (tool.selectedFileIndex != -1 && tool.entries[tool.selectedFileIndex].isDds);
+            bool canPreview = tool.selectedFileIndex != -1 && (tool.entries[tool.selectedFileIndex].isDds || tool.entries[tool.selectedFileIndex].isPcm);
             if (!canPreview) ImGui::BeginDisabled();
-            if (ImGui::Button("Preview DDS")) {
+            if (ImGui::Button("Preview")) {
                 tool.LoadPreview(tool.selectedFileIndex);
             }
             if (!canPreview) ImGui::EndDisabled();
 
             ImGui::Separator();
 
-            ImGui::Columns(2, "FileCols");
-            ImGui::Text("Name"); ImGui::NextColumn();
-            ImGui::Text("Type"); ImGui::NextColumn();
-            ImGui::Separator();
+            if (ImGui::BeginTable("FileTable", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                ImGui::TableHeadersRow();
 
-            for (int i = 0; i < tool.entries.size(); i++) {
-                const auto& e = tool.entries[i];
+                for (int i = 0; i < tool.entries.size(); i++) {
+                    const auto& e = tool.entries[i];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
 
-                bool isSelected = (tool.selectedFileIndex == i);
-                if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
-                    tool.selectedFileIndex = i;
+                    if (e.isPcm) {
+                        bool isSelected = (tool.selectedFileIndex == i);
+                        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanFullWidth;
+                        if (isSelected) flags |= ImGuiTreeNodeFlags_Selected;
+
+                        bool open = ImGui::TreeNodeEx((void*)(intptr_t)i, flags, "%s", e.name.c_str());
+                        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+                            tool.selectedFileIndex = i;
+                        }
+
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("PCM (Model)");
+
+                        if (open) {
+                            for(const auto& s : e.subItems) {
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0);
+                                ImGui::Text("  - %s", s.c_str());
+                            }
+                            ImGui::TreePop();
+                        }
+                    } else {
+                        bool isSelected = (tool.selectedFileIndex == i);
+                        if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
+                            tool.selectedFileIndex = i;
+                        }
+
+                        ImGui::TableSetColumnIndex(1);
+                        if (e.isDds) ImGui::Text("DDS (Texture)");
+                        else ImGui::Text("Data");
+                    }
                 }
-
-                ImGui::NextColumn();
-                if (e.isPcm) {
-                    ImGui::Text("PCM (Model)");
-                } else if (e.isDds) {
-                    ImGui::Text("DDS (Texture)");
-                } else {
-                    ImGui::Text("Data");
-                }
-                ImGui::NextColumn();
+                ImGui::EndTable();
             }
-            ImGui::Columns(1);
         } else {
             ImGui::TextDisabled("Select a pack on the left to view contents.");
         }
@@ -146,10 +166,37 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::Columns(1);
 
         if (tool.showPreview && tool.previewTextureId != 0) {
-            ImGui::OpenPopup("DDS Preview");
-            if (ImGui::BeginPopupModal("DDS Preview", &tool.showPreview, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (tool.isModelPreview) {
+                tool.RenderModelPreview();
+            }
+
+            ImGui::OpenPopup("Preview");
+            if (ImGui::BeginPopupModal("Preview", &tool.showPreview, ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Text("Size: %dx%d", tool.previewWidth, tool.previewHeight);
-                ImGui::Image((void*)(intptr_t)tool.previewTextureId, ImVec2((float)tool.previewWidth, (float)tool.previewHeight));
+
+                ImVec2 size((float)tool.previewWidth, (float)tool.previewHeight);
+                if (size.x > 800) { float r = 800/size.x; size.x *= r; size.y *= r; }
+                if (size.y > 600) { float r = 600/size.y; size.x *= r; size.y *= r; }
+
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                ImGui::Image((void*)(intptr_t)tool.previewTextureId, size, ImVec2(0,1), ImVec2(1,0)); // Flip Y for OpenGL FBO
+
+                if (tool.isModelPreview) {
+                    if (ImGui::IsItemActive() || ImGui::IsItemHovered()) {
+                        if (ImGui::IsMouseDragging(0)) {
+                            ImVec2 d = ImGui::GetMouseDragDelta(0);
+                            tool.modelRotY += d.x * 0.005f;
+                            tool.modelRotX += d.y * 0.005f;
+                            ImGui::ResetMouseDragDelta(0);
+                        }
+                        float wheel = ImGui::GetIO().MouseWheel;
+                        if (wheel != 0) {
+                            tool.modelZoom += wheel * 0.1f;
+                            if (tool.modelZoom < 0.1f) tool.modelZoom = 0.1f;
+                        }
+                    }
+                }
+
                 if (ImGui::Button("Close")) {
                     tool.showPreview = false;
                     ImGui::CloseCurrentPopup();
