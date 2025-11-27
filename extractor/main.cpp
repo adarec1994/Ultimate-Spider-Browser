@@ -4,9 +4,9 @@
 #include "SpiderManTool.h"
 #include "Interface.h"
 
-#include "dependencies/imgui/imgui.h"
-#include "dependencies/imgui/backends/imgui_impl_glfw.h"
-#include "dependencies/imgui/backends/imgui_impl_opengl3.h"
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
 
 int main(int, char**) {
     if (!glfwInit()) return 1;
@@ -19,6 +19,15 @@ int main(int, char**) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 8.0f;
+    style.ChildRounding = 8.0f;
+    style.FrameRounding = 8.0f;
+    style.GrabRounding = 8.0f;
+    style.PopupRounding = 8.0f;
+    style.ScrollbarRounding = 8.0f;
+
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 

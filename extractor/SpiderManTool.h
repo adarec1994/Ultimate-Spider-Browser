@@ -13,6 +13,7 @@ struct FileEntry {
     uint32_t size;
     std::string name;
     bool isPcm;
+    bool isDds;
 };
 
 class SpiderManTool {
@@ -23,6 +24,7 @@ public:
     std::string searchPath = ".";
     std::vector<fs::path> foundPacks;
     int selectedPackIndex = -1;
+    int selectedFileIndex = -1;
 
     std::map<uint32_t, std::string> dictionary;
     std::vector<FileEntry> entries;
@@ -31,6 +33,11 @@ public:
     uint32_t dataOffset = 0;
     std::string logBuffer;
 
+    unsigned int previewTextureId = 0;
+    int previewWidth = 0;
+    int previewHeight = 0;
+    bool showPreview = false;
+
     void Log(const std::string& msg);
     void SaveConfig();
     void LoadConfig();
@@ -38,5 +45,8 @@ public:
     void LoadDictionary(const std::string& path);
     void OpenPCPack(const std::string& path);
     void ExtractPack(const std::string& packPath, bool convertAll = false);
+    void ExtractFile(int index);
+    void LoadPreview(int index);
+    void ClosePreview();
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
 };

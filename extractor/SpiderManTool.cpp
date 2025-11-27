@@ -1,6 +1,45 @@
 #include "SpiderManTool.h"
+#define GL_GLEXT_PROTOTYPES
+#include <GLFW/glfw3.h>
 
-// --- GLBWriter Implementation ---
+// DDS Structs
+struct DDS_PIXELFORMAT {
+    uint32_t dwSize;
+    uint32_t dwFlags;
+    uint32_t dwFourCC;
+    uint32_t dwRGBBitCount;
+    uint32_t dwRBitMask;
+    uint32_t dwGBitMask;
+    uint32_t dwBBitMask;
+    uint32_t dwABitMask;
+};
+
+struct DDS_HEADER {
+    uint32_t dwSize;
+    uint32_t dwFlags;
+    uint32_t dwHeight;
+    uint32_t dwWidth;
+    uint32_t dwPitchOrLinearSize;
+    uint32_t dwDepth;
+    uint32_t dwMipMapCount;
+    uint32_t dwReserved1[11];
+    DDS_PIXELFORMAT ddspf;
+    uint32_t dwCaps;
+    uint32_t dwCaps2;
+    uint32_t dwCaps3;
+    uint32_t dwCaps4;
+    uint32_t dwReserved2;
+};
+
+#ifndef GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+#define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT 0x83F1
+#endif
+#ifndef GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
+#define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT 0x83F2
+#endif
+#ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
+#define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
+#endif
 
 void GLBWriter::AddMeshNode(const std::string& name, int meshIndex) {
     if (nodeCount > 0) nodesJson << ",";
@@ -114,8 +153,6 @@ void GLBWriter::WriteToFile(const std::string& path) {
     out.close();
 }
 
-// --- SpiderManTool Implementation ---
-
 void SpiderManTool::Log(const std::string& msg) {
     logBuffer += msg + "\n";
     std::cout << msg << std::endl;
@@ -187,6 +224,9 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
 void SpiderManTool::OpenPCPack(const std::string& path) {
     if (loadedPCPackPath == path) return;
 
+    ClosePreview(); // Close existing preview
+    selectedFileIndex = -1; // Reset selection
+
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) { Log("Failed to open " + path); return; }
 
@@ -220,6 +260,9 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     entries.clear();
     if (!found) { Log("Invalid PCPACK header."); return; }
 
+    // Map to track duplicate names: Name -> Count
+    std::map<std::string, int> nameCounts;
+
     br.Seek(start);
     int counter = 0;
     while (true) {
@@ -233,16 +276,41 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
         FileEntry e;
         e.hash = hash; e.type = type; e.offset = offset + dataOffset; e.size = fsize;
         e.isPcm = false;
+        e.isDds = false;
 
         if (dictionary.count(hash)) e.name = dictionary[hash];
         else { std::stringstream ss; ss << "Unknown_" << std::hex << hash; e.name = ss.str(); }
 
         if (fsize > 4) {
             const char* magicSig = (const char*)&pcPackData[e.offset];
-            if (strncmp(magicSig, "PCM ", 4) == 0) { e.name += ".pcm"; e.isPcm = true; }
-            else if (strncmp(magicSig, "DDS ", 4) == 0) e.name += ".dds";
+            if (strncmp(magicSig, "PCM ", 4) == 0) {
+                e.name += ".pcm";
+                e.isPcm = true;
+            }
+            else if (strncmp(magicSig, "DDS ", 4) == 0) {
+                e.name += ".dds";
+                e.isDds = true;
+            }
             else e.name += ".dat";
         }
+
+        // --- Handle Duplicates ---
+        std::string originalName = e.name;
+        if (nameCounts.count(originalName)) {
+            int idx = nameCounts[originalName];
+
+            // Insert suffix before extension
+            fs::path p(originalName);
+            std::string stem = p.stem().string();
+            std::string ext = p.extension().string();
+
+            e.name = stem + "_" + std::to_string(idx) + ext;
+            nameCounts[originalName]++;
+        } else {
+            nameCounts[originalName] = 0;
+        }
+        // -------------------------
+
         entries.push_back(e);
         br.Seek(start + (counter + 1) * 16);
         counter++;
@@ -273,6 +341,93 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
         }
     }
     Log("Extraction complete.");
+}
+
+void SpiderManTool::ExtractFile(int index) {
+    if (index < 0 || index >= entries.size()) return;
+    if (pcPackData.empty()) return;
+
+    const auto& e = entries[index];
+    fs::path p(loadedPCPackPath);
+    std::string folderName = p.stem().string() + "_extracted";
+    fs::path outDir = p.parent_path() / folderName;
+    fs::create_directories(outDir);
+
+    std::string outFilePath = (outDir / e.name).string();
+    std::ofstream out(outFilePath, std::ios::binary);
+    out.write((char*)&pcPackData[e.offset], e.size);
+    out.close();
+
+    if (e.isPcm) {
+        std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+        ConvertPCM(pcmData, outFilePath + ".glb");
+        Log("Extracted & Converted: " + e.name);
+    } else {
+        Log("Extracted: " + e.name);
+    }
+}
+
+void SpiderManTool::LoadPreview(int index) {
+    if (index < 0 || index >= entries.size()) return;
+    if (pcPackData.empty()) return;
+
+    const auto& e = entries[index];
+    if (!e.isDds) {
+        Log("Not a DDS file.");
+        return;
+    }
+
+    if (previewTextureId != 0) ClosePreview();
+
+    const uint8_t* data = &pcPackData[e.offset];
+    if (e.size < sizeof(DDS_HEADER) + 4) return;
+
+    uint32_t magic = *(uint32_t*)data;
+    if (magic != 0x20534444) return; // "DDS "
+
+    const DDS_HEADER* header = (const DDS_HEADER*)(data + 4);
+    previewWidth = header->dwWidth;
+    previewHeight = header->dwHeight;
+
+    uint32_t fourCC = header->ddspf.dwFourCC;
+    GLenum format = 0;
+
+    // DXT1 = "DXT1", DXT3 = "DXT3", DXT5 = "DXT5"
+    if (fourCC == 0x31545844) format = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+    else if (fourCC == 0x33545844) format = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+    else if (fourCC == 0x35545844) format = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+
+    if (format == 0) {
+        Log("Unsupported DXT format.");
+        return;
+    }
+
+    uint32_t blockSize = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
+    uint32_t imageSize = ((previewWidth + 3) / 4) * ((previewHeight + 3) / 4) * blockSize;
+
+    if (e.size < 128 + imageSize) {
+        Log("DDS data too small.");
+        return;
+    }
+
+    glGenTextures(1, &previewTextureId);
+    glBindTexture(GL_TEXTURE_2D, previewTextureId);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, previewWidth, previewHeight, 0, imageSize, data + 128);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    showPreview = true;
+    Log("Preview loaded: " + e.name);
+}
+
+void SpiderManTool::ClosePreview() {
+    if (previewTextureId != 0) {
+        glDeleteTextures(1, &previewTextureId);
+        previewTextureId = 0;
+    }
+    showPreview = false;
 }
 
 void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath) {
