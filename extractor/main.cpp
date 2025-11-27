@@ -11,10 +11,10 @@
 #include <iomanip>
 #include <cstring>
 
-#include "imgui.h"
-#include "ImGuiFileDialog.h"
-#include "backends/imgui_impl_glfw.h"
-#include "backends/imgui_impl_opengl3.h"
+#include "dependencies/imgui/imgui.h"
+#include "dependencies/imguifiledialog/ImGuiFileDialog.h"
+#include "dependencies/imgui/backends/imgui_impl_glfw.h"
+#include "dependencies/imgui/backends/imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
 
 namespace fs = std::filesystem;
