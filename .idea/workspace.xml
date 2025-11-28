@@ -65,8 +65,8 @@
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/CMakeLists.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/extractor/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Interface.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.h" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -349,7 +349,7 @@
       <workItem from="1764215800401" duration="238000" />
       <workItem from="1764234517888" duration="5112000" />
       <workItem from="1764306433246" duration="7000" />
-      <workItem from="1764306528389" duration="3963000" />
+      <workItem from="1764306528389" duration="4972000" />
     </task>
     <servers />
   </component>
@@ -360,16 +360,5 @@
     <isAutomaticCheckingOnLaunch value="false" />
     <isAutomaticFoundErrors value="true" />
     <isAutomaticReloadCMake value="true" />
-  </component>
-  <component name="XDebuggerManager">
-    <breakpoint-manager>
-      <breakpoints>
-        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
-          <url>file://$PROJECT_DIR$/extractor/SpiderManTool.h</url>
-          <line>8</line>
-          <option name="timeStamp" value="2" />
-        </line-breakpoint>
-      </breakpoints>
-    </breakpoint-manager>
   </component>
 </project>

@@ -28,6 +28,23 @@ struct RenderMesh {
     unsigned int textureId;
 };
 
+// --- New Structs for Displaying Info ---
+struct PCMSkeletonInfo {
+    uint32_t count = 0;
+    uint32_t offset = 0;
+};
+
+struct PCMMeshInfo {
+    uint32_t vCount;
+    uint32_t vOffset;
+    uint32_t iCount;
+    uint32_t iOffset;
+    uint32_t stride;
+    uint32_t primitiveType; // 4 = Triangles, 5 = Strip
+    bool hasUV;
+    bool hasBones;
+};
+
 class SpiderManTool {
 public:
     enum AppState { STATE_SPLASH, STATE_BROWSER };
@@ -54,6 +71,11 @@ public:
     // --- Hex Editor State ---
     bool showHexEditor = false;
     ImGuiHexEditorState hexEditor;
+
+    // --- PCM Analysis Data ---
+    std::vector<PCMMeshInfo> currentPcmInfos;
+    PCMSkeletonInfo currentPcmSkeleton; // Stores global skeleton info for the file
+    int currentPcmIndex = -1;
 
     unsigned int modelFbo = 0;
     unsigned int modelRbo = 0;
@@ -85,4 +107,5 @@ public:
     unsigned int LoadTextureFromHash(uint32_t hash);
 
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
+    void AnalyzePCM(int index);
 };

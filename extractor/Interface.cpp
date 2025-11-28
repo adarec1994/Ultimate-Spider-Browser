@@ -226,7 +226,7 @@ void RenderUI(SpiderManTool& tool) {
             }
         }
 
-        // --- HEX EDITOR WINDOW (Using Teselka Hex Editor) ---
+        // --- HEX EDITOR WINDOW ---
         if (tool.showHexEditor && tool.selectedFileIndex != -1 && !tool.pcPackData.empty()) {
             const auto& e = tool.entries[tool.selectedFileIndex];
 
@@ -237,15 +237,70 @@ void RenderUI(SpiderManTool& tool) {
 
                 std::string title = "Hex View: " + e.name + " (" + typeStr + ")";
 
-                ImGui::SetNextWindowSize(ImVec2(700, 500), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
                 if (ImGui::Begin(title.c_str(), &tool.showHexEditor)) {
-                    // Configure hex editor state
+
+                    bool showSidebar = e.isPcm;
+
+                    if (showSidebar) {
+                        tool.AnalyzePCM(tool.selectedFileIndex);
+
+                        ImGui::Columns(2, "HexCols");
+                        // Hex Editor gets remaining width, Panel gets 300
+                        ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 320);
+                    }
+
+                    // 1. Render Hex Editor (Left Column)
                     tool.hexEditor.Bytes = &tool.pcPackData[e.offset];
                     tool.hexEditor.MaxBytes = e.size;
 
-                    // Render the hex editor
+                    ImGui::BeginChild("HexPanel", ImVec2(0,0), false);
                     ImGui::BeginHexEditor("##HexEditor", &tool.hexEditor);
                     ImGui::EndHexEditor();
+                    ImGui::EndChild();
+
+                    if (showSidebar) {
+                        ImGui::NextColumn();
+
+                        // 2. Render Side Panel (Right Column)
+                        ImGui::BeginChild("SidePanel", ImVec2(0,0), false);
+
+                        ImGui::Text("Global Skeleton");
+                        ImGui::Separator();
+                        ImGui::Text("Bone Count: %u", tool.currentPcmSkeleton.count);
+                        if (tool.currentPcmSkeleton.count > 0) {
+                            ImGui::Text("Bone Offset: %u (0x%X)", tool.currentPcmSkeleton.offset, tool.currentPcmSkeleton.offset);
+                        } else {
+                            ImGui::TextDisabled("No skeleton data");
+                        }
+
+                        ImGui::Spacing();
+                        ImGui::Text("Mesh Info");
+                        ImGui::Separator();
+
+                        for(size_t i=0; i<tool.currentPcmInfos.size(); i++) {
+                            const auto& info = tool.currentPcmInfos[i];
+                            if (ImGui::CollapsingHeader(("Mesh " + std::to_string(i)).c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                                ImGui::Text("Vertices:   %u", info.vCount);
+                                ImGui::Text("V Offset:   0x%X", info.vOffset);
+                                ImGui::Text("Faces:      %u", info.iCount);
+                                ImGui::Text("F Offset:   0x%X", info.iOffset);
+                                ImGui::Text("Stride:     %u", info.stride);
+                                ImGui::Text("Prim Type:  %u", info.primitiveType);
+
+                                ImGui::Spacing();
+                                ImGui::Text("Attributes:");
+                                if (info.hasUV) ImGui::BulletText("UVs Present");
+                                else ImGui::TextDisabled("No UVs");
+
+                                if (info.hasBones) ImGui::BulletText("Bone Weights");
+                                else ImGui::TextDisabled("No Weights");
+                            }
+                        }
+                        ImGui::EndChild();
+
+                        ImGui::Columns(1);
+                    }
                 }
                 ImGui::End();
             } else {

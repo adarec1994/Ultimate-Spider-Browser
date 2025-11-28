@@ -45,7 +45,6 @@ struct DDS_HEADER {
 #endif
 
 // --- Helper: Matrix Inversion for 4x4 ---
-// GLTF requires Inverse Bind Matrices, but file likely provides Bind Pose.
 bool InvertMatrix(const float m[16], float invOut[16]) {
     float inv[16], det;
     int i;
@@ -75,8 +74,7 @@ bool InvertMatrix(const float m[16], float invOut[16]) {
     return true;
 }
 
-// --- Local Extended GLBWriter for Skinning ---
-// Replaces the basic one from Helpers.h just for this file to support Skins/Joints
+// --- Skinning GLB Writer ---
 class SkinningGLBWriter {
     struct Accessor {
         int bufferView; int componentType; int count; std::string type;
@@ -99,7 +97,6 @@ class SkinningGLBWriter {
 public:
     void AddMeshNode(const std::string& name, int meshIndex) {
         if (nodeCount > 0) nodesJson << ",";
-        // Attach skin 0 if joints exist
         nodesJson << "{\"name\":\"" << name << "\",\"mesh\":" << meshIndex;
         if (!jointIndices.empty()) nodesJson << ",\"skin\":0";
         nodesJson << "}";
@@ -150,7 +147,6 @@ public:
         meshesJson << "},\"indices\":" << indAcc << "}";
     }
 
-    // Pass ibmAccessor index to write the skin definition
     void WriteToFile(const std::string& path, int ibmAccessor = -1) {
         AlignBuffer();
         std::stringstream json;
@@ -207,98 +203,6 @@ public:
         out.close();
     }
 };
-
-// ... [GLBWriter from Helpers.h implementation removed or kept, doesn't matter since we use local class,
-//      but to prevent link errors for other files, we keep the original GLBWriter stubs if needed.
-//      For this specific file, we will just use the new SkinningGLBWriter in ConvertPCM.]
-
-// Re-implementing original GLBWriter methods to satisfy linker if Helpers.h declares them
-void GLBWriter::AddMeshNode(const std::string& name, int meshIndex) {
-    if (nodeCount > 0) nodesJson << ",";
-    nodesJson << "{\"name\":\"" << name << "\",\"mesh\":" << meshIndex << "}";
-    rootNodes.push_back(nodeCount++);
-}
-void GLBWriter::AddBoneNode(const std::string& name, const float* matrix) {
-    if (nodeCount > 0) nodesJson << ",";
-    nodesJson << "{\"name\":\"" << name << "\",\"matrix\":[";
-    for(int i=0; i<16; i++) nodesJson << matrix[i] << (i<15?",":"");
-    nodesJson << "]}";
-    rootNodes.push_back(nodeCount++);
-}
-int GLBWriter::AddBufferView(const void* data, size_t size, int target) {
-    AlignBuffer();
-    int offset = (int)buffer.size();
-    const uint8_t* ptr = (const uint8_t*)data;
-    buffer.insert(buffer.end(), ptr, ptr + size);
-    GLBBufferView bv; bv.buffer = 0; bv.byteOffset = offset; bv.byteLength = (int)size; bv.target = target;
-    bufferViews.push_back(bv);
-    return (int)bufferViews.size() - 1;
-}
-int GLBWriter::AddAccessor(int bufferView, int componentType, int count, const char* type, float* minVal, float* maxVal) {
-    GLBAccessor acc; acc.bufferView = bufferView; acc.componentType = componentType; acc.count = count; acc.type = type;
-    if (minVal) acc.min = { minVal[0], minVal[1], minVal[2] };
-    if (maxVal) acc.max = { maxVal[0], maxVal[1], maxVal[2] };
-    accessors.push_back(acc);
-    return (int)accessors.size() - 1;
-}
-int GLBWriter::StartMesh(const std::string& name) {
-    if (meshCount > 0) meshesJson << ",";
-    meshesJson << "{\"name\":\"" << name << "\",\"primitives\":[";
-    return meshCount++;
-}
-void GLBWriter::EndMesh() { meshesJson << "]}"; }
-void GLBWriter::AddPrimitive(int posAcc, int normAcc, int uvAcc, int indAcc, int jointAcc, int weightAcc) {
-    meshesJson << "{\"attributes\":{";
-    meshesJson << "\"POSITION\":" << posAcc;
-    if (normAcc >= 0) meshesJson << ",\"NORMAL\":" << normAcc;
-    if (uvAcc >= 0) meshesJson << ",\"TEXCOORD_0\":" << uvAcc;
-    if (jointAcc >= 0) meshesJson << ",\"JOINTS_0\":" << jointAcc;
-    if (weightAcc >= 0) meshesJson << ",\"WEIGHTS_0\":" << weightAcc;
-    meshesJson << "},\"indices\":" << indAcc << "}";
-}
-void GLBWriter::WriteToFile(const std::string& path) {
-    // ... Existing implementation ...
-    AlignBuffer();
-    std::stringstream json;
-    json << "{\"asset\":{\"version\":\"2.0\"},";
-    json << "\"scene\":0,\"scenes\":[{\"nodes\":[";
-    for (size_t i = 0; i < rootNodes.size(); i++) json << rootNodes[i] << (i < rootNodes.size() - 1 ? "," : "");
-    json << "]}],";
-    json << "\"nodes\":[" << nodesJson.str() << "],";
-    json << "\"meshes\":[" << meshesJson.str() << "],";
-    json << "\"accessors\":[";
-    for (size_t i = 0; i < accessors.size(); i++) {
-        auto& acc = accessors[i];
-        json << "{\"bufferView\":" << acc.bufferView << ",\"componentType\":" << acc.componentType
-             << ",\"count\":" << acc.count << ",\"type\":\"" << acc.type << "\"";
-        if (!acc.min.empty()) json << ",\"min\":[" << acc.min[0] << "," << acc.min[1] << "," << acc.min[2] << "],\"max\":[" << acc.max[0] << "," << acc.max[1] << "," << acc.max[2] << "]";
-        json << "}" << (i < accessors.size() - 1 ? "," : "");
-    }
-    json << "],";
-    json << "\"bufferViews\":[";
-    for (size_t i = 0; i < bufferViews.size(); i++) {
-        auto& bv = bufferViews[i];
-        json << "{\"buffer\":" << bv.buffer << ",\"byteOffset\":" << bv.byteOffset
-             << ",\"byteLength\":" << bv.byteLength << ",\"target\":" << bv.target << "}"
-             << (i < bufferViews.size() - 1 ? "," : "");
-    }
-    json << "],";
-    json << "\"buffers\":[{\"byteLength\":" << buffer.size() << "}]}";
-
-    std::string jsonStr = json.str();
-    while (jsonStr.size() % 4 != 0) jsonStr += " ";
-    uint32_t totalLen = 12 + 8 + (uint32_t)jsonStr.size() + 8 + (uint32_t)buffer.size();
-
-    std::ofstream out(path, std::ios::binary);
-    uint32_t magic = 0x46546C67; uint32_t version = 2;
-    out.write((char*)&magic, 4); out.write((char*)&version, 4); out.write((char*)&totalLen, 4);
-    uint32_t chunkLen = (uint32_t)jsonStr.size(); uint32_t chunkType = 0x4E4F534A;
-    out.write((char*)&chunkLen, 4); out.write((char*)&chunkType, 4); out.write(jsonStr.c_str(), chunkLen);
-    chunkLen = (uint32_t)buffer.size(); chunkType = 0x004E4942;
-    out.write((char*)&chunkLen, 4); out.write((char*)&chunkType, 4);
-    if (chunkLen > 0) out.write((char*)buffer.data(), chunkLen);
-    out.close();
-}
 
 void SpiderManTool::Log(const std::string& msg) {
     logBuffer += msg + "\n";
@@ -373,6 +277,8 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
 
     ClosePreview();
     selectedFileIndex = -1;
+    currentPcmInfos.clear();
+    currentPcmIndex = -1;
 
     for (auto& t : textureCache) {
         if (t.second != 0) glDeleteTextures(1, &t.second);
@@ -457,43 +363,6 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
             nameCounts[originalName] = 0;
         }
 
-        if (e.isPcm && e.size > 16) {
-             size_t pcmBase = e.offset;
-             if (pcmBase + 16 <= pcPackData.size()) {
-                 br.Seek(pcmBase + 8);
-                 uint32_t num = br.Read<uint32_t>();
-                 uint32_t dirOfs = br.Read<uint32_t>();
-
-                 size_t dirAddr = pcmBase + dirOfs;
-                 if (dirAddr < pcPackData.size()) {
-                     for(uint32_t k=0; k<num; k++) {
-                         if (dirAddr + k*12 + 12 > pcPackData.size()) break;
-
-                         br.Seek(dirAddr + k*12 + 2);
-                         uint16_t itemType = br.Read<uint16_t>();
-                         uint32_t objOfs = br.Read<uint32_t>();
-
-                         if (itemType == 512) {
-                             if (pcmBase + objOfs + 4 <= pcPackData.size()) {
-                                 br.Seek(pcmBase + objOfs);
-                                 uint32_t nameOfs = br.Read<uint32_t>();
-
-                                 if (nameOfs != 0 && pcmBase + nameOfs < pcPackData.size()) {
-                                     size_t strAddr = pcmBase + nameOfs;
-                                     const char* strStart = (const char*)&pcPackData[strAddr];
-                                     size_t maxLen = pcPackData.size() - strAddr;
-                                     size_t sLen = 0;
-                                     while(sLen < maxLen && strStart[sLen] != 0) sLen++;
-                                     e.subItems.push_back(std::string(strStart, sLen));
-                                 } else {
-                                     e.subItems.push_back("Model_" + std::to_string(e.subItems.size()));
-                                 }
-                             }
-                         }
-                     }
-                 }
-             }
-        }
         entries.push_back(e);
         br.Seek(start + (counter + 1) * 16);
         counter++;
@@ -1003,7 +872,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     }
 
     SkinningGLBWriter glb;
-    std::vector<float> allIBMs; // Accumulate all IBMs here
+    std::vector<float> allIBMs;
 
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
@@ -1033,7 +902,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                  if (InvertMatrix(mat, invMat)) {
                      for(int k=0; k<16; k++) allIBMs.push_back(invMat[k]);
                  } else {
-                     // Fallback identity if inversion fails
                      float id[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
                      for(int k=0; k<16; k++) allIBMs.push_back(id[k]);
                  }
@@ -1049,7 +917,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             br.Seek(smOfs);
             uint32_t smNameOfs = br.Read<uint32_t>();
 
-            // Fixed skip: 36 bytes for header
             br.Skip(36);
 
             uint32_t itype = br.Read<uint32_t>(); uint32_t inum = br.Read<uint32_t>(); uint32_t iofs = br.Read<uint32_t>();
@@ -1072,9 +939,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                     br.Seek(startV + 12); norm.push_back(br.Read<float>()); norm.push_back(br.Read<float>()); norm.push_back(br.Read<float>());
                     br.Seek(startV + 24); uvs.push_back(br.Read<float>()); uvs.push_back(1.0f - br.Read<float>());
 
-                    // --- READ SKINNING DATA ---
                     br.Seek(startV + 32); // Joints
-                    // Clamp indices to valid range (fixes 65535 crash)
                     for(int k=0; k<4; k++) {
                         float val = br.Read<float>();
                         int idx = (int)val;
@@ -1121,8 +986,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             if(!norm.empty()) normAcc = glb.AddAccessor(glb.AddBufferView(norm.data(), norm.size()*4, 34962), 5126, vnum, "VEC3");
             if(!uvs.empty()) uvAcc = glb.AddAccessor(glb.AddBufferView(uvs.data(), uvs.size()*4, 34962), 5126, vnum, "VEC2");
 
-            // Add Skinning Accessors
-            if(!joints.empty()) jointAcc = glb.AddAccessor(glb.AddBufferView(joints.data(), joints.size()*2, 34963), 5123, vnum, "VEC4"); // 5123 = Unsigned Short
+            if(!joints.empty()) jointAcc = glb.AddAccessor(glb.AddBufferView(joints.data(), joints.size()*2, 34963), 5123, vnum, "VEC4");
             if(!weights.empty()) weightAcc = glb.AddAccessor(glb.AddBufferView(weights.data(), weights.size()*4, 34962), 5126, vnum, "VEC4");
 
             int meshIdx = glb.StartMesh(smName);
@@ -1131,11 +995,114 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             glb.AddMeshNode(smName, meshIdx);
         }
     }
-    // Write File with IBM Accessor Index (needed for skinning definition)
+
     int ibmAccIndex = -1;
     if (!allIBMs.empty()) {
         ibmAccIndex = glb.AddAccessor(glb.AddBufferView(allIBMs.data(), allIBMs.size()*4, 0), 5126, (int)allIBMs.size() / 16, "MAT4");
     }
     glb.WriteToFile(outPath, ibmAccIndex);
     Log("Converted GLB (Skinned): " + fs::path(outPath).filename().string());
+}
+
+// --- Analyzes PCM for Display ---
+void SpiderManTool::AnalyzePCM(int index) {
+    if (index == currentPcmIndex && !currentPcmInfos.empty()) return;
+    currentPcmInfos.clear();
+    currentPcmIndex = index;
+    // Reset skeleton info
+    currentPcmSkeleton = PCMSkeletonInfo();
+
+    if (index < 0 || index >= entries.size()) return;
+    const auto& e = entries[index];
+    if (e.offset + e.size > pcPackData.size()) return;
+
+    // Create temporary PCM data slice to match offset logic
+    std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+    BinaryReader br(pcmData);
+
+    if (8 + 4 > pcmData.size()) return;
+    br.Seek(8);
+    uint32_t num = br.Read<uint32_t>();
+    uint32_t ofs = br.Read<uint32_t>();
+    if (ofs >= pcmData.size()) return;
+
+    br.Seek(ofs);
+    struct Info { uint16_t u1, type; uint32_t offset, u2; };
+    std::vector<Info> infos;
+    for(uint32_t i=0; i<num; i++) {
+        Info inf;
+        inf.u1 = br.Read<uint16_t>();
+        inf.type = br.Read<uint16_t>();
+        inf.offset = br.Read<uint32_t>();
+        inf.u2 = br.Read<uint32_t>();
+        infos.push_back(inf);
+    }
+
+    for(auto& inf : infos) {
+        if (inf.type != 512) continue;
+        if (inf.offset + 20 > pcmData.size()) continue;
+
+        br.Seek(inf.offset);
+        uint32_t nameOfs = br.Read<uint32_t>();
+        br.Skip(4);
+        uint32_t numSm = br.Read<uint32_t>();
+        uint32_t infSmOfs = br.Read<uint32_t>();
+
+        // --- READ BONES (New Header Check) ---
+        uint32_t numBn = br.Read<uint32_t>();
+        uint32_t ofsBn = br.Read<uint32_t>();
+
+        // If we haven't stored global skeleton info yet, store it from the first model found
+        if (currentPcmSkeleton.count == 0 && numBn > 0) {
+            currentPcmSkeleton.count = numBn;
+            currentPcmSkeleton.offset = ofsBn;
+        }
+
+        if (infSmOfs >= pcmData.size()) continue;
+
+        br.Seek(infSmOfs);
+        std::vector<uint32_t> smOffsets;
+        for(uint32_t s=0; s<numSm; s++) {
+            br.Skip(4);
+            smOffsets.push_back(br.Read<uint32_t>());
+        }
+
+        for(uint32_t smOfs : smOffsets) {
+            if (smOfs + 64 > pcmData.size()) continue;
+
+            br.Seek(smOfs);
+            br.Skip(40); // Skip name + padding + unks
+
+            uint32_t itype = br.Read<uint32_t>();
+            uint32_t inum = br.Read<uint32_t>();
+            uint32_t iofs = br.Read<uint32_t>();
+            br.Skip(4);
+            uint32_t vnum = br.Read<uint32_t>();
+            uint32_t vofs = br.Read<uint32_t>();
+            br.Skip(8);
+            uint32_t stride = br.Read<uint32_t>();
+
+            PCMMeshInfo info;
+            info.primitiveType = itype;
+            info.iCount = inum;
+            info.iOffset = iofs;
+            info.vCount = vnum;
+            info.vOffset = vofs;
+            info.stride = stride;
+
+            // Heuristic for UV/Bones based on stride
+            if (stride == 64) {
+                info.hasUV = true;
+                info.hasBones = true;
+            } else if (stride == 24) {
+                info.hasUV = true;
+                info.hasBones = false;
+            } else {
+                info.hasUV = false;
+                info.hasBones = false;
+            }
+
+            currentPcmInfos.push_back(info);
+        }
+    }
 }
