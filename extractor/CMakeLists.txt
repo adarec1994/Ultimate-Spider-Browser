@@ -11,28 +11,27 @@ find_package(OpenGL REQUIRED)
 
 include(FetchContent)
 
-# --- 1. Fetch GLAD (Manual Populate) ---
-FetchContent_Declare(
-        glad
-        URL https://github.com/libigl/libigl-glad/archive/refs/heads/master.zip
-)
-# Explicitly populate the content to ensure glad_SOURCE_DIR is defined in this scope
-FetchContent_GetProperties(glad)
-if(NOT glad_POPULATED)
-    FetchContent_Populate(glad)
-endif()
-
-# Create the library manually using the exposed variable
-add_library(glad STATIC ${glad_SOURCE_DIR}/src/glad.c)
-target_include_directories(glad PUBLIC ${glad_SOURCE_DIR}/include)
-
-# --- 2. Fetch GLFW ---
+# --- 1. Fetch GLFW ---
 FetchContent_Declare(
         glfw
         GIT_REPOSITORY https://github.com/glfw/glfw
         GIT_TAG        3.3.8
 )
 FetchContent_MakeAvailable(glfw)
+
+# --- 2. Fetch Glad ---
+FetchContent_Declare(
+        glad
+        GIT_REPOSITORY https://github.com/libigl/libigl-glad.git
+        GIT_TAG        09b4969c56779f7ddf8e6176ec1873184aec890f
+)
+FetchContent_GetProperties(glad)
+if(NOT glad_POPULATED)
+    FetchContent_Populate(glad)
+endif()
+
+add_library(glad STATIC ${glad_SOURCE_DIR}/src/glad.c)
+target_include_directories(glad PUBLIC ${glad_SOURCE_DIR}/include)
 
 # --- 3. Fetch ImGui ---
 FetchContent_Declare(
@@ -56,6 +55,14 @@ if(NOT imguifiledialog_POPULATED)
     FetchContent_Populate(ImGuiFileDialog)
 endif()
 
+# --- 5. Fetch Teselka ImGui Hex Editor ---
+FetchContent_Declare(
+        imgui_hex_editor
+        GIT_REPOSITORY https://github.com/Teselka/imgui_hex_editor
+        GIT_TAG        main
+)
+FetchContent_MakeAvailable(imgui_hex_editor)
+
 # --- Build ImGui Library ---
 add_library(imgui STATIC
         ${imgui_SOURCE_DIR}/imgui.cpp
@@ -71,11 +78,9 @@ target_include_directories(imgui PUBLIC
         ${imgui_SOURCE_DIR}
         ${imgui_SOURCE_DIR}/backends
         ${glfw_SOURCE_DIR}/include
-        ${glad_SOURCE_DIR}/include
 )
 
 target_link_libraries(imgui PUBLIC glfw glad OpenGL::GL)
-target_compile_definitions(imgui PRIVATE IMGUI_IMPL_OPENGL_LOADER_GLAD)
 
 # --- Main Executable ---
 add_executable(USM
@@ -83,6 +88,7 @@ add_executable(USM
         SpiderManTool.cpp
         Interface.cpp
         ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
+        ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp # <--- ADDED: Pointing to the correct .cpp filename
 )
 
 target_compile_definitions(USM PRIVATE USE_STD_FILESYSTEM)
@@ -92,11 +98,12 @@ target_include_directories(USM PRIVATE
         ${imgui_SOURCE_DIR}/backends
         ${glfw_SOURCE_DIR}/include
         ${imguifiledialog_SOURCE_DIR}
-        ${glad_SOURCE_DIR}/include
+        ${imgui_hex_editor_SOURCE_DIR}
 )
 
-target_link_libraries(USM PRIVATE imgui glad glfw OpenGL::GL)
+target_link_libraries(USM PRIVATE imgui glfw glad OpenGL::GL)
 
+# --- Copy Dictionary File ---
 if(EXISTS "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt")
     configure_file(
             "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt"

@@ -141,6 +141,15 @@ void RenderUI(SpiderManTool& tool) {
             }
             if (!canPreview) ImGui::EndDisabled();
 
+            // --- HEX VIEW BUTTON ---
+            ImGui::SameLine();
+            if (tool.selectedFileIndex == -1) ImGui::BeginDisabled();
+            if (ImGui::Button("Hex View")) {
+                tool.showHexEditor = true;
+            }
+            if (tool.selectedFileIndex == -1) ImGui::EndDisabled();
+            // -----------------------
+
             ImGui::Separator();
 
             if (ImGui::BeginTable("FileTable", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
@@ -153,37 +162,15 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
 
-                    if (e.isPcm) {
-                        bool isSelected = (tool.selectedFileIndex == i);
-                        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanFullWidth;
-                        if (isSelected) flags |= ImGuiTreeNodeFlags_Selected;
-
-                        bool open = ImGui::TreeNodeEx((void*)(intptr_t)i, flags, "%s", e.name.c_str());
-                        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-                            tool.selectedFileIndex = i;
-                        }
-
-                        ImGui::TableSetColumnIndex(1);
-                        ImGui::Text("PCM (Model)");
-
-                        if (open) {
-                            for(const auto& s : e.subItems) {
-                                ImGui::TableNextRow();
-                                ImGui::TableSetColumnIndex(0);
-                                ImGui::Text("  - %s", s.c_str());
-                            }
-                            ImGui::TreePop();
-                        }
-                    } else {
-                        bool isSelected = (tool.selectedFileIndex == i);
-                        if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
-                            tool.selectedFileIndex = i;
-                        }
-
-                        ImGui::TableSetColumnIndex(1);
-                        if (e.isDds) ImGui::Text("DDS (Texture)");
-                        else ImGui::Text("Data");
+                    bool isSelected = (tool.selectedFileIndex == i);
+                    if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
+                        tool.selectedFileIndex = i;
                     }
+
+                    ImGui::TableSetColumnIndex(1);
+                    if (e.isPcm) ImGui::Text("PCM (Model)");
+                    else if (e.isDds) ImGui::Text("DDS (Texture)");
+                    else ImGui::Text("Data");
                 }
                 ImGui::EndTable();
             }
@@ -194,6 +181,7 @@ void RenderUI(SpiderManTool& tool) {
 
         ImGui::Columns(1);
 
+        // --- PREVIEW WINDOW ---
         if (tool.showPreview && tool.previewTextureId != 0) {
             if (tool.isModelPreview) {
                 tool.RenderModelPreview();
@@ -235,6 +223,33 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndPopup();
+            }
+        }
+
+        // --- HEX EDITOR WINDOW (Using Teselka Hex Editor) ---
+        if (tool.showHexEditor && tool.selectedFileIndex != -1 && !tool.pcPackData.empty()) {
+            const auto& e = tool.entries[tool.selectedFileIndex];
+
+            if (e.offset + e.size <= tool.pcPackData.size()) {
+                std::string typeStr = "Data";
+                if (e.isPcm) typeStr = "PCM";
+                else if (e.isDds) typeStr = "DDS";
+
+                std::string title = "Hex View: " + e.name + " (" + typeStr + ")";
+
+                ImGui::SetNextWindowSize(ImVec2(700, 500), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin(title.c_str(), &tool.showHexEditor)) {
+                    // Configure hex editor state
+                    tool.hexEditor.Bytes = &tool.pcPackData[e.offset];
+                    tool.hexEditor.MaxBytes = e.size;
+
+                    // Render the hex editor
+                    ImGui::BeginHexEditor("##HexEditor", &tool.hexEditor);
+                    ImGui::EndHexEditor();
+                }
+                ImGui::End();
+            } else {
+                tool.showHexEditor = false;
             }
         }
     }

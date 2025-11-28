@@ -4,6 +4,7 @@
 #include <map>
 #include <iostream>
 #include <glad/glad.h>
+#include "imgui_hex.h"
 
 namespace fs = std::filesystem;
 
@@ -49,6 +50,10 @@ public:
     int previewHeight = 0;
     bool showPreview = false;
     bool isModelPreview = false;
+
+    // --- Hex Editor State ---
+    bool showHexEditor = false;
+    ImGuiHexEditorState hexEditor;
 
     unsigned int modelFbo = 0;
     unsigned int modelRbo = 0;
