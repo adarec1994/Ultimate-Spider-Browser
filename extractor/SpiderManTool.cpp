@@ -5,6 +5,8 @@
 #include <cstring>
 #include <algorithm>
 #include <sstream>
+#include <fstream>
+#include <cctype>
 
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
@@ -44,7 +46,6 @@ struct DDS_HEADER {
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
 #endif
 
-// --- Helper: Matrix Inversion for 4x4 ---
 bool InvertMatrix(const float m[16], float invOut[16]) {
     float inv[16], det;
     int i;
@@ -74,7 +75,6 @@ bool InvertMatrix(const float m[16], float invOut[16]) {
     return true;
 }
 
-// --- Skinning GLB Writer ---
 class SkinningGLBWriter {
     struct Accessor {
         int bufferView; int componentType; int count; std::string type;
@@ -108,7 +108,7 @@ public:
         nodesJson << "{\"name\":\"" << name << "\",\"matrix\":[";
         for(int i=0; i<16; i++) nodesJson << matrix[i] << (i<15?",":"");
         nodesJson << "]}";
-        jointIndices.push_back(nodeCount); // Track this as a bone
+        jointIndices.push_back(nodeCount);
         rootNodes.push_back(nodeCount++);
     }
 
@@ -152,12 +152,10 @@ public:
         std::stringstream json;
         json << "{\"asset\":{\"version\":\"2.0\"},";
 
-        // Scene
         json << "\"scene\":0,\"scenes\":[{\"nodes\":[";
         for (size_t i = 0; i < rootNodes.size(); i++) json << rootNodes[i] << (i < rootNodes.size() - 1 ? "," : "");
         json << "]}],";
 
-        // Skins
         if (!jointIndices.empty()) {
             json << "\"skins\":[{\"inverseBindMatrices\":" << ibmAccessor << ",\"joints\":[";
             for (size_t i = 0; i < jointIndices.size(); i++) json << jointIndices[i] << (i < jointIndices.size() - 1 ? "," : "");
@@ -203,6 +201,13 @@ public:
         out.close();
     }
 };
+
+static std::string StrToLower(const std::string& str) {
+    std::string lower = str;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return lower;
+}
 
 void SpiderManTool::Log(const std::string& msg) {
     logBuffer += msg + "\n";
@@ -537,19 +542,17 @@ void SpiderManTool::InitModelPreview() {
     glDeleteShader(fragment);
 }
 
-void SpiderManTool::LoadModelToGL(int index) {
-    if (index < 0 || index >= entries.size()) return;
-    const auto& e = entries[index];
+bool SpiderManTool::IsWorldPack(const std::string& name) {
+    return name.length() == 2;
+}
 
-    for (auto& m : previewMeshes) {
-        if (m.vao) glDeleteVertexArrays(1, &m.vao);
-        if (m.vbo) glDeleteBuffers(1, &m.vbo);
-        if (m.ebo) glDeleteBuffers(1, &m.ebo);
-    }
-    previewMeshes.clear();
+bool SpiderManTool::IsWorldInteriorPack(const std::string& name) {
+    std::string lower = StrToLower(name);
+    if (lower.length() < 6) return false;
+    return lower.substr(2, 4) == "_int";
+}
 
-    if (e.offset + e.size > pcPackData.size()) { Log("Model data out of bounds"); return; }
-    std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData) {
     BinaryReader br(pcmData);
 
     if (8 + 4 > pcmData.size()) return;
@@ -573,10 +576,6 @@ void SpiderManTool::LoadModelToGL(int index) {
     }
 
     struct Vertex { float x,y,z; float u,v; };
-
-    float minX = 1e9f, minY = 1e9f, minZ = 1e9f;
-    float maxX = -1e9f, maxY = -1e9f, maxZ = -1e9f;
-    bool hasVerts = false;
 
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
@@ -605,7 +604,7 @@ void SpiderManTool::LoadModelToGL(int index) {
             uint32_t zero1 = br.Read<uint32_t>();
             uint32_t unk0 = br.Read<uint32_t>();
             uint32_t unk0_ofs = br.Read<uint32_t>();
-            br.Skip(16); // 4 floats
+            br.Skip(16);
             uint32_t unk_uint = br.Read<uint32_t>();
             uint32_t zero2 = br.Read<uint32_t>();
             uint32_t itype = br.Read<uint32_t>();
@@ -641,11 +640,6 @@ void SpiderManTool::LoadModelToGL(int index) {
                 Vertex vert;
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
                 vert.u = 0; vert.v = 0;
-
-                if (vert.x < minX) minX = vert.x; if (vert.x > maxX) maxX = vert.x;
-                if (vert.y < minY) minY = vert.y; if (vert.y > maxY) maxY = vert.y;
-                if (vert.z < minZ) minZ = vert.z; if (vert.z > maxZ) maxZ = vert.z;
-                hasVerts = true;
 
                 if (stride == 64) {
                     if (startV + 24 + 8 <= pcmData.size()) {
@@ -700,28 +694,137 @@ void SpiderManTool::LoadModelToGL(int index) {
 
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
-            Log("Loaded Mesh. Verts: " + std::to_string(vnum) + " Mode: " + std::to_string(itype));
+        }
+    }
+}
+
+void SpiderManTool::LoadAllWorldGeometries() {
+    previewMeshes.clear();
+    Log("Loading World Context...");
+
+    for (const auto& path : foundPacks) {
+        std::string stem = StrToLower(path.stem().string());
+
+        bool isRelevant = IsWorldPack(stem) || IsWorldInteriorPack(stem);
+        if (!isRelevant) continue;
+
+        if (path.string() == loadedPCPackPath) {
+            // Already loaded pack
+            for (const auto& e : entries) {
+                if (!e.isPcm) continue;
+                std::string entryName = StrToLower(e.name);
+
+                // Match "stem" at the start of filename (case insensitive)
+                // e.g. "ae" matches "ae.pcm", "ae_int" matches "ae_int_1.pcm"
+                if (entryName.find(stem) == 0 && e.offset + e.size <= pcPackData.size()) {
+                    std::vector<uint8_t> data(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+                    AddMeshFromData(data);
+                }
+            }
+        }
+        else {
+            // External pack
+            std::ifstream file(path, std::ios::binary);
+            if (!file.is_open()) continue;
+
+            file.seekg(24);
+            uint32_t headerSize, dataOffset;
+            file.read((char*)&headerSize, 4);
+            file.read((char*)&dataOffset, 4);
+
+            // Scan for TOC start
+            size_t start = 0;
+            const uint32_t magic = 0xE3E3E3E3;
+            std::vector<uint8_t> tempHeader(200000);
+            file.seekg(0);
+            file.read((char*)tempHeader.data(), tempHeader.size());
+
+            for(size_t i=0; i<tempHeader.size()-4; i++) {
+                if (*(uint32_t*)&tempHeader[i] == magic) {
+                    bool confirm = false;
+                    for(size_t j=i+4; j<i+1000; j++) {
+                         if (*(uint32_t*)&tempHeader[j] == magic) {
+                             start = j + 4;
+                             confirm = true;
+                             break;
+                         }
+                    }
+                    if(confirm) break;
+                }
+            }
+
+            if (start == 0) continue;
+
+            file.seekg(start);
+
+            while (true) {
+                uint32_t hash, type, offset, size;
+                file.read((char*)&hash, 4);
+                file.read((char*)&type, 4);
+                file.read((char*)&offset, 4);
+                file.read((char*)&size, 4);
+
+                if (type >= 0x1000 || type == 0x0000) break;
+
+                if (size > 4) {
+                    // Check dictionary for name
+                    std::string entryName = "";
+                    if (dictionary.count(hash)) {
+                        entryName = StrToLower(dictionary[hash]);
+                    }
+
+                    // Only process if we know the name AND it starts with the pack stem
+                    if (!entryName.empty() && entryName.find(stem) == 0) {
+                        size_t filePos = file.tellg();
+                        size_t absOffset = dataOffset + offset;
+
+                        file.seekg(absOffset);
+                        uint32_t sig;
+                        file.read((char*)&sig, 4);
+
+                        if (sig == 0x204D4350) { // PCM Signature
+                            file.seekg(absOffset);
+                            std::vector<uint8_t> fileData(size);
+                            file.read((char*)fileData.data(), size);
+                            AddMeshFromData(fileData);
+                        }
+
+                        file.seekg(filePos);
+                    }
+                }
+            }
+            file.close();
         }
     }
 
-    if (hasVerts) {
-        modelCenter[0] = (minX + maxX) * 0.5f;
-        modelCenter[1] = (minY + maxY) * 0.5f;
-        modelCenter[2] = (minZ + maxZ) * 0.5f;
-        float dx = maxX - minX; float dy = maxY - minY; float dz = maxZ - minZ;
-        modelRadius = sqrt(dx*dx + dy*dy + dz*dz) * 0.5f;
-        if (modelRadius < 0.1f) modelRadius = 1.0f;
-    } else {
-        modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
-        modelRadius = 10.0f;
-    }
+    modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
+    modelRadius = 500.0f;
     modelZoom = 1.0f;
+    Log("World Context Loaded. Total meshes: " + std::to_string(previewMeshes.size()));
+}
+
+void SpiderManTool::LoadModelToGL(int index) {
+    if (index < 0 || index >= entries.size()) return;
+    const auto& e = entries[index];
+
+    for (auto& m : previewMeshes) {
+        if (m.vao) glDeleteVertexArrays(1, &m.vao);
+        if (m.vbo) glDeleteBuffers(1, &m.vbo);
+        if (m.ebo) glDeleteBuffers(1, &m.ebo);
+    }
+    previewMeshes.clear();
+
+    if (e.offset + e.size > pcPackData.size()) { Log("Model data out of bounds"); return; }
+
+    std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+    AddMeshFromData(pcmData);
+
+    modelRadius = 10.0f;
 }
 
 void SpiderManTool::RenderModelPreview() {
     glBindFramebuffer(GL_FRAMEBUFFER, modelFbo);
     glViewport(0, 0, 800, 600);
-    // Teal background
     glClearColor(0.0f, 0.5f, 0.5f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -808,7 +911,19 @@ void SpiderManTool::LoadPreview(int index) {
         if (previewTextureId != 0 && !isModelPreview) ClosePreview();
         isModelPreview = true;
         InitModelPreview();
-        LoadModelToGL(index);
+
+        fs::path p(loadedPCPackPath);
+        std::string packStem = StrToLower(p.stem().string());
+        std::string fileStem = StrToLower(fs::path(e.name).stem().string());
+
+        // Revised Condition: Starts with check instead of equality
+        // This handles cases like BH.pcpack containing BHC.pcm
+        if (IsWorldPack(packStem) && fileStem.find(packStem) == 0) {
+             LoadAllWorldGeometries();
+        } else {
+             LoadModelToGL(index);
+        }
+
         previewWidth = 800;
         previewHeight = 600;
         showPreview = true;
@@ -882,7 +997,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         uint32_t nameOfs = br.Read<uint32_t>();
         br.Skip(4); uint32_t numSm = br.Read<uint32_t>(); uint32_t infSmOfs = br.Read<uint32_t>();
 
-        // --- READ BONES (Skeleton) ---
         uint32_t numBn = br.Read<uint32_t>();
         uint32_t ofsBn = br.Read<uint32_t>();
         br.Skip(24);
@@ -893,11 +1007,9 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                  float mat[16];
                  for(int m=0; m<16; m++) mat[m] = br.Read<float>();
 
-                 // Add bone node (stores the bind pose matrix as node transform)
                  std::stringstream bnName; bnName << "bone_" << b;
                  glb.AddBoneNode(bnName.str(), mat);
 
-                 // GLTF Needs Inverse Bind Matrices
                  float invMat[16];
                  if (InvertMatrix(mat, invMat)) {
                      for(int k=0; k<16; k++) allIBMs.push_back(invMat[k]);
@@ -939,7 +1051,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                     br.Seek(startV + 12); norm.push_back(br.Read<float>()); norm.push_back(br.Read<float>()); norm.push_back(br.Read<float>());
                     br.Seek(startV + 24); uvs.push_back(br.Read<float>()); uvs.push_back(1.0f - br.Read<float>());
 
-                    br.Seek(startV + 32); // Joints
+                    br.Seek(startV + 32);
                     for(int k=0; k<4; k++) {
                         float val = br.Read<float>();
                         int idx = (int)val;
@@ -947,7 +1059,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                         joints.push_back((uint16_t)idx);
                     }
 
-                    br.Seek(startV + 48); // Weights
+                    br.Seek(startV + 48);
                     weights.push_back(br.Read<float>()); weights.push_back(br.Read<float>());
                     weights.push_back(br.Read<float>()); weights.push_back(br.Read<float>());
 
@@ -1004,19 +1116,16 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     Log("Converted GLB (Skinned): " + fs::path(outPath).filename().string());
 }
 
-// --- Analyzes PCM for Display ---
 void SpiderManTool::AnalyzePCM(int index) {
     if (index == currentPcmIndex && !currentPcmInfos.empty()) return;
     currentPcmInfos.clear();
     currentPcmIndex = index;
-    // Reset skeleton info
     currentPcmSkeleton = PCMSkeletonInfo();
 
     if (index < 0 || index >= entries.size()) return;
     const auto& e = entries[index];
     if (e.offset + e.size > pcPackData.size()) return;
 
-    // Create temporary PCM data slice to match offset logic
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
     BinaryReader br(pcmData);
 
@@ -1048,11 +1157,9 @@ void SpiderManTool::AnalyzePCM(int index) {
         uint32_t numSm = br.Read<uint32_t>();
         uint32_t infSmOfs = br.Read<uint32_t>();
 
-        // --- READ BONES (New Header Check) ---
         uint32_t numBn = br.Read<uint32_t>();
         uint32_t ofsBn = br.Read<uint32_t>();
 
-        // If we haven't stored global skeleton info yet, store it from the first model found
         if (currentPcmSkeleton.count == 0 && numBn > 0) {
             currentPcmSkeleton.count = numBn;
             currentPcmSkeleton.offset = ofsBn;
@@ -1071,7 +1178,7 @@ void SpiderManTool::AnalyzePCM(int index) {
             if (smOfs + 64 > pcmData.size()) continue;
 
             br.Seek(smOfs);
-            br.Skip(40); // Skip name + padding + unks
+            br.Skip(40);
 
             uint32_t itype = br.Read<uint32_t>();
             uint32_t inum = br.Read<uint32_t>();
@@ -1090,7 +1197,6 @@ void SpiderManTool::AnalyzePCM(int index) {
             info.vOffset = vofs;
             info.stride = stride;
 
-            // Heuristic for UV/Bones based on stride
             if (stride == 64) {
                 info.hasUV = true;
                 info.hasBones = true;

@@ -2,6 +2,41 @@
 #include "imgui.h"
 #include "ImGuiFileDialog.h"
 #include <algorithm>
+#include <string>
+#include <cctype> // Needed for tolower
+
+// --- Helper Functions for Categorization ---
+
+// Helper to handle case-insensitive comparisons
+std::string ToLower(const std::string& str) {
+    std::string lower = str;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return lower;
+}
+
+bool IsWorldPack(const std::string& stemName) {
+    // Strictly 2 letters (e.g., "AE", "QS", "BV")
+    return stemName.length() == 2;
+}
+
+bool IsWorldInteriorPack(const std::string& stemName) {
+    // Must be at least 6 chars to fit "xx_int"
+    if (stemName.length() < 6) return false;
+
+    // Convert to lowercase to handle "EG_INT_A" vs "eg_int_a"
+    std::string lowerName = ToLower(stemName);
+
+    // Check if characters at index 2-5 are "_int"
+    // This expects the format: [XX]_int... (where XX is 2 chars)
+    if (lowerName.substr(2, 4) == "_int") {
+        return true;
+    }
+
+    return false;
+}
+
+// -------------------------------------------
 
 void RenderUI(SpiderManTool& tool) {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -79,13 +114,53 @@ void RenderUI(SpiderManTool& tool) {
 
         ImGui::Text("PCPACK Files");
         ImGui::BeginChild("PackList", ImVec2(0, height), true);
-        for (int i = 0; i < tool.foundPacks.size(); i++) {
-            bool isSelected = (tool.selectedPackIndex == i);
-            if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
-                tool.selectedPackIndex = i;
-                tool.OpenPCPack(tool.foundPacks[i].string());
+
+        // --- Category 1: World (e.g., AE, QS) ---
+        if (ImGui::TreeNodeEx("World", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed)) {
+            for (int i = 0; i < tool.foundPacks.size(); i++) {
+                std::string stem = tool.foundPacks[i].stem().string();
+                if (IsWorldPack(stem)) {
+                    bool isSelected = (tool.selectedPackIndex == i);
+                    if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
+                        tool.selectedPackIndex = i;
+                        tool.OpenPCPack(tool.foundPacks[i].string());
+                    }
+                }
             }
+            ImGui::TreePop();
         }
+
+        // --- Category 2: World Interiors (e.g., AE_int, EG_INT_A) ---
+        if (ImGui::TreeNodeEx("World Interiors", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed)) {
+            for (int i = 0; i < tool.foundPacks.size(); i++) {
+                std::string stem = tool.foundPacks[i].stem().string();
+                if (IsWorldInteriorPack(stem)) {
+                    bool isSelected = (tool.selectedPackIndex == i);
+                    if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
+                        tool.selectedPackIndex = i;
+                        tool.OpenPCPack(tool.foundPacks[i].string());
+                    }
+                }
+            }
+            ImGui::TreePop();
+        }
+
+        // --- Category 3: Other ---
+        if (ImGui::TreeNodeEx("Other", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed)) {
+            for (int i = 0; i < tool.foundPacks.size(); i++) {
+                std::string stem = tool.foundPacks[i].stem().string();
+                // If it fits neither of the above, it goes here
+                if (!IsWorldPack(stem) && !IsWorldInteriorPack(stem)) {
+                    bool isSelected = (tool.selectedPackIndex == i);
+                    if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
+                        tool.selectedPackIndex = i;
+                        tool.OpenPCPack(tool.foundPacks[i].string());
+                    }
+                }
+            }
+            ImGui::TreePop();
+        }
+
         ImGui::EndChild();
 
         ImGui::NextColumn();
@@ -246,11 +321,9 @@ void RenderUI(SpiderManTool& tool) {
                         tool.AnalyzePCM(tool.selectedFileIndex);
 
                         ImGui::Columns(2, "HexCols");
-                        // Hex Editor gets remaining width, Panel gets 300
                         ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 320);
                     }
 
-                    // 1. Render Hex Editor (Left Column)
                     tool.hexEditor.Bytes = &tool.pcPackData[e.offset];
                     tool.hexEditor.MaxBytes = e.size;
 
@@ -262,9 +335,7 @@ void RenderUI(SpiderManTool& tool) {
                     if (showSidebar) {
                         ImGui::NextColumn();
 
-                        // 2. Render Side Panel (Right Column)
                         ImGui::BeginChild("SidePanel", ImVec2(0,0), false);
-
                         ImGui::Text("Global Skeleton");
                         ImGui::Separator();
                         ImGui::Text("Bone Count: %u", tool.currentPcmSkeleton.count);

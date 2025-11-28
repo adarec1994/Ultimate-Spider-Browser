@@ -28,7 +28,6 @@ struct RenderMesh {
     unsigned int textureId;
 };
 
-// --- New Structs for Displaying Info ---
 struct PCMSkeletonInfo {
     uint32_t count = 0;
     uint32_t offset = 0;
@@ -40,7 +39,7 @@ struct PCMMeshInfo {
     uint32_t iCount;
     uint32_t iOffset;
     uint32_t stride;
-    uint32_t primitiveType; // 4 = Triangles, 5 = Strip
+    uint32_t primitiveType;
     bool hasUV;
     bool hasBones;
 };
@@ -74,7 +73,7 @@ public:
 
     // --- PCM Analysis Data ---
     std::vector<PCMMeshInfo> currentPcmInfos;
-    PCMSkeletonInfo currentPcmSkeleton; // Stores global skeleton info for the file
+    PCMSkeletonInfo currentPcmSkeleton;
     int currentPcmIndex = -1;
 
     unsigned int modelFbo = 0;
@@ -102,10 +101,16 @@ public:
     void LoadPreview(int index);
     void ClosePreview();
     void InitModelPreview();
-    void LoadModelToGL(int index);
+    void LoadModelToGL(int index); // Legacy wrapper
     void RenderModelPreview();
     unsigned int LoadTextureFromHash(uint32_t hash);
 
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
     void AnalyzePCM(int index);
+
+    // --- NEW HELPERS ---
+    bool IsWorldPack(const std::string& name);
+    bool IsWorldInteriorPack(const std::string& name);
+    void AddMeshFromData(const std::vector<uint8_t>& pcmData);
+    void LoadAllWorldGeometries();
 };
