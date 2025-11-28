@@ -45,6 +45,12 @@ struct PCMMeshInfo {
     bool hasBones;
 };
 
+struct TextureLocation {
+    std::string packPath;
+    uint32_t offset;
+    uint32_t size;
+};
+
 class SpiderManTool {
 public:
     enum AppState { STATE_SPLASH, STATE_BROWSER };
@@ -62,11 +68,15 @@ public:
     uint32_t dataOffset = 0;
     std::string logBuffer;
 
-    unsigned int previewTextureId = 0;
-    int previewWidth = 0;
-    int previewHeight = 0;
-    bool showPreview = false;
+    unsigned int viewportTextureId = 0;
+    bool isModelLoaded = false;
     bool isModelPreview = false;
+
+
+    unsigned int ddsTextureId = 0;
+    int ddsWidth = 0;
+    int ddsHeight = 0;
+    bool showDdsPopup = false;
 
     bool showHexEditor = false;
     ImGuiHexEditorState hexEditor;
@@ -86,13 +96,11 @@ public:
     std::vector<RenderMesh> previewMeshes;
 
     std::map<uint32_t, unsigned int> textureCache;
+    std::map<uint32_t, TextureLocation> globalTextureIndex;
 
-    // --- RENDER STATE ---
-    bool isWorldMode = false; // Restored
-    float modelCenter[3] = {0.0f, 0.0f, 0.0f}; // Restored
-    float modelRadius = 1.0f; // Restored
-
-    // --- CAMERA STATE ---
+    bool isWorldMode = false;
+    float modelCenter[3] = {0.0f, 0.0f, 0.0f};
+    float modelRadius = 1.0f;
     float camPos[3] = {0.0f, 10.0f, 50.0f};
     float camFront[3] = {0.0f, 0.0f, -1.0f};
     float camUp[3] = {0.0f, 1.0f, 0.0f};
@@ -111,7 +119,7 @@ public:
     void ExtractFile(int index, bool asGlb = false);
 
     void LoadPreview(int index);
-    void ClosePreview();
+    void CloseDdsPreview();
     void InitModelPreview();
     void LoadModelToGL(int index);
     void RenderModelPreview();
@@ -125,6 +133,6 @@ public:
     bool IsWorldPack(const std::string& name);
     bool IsWorldInteriorPack(const std::string& name);
 
-    void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::function<unsigned int(uint32_t)> textureResolver = nullptr);
+    void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr);
     void LoadAllWorldGeometries();
 };

@@ -26,6 +26,7 @@ bool IsWorldInteriorPack(const std::string& stemName) {
 }
 
 void RenderUI(SpiderManTool& tool) {
+    // --- 1. SPLASH SCREEN ---
     if (tool.currentState == SpiderManTool::STATE_SPLASH) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -67,50 +68,71 @@ void RenderUI(SpiderManTool& tool) {
         return;
     }
 
-    if (tool.previewTextureId != 0 && tool.showPreview) {
-        ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(viewport->Pos);
-        ImGui::SetNextWindowSize(viewport->Size);
+    // --- 2. MAIN VIEWPORT (3D MODELS ONLY) ---
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
 
-        ImGuiWindowFlags bgFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                                   ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                                   ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
-                                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    ImGuiWindowFlags bgFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                               ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 
-        ImGui::Begin("Viewport", nullptr, bgFlags);
+    ImGui::Begin("Viewport", nullptr, bgFlags);
 
+    if (tool.isModelLoaded && tool.viewportTextureId != 0) {
         ImVec2 winSize = ImGui::GetContentRegionAvail();
-        ImGui::Image((void*)(intptr_t)tool.previewTextureId, winSize, ImVec2(0,1), ImVec2(1,0));
+        ImGui::Image((void*)(intptr_t)tool.viewportTextureId, winSize, ImVec2(0,1), ImVec2(1,0));
 
         bool uiHovered = ImGui::GetIO().WantCaptureMouse;
         bool isViewportActive = !uiHovered;
 
-        if (tool.isModelPreview) {
-            // Unified Camera Logic: Always use Fly Camera
-            tool.UpdateWorldCamera(isViewportActive);
+        // Camera Logic
+        tool.UpdateWorldCamera(isViewportActive);
 
-            // Instructions Overlay
-            ImGui::SetCursorPos(ImVec2(20, 20));
-            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up");
+        // Instructions
+        ImGui::SetCursorPos(ImVec2(20, 20));
+        ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up");
 
-            tool.RenderModelPreview();
-        }
-
-        ImGui::End();
-        ImGui::PopStyleVar(3);
+        tool.RenderModelPreview();
     } else {
-        ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(viewport->Pos);
-        ImGui::SetNextWindowSize(viewport->Size);
-        ImGui::Begin("Background", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::TextDisabled("Select a file to preview...");
+        ImGui::SetCursorPos(ImVec2(viewport->Size.x * 0.5f - 100, viewport->Size.y * 0.5f));
+        ImGui::TextDisabled("Select a 3D Model (.pcm) to preview");
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+
+
+    // --- 3. POPUP TEXTURE VIEWER (SEPARATE WINDOW) ---
+    if (tool.showDdsPopup && tool.ddsTextureId != 0) {
+        ImGui::SetNextWindowSize(ImVec2((float)tool.ddsWidth + 20, (float)tool.ddsHeight + 40), ImGuiCond_FirstUseEver);
+
+        std::string title = "Texture Preview (" + std::to_string(tool.ddsWidth) + "x" + std::to_string(tool.ddsHeight) + ")###TexturePop";
+
+        if (ImGui::Begin(title.c_str(), &tool.showDdsPopup)) {
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+
+            // Aspect Ratio Scaling for Window Resizing
+            float scale = 1.0f;
+            if (avail.x < tool.ddsWidth || avail.y < tool.ddsHeight) {
+                float scaleX = avail.x / tool.ddsWidth;
+                float scaleY = avail.y / tool.ddsHeight;
+                scale = (scaleX < scaleY) ? scaleX : scaleY;
+            }
+
+            ImGui::Image((void*)(intptr_t)tool.ddsTextureId,
+                         ImVec2(tool.ddsWidth * scale, tool.ddsHeight * scale));
+        }
         ImGui::End();
     }
 
+
+    // --- 4. ASSET BROWSER WINDOW ---
     ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Asset Browser", nullptr, 0)) {
 
@@ -208,15 +230,82 @@ void RenderUI(SpiderManTool& tool) {
     }
     ImGui::End();
 
+    // --- 5. HEX EDITOR WINDOW ---
     if (tool.showHexEditor && tool.selectedFileIndex != -1 && !tool.pcPackData.empty()) {
         const auto& e = tool.entries[tool.selectedFileIndex];
+
         if (e.offset + e.size <= tool.pcPackData.size()) {
-            ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("Hex Editor", &tool.showHexEditor)) {
+            std::string typeStr = "Data";
+            if (e.isPcm) typeStr = "PCM";
+            else if (e.isDds) typeStr = "DDS";
+
+            std::string title = "Hex View: " + e.name + " (" + typeStr + ")";
+
+            ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(title.c_str(), &tool.showHexEditor)) {
+
+                bool showSidebar = e.isPcm;
+
+                if (showSidebar) {
+                    // Analyze PCM data to populate structs
+                    tool.AnalyzePCM(tool.selectedFileIndex);
+
+                    ImGui::Columns(2, "HexCols");
+                    // Adjust column width: Hex Editor gets majority, Panel gets fixed amount
+                    ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 320);
+                }
+
+                // --- Left Column: The Hex Editor ---
                 tool.hexEditor.Bytes = &tool.pcPackData[e.offset];
                 tool.hexEditor.MaxBytes = e.size;
+
+                ImGui::BeginChild("HexPanel", ImVec2(0,0), false);
                 ImGui::BeginHexEditor("##Hex", &tool.hexEditor);
                 ImGui::EndHexEditor();
+                ImGui::EndChild();
+
+                if (showSidebar) {
+                    ImGui::NextColumn();
+
+                    // --- Right Column: The Detail Panel ---
+                    ImGui::BeginChild("SidePanel", ImVec2(0,0), false);
+
+                    ImGui::Text("Global Skeleton");
+                    ImGui::Separator();
+                    ImGui::Text("Bone Count: %u", tool.currentPcmSkeleton.count);
+                    if (tool.currentPcmSkeleton.count > 0) {
+                        ImGui::Text("Bone Offset: %u (0x%X)", tool.currentPcmSkeleton.offset, tool.currentPcmSkeleton.offset);
+                    } else {
+                        ImGui::TextDisabled("No skeleton data");
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Text("Mesh Info");
+                    ImGui::Separator();
+
+                    for(size_t i=0; i<tool.currentPcmInfos.size(); i++) {
+                        const auto& info = tool.currentPcmInfos[i];
+                        if (ImGui::CollapsingHeader(("Mesh " + std::to_string(i)).c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                            ImGui::Text("Vertices:   %u", info.vCount);
+                            ImGui::Text("V Offset:   0x%X", info.vOffset);
+                            ImGui::Text("Faces:      %u", info.iCount);
+                            ImGui::Text("F Offset:   0x%X", info.iOffset);
+                            ImGui::Text("Stride:     %u", info.stride);
+                            ImGui::Text("Prim Type:  %u", info.primitiveType);
+
+                            ImGui::Spacing();
+                            ImGui::Text("Attributes:");
+                            if (info.hasUV) ImGui::BulletText("UVs Present");
+                            else ImGui::TextDisabled("No UVs");
+
+                            if (info.hasBones) ImGui::BulletText("Bone Weights");
+                            else ImGui::TextDisabled("No Weights");
+                        }
+                    }
+                    ImGui::EndChild();
+
+                    ImGui::Columns(1); // Reset columns
+                }
             }
             ImGui::End();
         }

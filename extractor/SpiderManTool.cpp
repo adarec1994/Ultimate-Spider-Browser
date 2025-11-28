@@ -9,6 +9,27 @@
 #include <fstream>
 #include <cctype>
 
+// --- UTILS ---
+static std::string StrToLower(const std::string& str) {
+    std::string lower = str;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return lower;
+}
+
+static uint32_t CalculateCRC32(const std::string& str) {
+    std::string lower = StrToLower(str);
+    uint32_t crc = 0xFFFFFFFF;
+    for (char c : lower) {
+        crc ^= (uint8_t)c;
+        for (int i = 0; i < 8; i++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320;
+            else crc >>= 1;
+        }
+    }
+    return ~crc;
+}
+
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
     uint32_t dwFlags;
@@ -230,13 +251,6 @@ public:
         out.close();
     }
 };
-
-static std::string StrToLower(const std::string& str) {
-    std::string lower = str;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c){ return std::tolower(c); });
-    return lower;
-}
 
 void SpiderManTool::Log(const std::string& msg) {
     logBuffer += msg + "\n";
@@ -530,12 +544,15 @@ unsigned int SpiderManTool::LoadTextureFromHash(uint32_t hash) {
 }
 
 void SpiderManTool::InitModelPreview() {
-    if (previewTextureId == 0) {
+    if (viewportTextureId == 0) {
         if (msFbo != 0) glDeleteFramebuffers(1, &msFbo);
         if (msColor != 0) glDeleteTextures(1, &msColor);
         if (msRbo != 0) glDeleteRenderbuffers(1, &msRbo);
         if (modelFbo != 0) glDeleteFramebuffers(1, &modelFbo);
-        if (previewTextureId != 0) glDeleteTextures(1, &previewTextureId);
+
+        // Note: Do not delete viewportTextureId here, we are creating it below.
+        // If re-initializing, clean up first:
+        if (viewportTextureId != 0) glDeleteTextures(1, &viewportTextureId);
 
         int width = 3840;
         int height = 2160;
@@ -556,12 +573,12 @@ void SpiderManTool::InitModelPreview() {
         glGenFramebuffers(1, &modelFbo);
         glBindFramebuffer(GL_FRAMEBUFFER, modelFbo);
 
-        glGenTextures(1, &previewTextureId);
-        glBindTexture(GL_TEXTURE_2D, previewTextureId);
+        glGenTextures(1, &viewportTextureId);
+        glBindTexture(GL_TEXTURE_2D, viewportTextureId);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, previewTextureId, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, viewportTextureId, 0);
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
@@ -602,7 +619,7 @@ bool SpiderManTool::IsWorldInteriorPack(const std::string& name) {
     return lower.substr(2, 4) == "_int";
 }
 
-void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::function<unsigned int(uint32_t)> textureResolver) {
+void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver) {
     BinaryReader br(pcmData);
 
     if (8 + 4 > pcmData.size()) return;
@@ -677,6 +694,31 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::fu
                         tex = LoadTextureFromHash(u);
                     }
                     if (tex != 0) break;
+                }
+            }
+
+            if (tex == 0 && !modelName.empty()) {
+                std::string cleanName = modelName;
+                size_t lastDot = cleanName.find_last_of(".");
+                if(lastDot != std::string::npos) cleanName = cleanName.substr(0, lastDot);
+                cleanName = StrToLower(cleanName);
+
+                std::string diffName = cleanName + "_d.dds";
+                uint32_t diffHash = CalculateCRC32(diffName);
+
+                if (textureResolver) tex = textureResolver(diffHash);
+                else tex = LoadTextureFromHash(diffHash);
+
+                if (tex == 0) {
+                     for(const auto& e : entries) {
+                         if(e.isDds) {
+                             std::string lowerEntry = StrToLower(e.name);
+                             if(lowerEntry.find(cleanName) == 0) {
+                                 tex = LoadTextureFromHash(e.hash);
+                                 if(tex != 0) break;
+                             }
+                         }
+                     }
                 }
             }
 
@@ -755,6 +797,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::fu
 void SpiderManTool::LoadAllWorldGeometries() {
     previewMeshes.clear();
     isWorldMode = true;
+    globalTextureIndex.clear();
 
     camPos[0] = 0.0f; camPos[1] = 2000.0f; camPos[2] = 2000.0f;
     camFront[0] = 0.0f; camFront[1] = -0.5f; camFront[2] = -1.0f;
@@ -765,120 +808,128 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
     Log("Loading World Context...");
 
+    std::vector<std::pair<std::string, std::pair<uint32_t, uint32_t>>> pcmQueue;
+
     for (const auto& path : foundPacks) {
         std::string stem = StrToLower(path.stem().string());
-
         bool isRelevant = IsWorldPack(stem) || IsWorldInteriorPack(stem);
         if (!isRelevant) continue;
 
-        if (path.string() == loadedPCPackPath) {
-            for (const auto& e : entries) {
-                if (!e.isPcm) continue;
-                std::string entryName = StrToLower(e.name);
-                if (entryName.find(stem) == 0 && e.offset + e.size <= pcPackData.size()) {
-                    std::vector<uint8_t> data(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-                    AddMeshFromData(data);
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open()) continue;
+
+        file.seekg(24);
+        uint32_t headerSize, dataOffset;
+        file.read((char*)&headerSize, 4);
+        file.read((char*)&dataOffset, 4);
+
+        size_t start = 0;
+        const uint32_t magic = 0xE3E3E3E3;
+        std::vector<uint8_t> tempHeader(200000);
+        file.seekg(0);
+        file.read((char*)tempHeader.data(), tempHeader.size());
+
+        for(size_t i=0; i<tempHeader.size()-4; i++) {
+            if (*(uint32_t*)&tempHeader[i] == magic) {
+                bool confirm = false;
+                for(size_t j=i+4; j<i+1000; j++) {
+                     if (*(uint32_t*)&tempHeader[j] == magic) {
+                         start = j + 4;
+                         confirm = true;
+                         break;
+                     }
+                }
+                if(confirm) break;
+            }
+        }
+
+        if (start == 0) continue;
+
+        file.seekg(start);
+
+        while (true) {
+            uint32_t hash, type, offset, size;
+            file.read((char*)&hash, 4);
+            file.read((char*)&type, 4);
+            file.read((char*)&offset, 4);
+            file.read((char*)&size, 4);
+
+            if (type >= 0x1000 || type == 0x0000) break;
+
+            if (size > 4) {
+                size_t filePos = file.tellg();
+                uint32_t absOffset = (uint32_t)(dataOffset + offset);
+
+                file.seekg(absOffset);
+                uint32_t sig;
+                file.read((char*)&sig, 4);
+
+                if (sig == 0x204D4350) {
+                    std::string entryName = "";
+                    if (dictionary.count(hash)) entryName = StrToLower(dictionary[hash]);
+                    if (!entryName.empty() && entryName.find(stem) == 0) {
+                        pcmQueue.push_back({path.string(), {absOffset, size}});
+                    }
+                }
+                else if (sig == 0x20534444) {
+                    globalTextureIndex[hash] = {path.string(), absOffset, size};
+                }
+
+                file.seekg(filePos);
+            }
+        }
+        file.close();
+    }
+
+    Log("Index Complete. Textures: " + std::to_string(globalTextureIndex.size()) + ", Models: " + std::to_string(pcmQueue.size()));
+
+    std::sort(pcmQueue.begin(), pcmQueue.end(), [](const auto& a, const auto& b){
+        return a.first < b.first;
+    });
+
+    std::string currentPath = "";
+    std::ifstream currentFile;
+
+    auto globalResolver = [&](uint32_t texHash) -> unsigned int {
+        if (textureCache.count(texHash)) return textureCache[texHash];
+        if (globalTextureIndex.count(texHash)) {
+            auto& loc = globalTextureIndex[texHash];
+
+            std::ifstream texFile(loc.packPath, std::ios::binary);
+            if(texFile.is_open()) {
+                texFile.seekg(loc.offset);
+                std::vector<uint8_t> ddsData(loc.size);
+                texFile.read((char*)ddsData.data(), loc.size);
+                texFile.close();
+
+                unsigned int tex = LoadTextureFromData(ddsData);
+                if (tex != 0) {
+                    textureCache[texHash] = tex;
+                    return tex;
                 }
             }
         }
-        else {
-            std::ifstream file(path, std::ios::binary);
-            if (!file.is_open()) continue;
+        return 0;
+    };
 
-            file.seekg(24);
-            uint32_t headerSize, dataOffset;
-            file.read((char*)&headerSize, 4);
-            file.read((char*)&dataOffset, 4);
+    for(const auto& item : pcmQueue) {
+        if(item.first != currentPath) {
+            if(currentFile.is_open()) currentFile.close();
+            currentPath = item.first;
+            currentFile.open(currentPath, std::ios::binary);
+        }
 
-            size_t start = 0;
-            const uint32_t magic = 0xE3E3E3E3;
-            std::vector<uint8_t> tempHeader(200000);
-            file.seekg(0);
-            file.read((char*)tempHeader.data(), tempHeader.size());
+        if(currentFile.is_open()) {
+            currentFile.seekg(item.second.first);
+            std::vector<uint8_t> fileData(item.second.second);
+            currentFile.read((char*)fileData.data(), item.second.second);
 
-            for(size_t i=0; i<tempHeader.size()-4; i++) {
-                if (*(uint32_t*)&tempHeader[i] == magic) {
-                    bool confirm = false;
-                    for(size_t j=i+4; j<i+1000; j++) {
-                         if (*(uint32_t*)&tempHeader[j] == magic) {
-                             start = j + 4;
-                             confirm = true;
-                             break;
-                         }
-                    }
-                    if(confirm) break;
-                }
-            }
-
-            if (start == 0) continue;
-
-            file.seekg(start);
-
-            std::map<uint32_t, std::pair<uint32_t, uint32_t>> textureOffsets;
-            std::vector<std::pair<uint32_t, uint32_t>> pcmOffsets;
-
-            while (true) {
-                uint32_t hash, type, offset, size;
-                file.read((char*)&hash, 4);
-                file.read((char*)&type, 4);
-                file.read((char*)&offset, 4);
-                file.read((char*)&size, 4);
-
-                if (type >= 0x1000 || type == 0x0000) break;
-
-                if (size > 4) {
-                    size_t filePos = file.tellg();
-                    size_t absOffset = dataOffset + offset;
-
-                    file.seekg(absOffset);
-                    uint32_t sig;
-                    file.read((char*)&sig, 4);
-
-                    if (sig == 0x204D4350) {
-                        std::string entryName = "";
-                        if (dictionary.count(hash)) entryName = StrToLower(dictionary[hash]);
-                        if (!entryName.empty() && entryName.find(stem) == 0) {
-                            pcmOffsets.push_back({absOffset, size});
-                        }
-                    }
-                    else if (sig == 0x20534444) {
-                        textureOffsets[hash] = {absOffset, size};
-                    }
-
-                    file.seekg(filePos);
-                }
-            }
-
-            for(auto& pcm : pcmOffsets) {
-                file.seekg(pcm.first);
-                std::vector<uint8_t> fileData(pcm.second);
-                file.read((char*)fileData.data(), pcm.second);
-
-                auto resolver = [&](uint32_t texHash) -> unsigned int {
-                    if (textureCache.count(texHash)) return textureCache[texHash];
-                    if (textureOffsets.count(texHash)) {
-                        auto texInfo = textureOffsets[texHash];
-                        size_t currentPos = file.tellg();
-                        file.seekg(texInfo.first);
-                        std::vector<uint8_t> ddsData(texInfo.second);
-                        file.read((char*)ddsData.data(), texInfo.second);
-                        file.seekg(currentPos);
-
-                        unsigned int tex = LoadTextureFromData(ddsData);
-                        if (tex != 0) {
-                            textureCache[texHash] = tex;
-                            return tex;
-                        }
-                    }
-                    return 0;
-                };
-
-                AddMeshFromData(fileData, resolver);
-            }
-
-            file.close();
+            // Pass empty string for modelName as we don't have it easily available here
+            // unless we store it in pcmQueue, but world textures usually link correctly via hash.
+            AddMeshFromData(fileData, "", globalResolver);
         }
     }
+    if(currentFile.is_open()) currentFile.close();
 
     Log("World Context Loaded. Total meshes: " + std::to_string(previewMeshes.size()));
 }
@@ -898,7 +949,7 @@ void SpiderManTool::LoadModelToGL(int index) {
     if (e.offset + e.size > pcPackData.size()) { Log("Model data out of bounds"); return; }
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-    AddMeshFromData(pcmData);
+    AddMeshFromData(pcmData, e.name); // Pass model name
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
@@ -1132,15 +1183,24 @@ void SpiderManTool::RenderModelPreview() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void SpiderManTool::CloseDdsPreview() {
+    if (ddsTextureId != 0) {
+        glDeleteTextures(1, &ddsTextureId);
+        ddsTextureId = 0;
+    }
+    showDdsPopup = false;
+}
+
 void SpiderManTool::LoadPreview(int index) {
     if (index < 0 || index >= entries.size()) return;
     if (pcPackData.empty()) return;
     const auto& e = entries[index];
 
+    // --- 1. HANDLE 3D MODEL ---
     if (e.isPcm) {
-        if (previewTextureId != 0 && !isModelPreview) ClosePreview();
-        isModelPreview = true;
+        // Init viewport FBO if not exists
         InitModelPreview();
+        isModelPreview = true;
 
         fs::path p(loadedPCPackPath);
         std::string packStem = StrToLower(p.stem().string());
@@ -1152,16 +1212,16 @@ void SpiderManTool::LoadPreview(int index) {
              LoadModelToGL(index);
         }
 
-        previewWidth = 800;
-        previewHeight = 600;
-        showPreview = true;
+        isModelLoaded = true;
         Log("Model loaded: " + e.name);
         return;
     }
 
+    // --- 2. HANDLE TEXTURE POPUP ---
     if (!e.isDds) { Log("Not a DDS/PCM file."); return; }
-    if (previewTextureId != 0) ClosePreview();
-    isModelPreview = false;
+
+    CloseDdsPreview(); // Close existing if open
+    isModelPreview = false; // Not a model
 
     const uint8_t* data = &pcPackData[e.offset];
     if (e.size < sizeof(DDS_HEADER) + 4) return;
@@ -1169,8 +1229,8 @@ void SpiderManTool::LoadPreview(int index) {
     if (magic != 0x20534444) return;
 
     const DDS_HEADER* header = (const DDS_HEADER*)(data + 4);
-    previewWidth = header->dwWidth;
-    previewHeight = header->dwHeight;
+    ddsWidth = header->dwWidth;
+    ddsHeight = header->dwHeight;
 
     uint32_t fourCC = header->ddspf.dwFourCC;
     GLenum format = 0;
@@ -1180,24 +1240,17 @@ void SpiderManTool::LoadPreview(int index) {
 
     if (format == 0) { Log("Unsupported DXT format."); return; }
     uint32_t blockSize = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
-    uint32_t imageSize = ((previewWidth + 3) / 4) * ((previewHeight + 3) / 4) * blockSize;
+    uint32_t imageSize = ((ddsWidth + 3) / 4) * ((ddsHeight + 3) / 4) * blockSize;
 
-    glGenTextures(1, &previewTextureId);
-    glBindTexture(GL_TEXTURE_2D, previewTextureId);
+    glGenTextures(1, &ddsTextureId);
+    glBindTexture(GL_TEXTURE_2D, ddsTextureId);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, previewWidth, previewHeight, 0, imageSize, data + 128);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, ddsWidth, ddsHeight, 0, imageSize, data + 128);
     glBindTexture(GL_TEXTURE_2D, 0);
-    showPreview = true;
-    Log("Preview loaded: " + e.name);
-}
 
-void SpiderManTool::ClosePreview() {
-    if (previewTextureId != 0 && !isModelPreview) {
-        glDeleteTextures(1, &previewTextureId);
-        previewTextureId = 0;
-    }
-    showPreview = false;
+    showDdsPopup = true;
+    Log("Preview loaded: " + e.name);
 }
 
 void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath) {
