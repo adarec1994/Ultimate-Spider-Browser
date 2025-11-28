@@ -666,37 +666,23 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         for(uint32_t smOfs : smOffsets) {
             if (smOfs + 64 > pcmData.size()) continue;
 
-            br.Seek(smOfs);
-            uint32_t nameOfs = br.Read<uint32_t>();
-            uint32_t zero1 = br.Read<uint32_t>();
-            uint32_t unk0 = br.Read<uint32_t>();
-            uint32_t unk0_ofs = br.Read<uint32_t>();
-            br.Skip(16);
-            uint32_t unk_uint = br.Read<uint32_t>();
-            uint32_t zero2 = br.Read<uint32_t>();
-            uint32_t itype = br.Read<uint32_t>();
-            uint32_t inum = br.Read<uint32_t>();
-            uint32_t iofs = br.Read<uint32_t>();
-            uint32_t zero3 = br.Read<uint32_t>();
-            uint32_t vnum = br.Read<uint32_t>();
-            uint32_t vofs = br.Read<uint32_t>();
+            // --- UPDATED TEXTURE LOGIC START ---
 
-            std::vector<uint32_t> unks;
-            for(int k=0;k<8;k++) unks.push_back(br.Read<uint32_t>());
-            uint32_t stride = unks[2];
+            // 1. Read the explicit Texture Hash at offset 32 (0x20)
+            // The Python script reads 4 (name) + 12 (unks) + 16 (floats) = 32 bytes skip
+            br.Seek(smOfs + 32);
+            uint32_t texHash = br.Read<uint32_t>();
 
+            // 2. Resolve Texture
             unsigned int tex = 0;
-            for (uint32_t u : unks) {
-                if (u > 0) {
-                    if (textureResolver) {
-                        tex = textureResolver(u);
-                    } else {
-                        tex = LoadTextureFromHash(u);
-                    }
-                    if (tex != 0) break;
-                }
+
+            // Priority A: Try the explicit hash found in the submesh header
+            if (texHash != 0) {
+                if (textureResolver) tex = textureResolver(texHash);
+                else tex = LoadTextureFromHash(texHash);
             }
 
+            // Priority B: Fallback to Model Name matching (if Priority A failed)
             if (tex == 0 && !modelName.empty()) {
                 std::string cleanName = modelName;
                 size_t lastDot = cleanName.find_last_of(".");
@@ -709,6 +695,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 if (textureResolver) tex = textureResolver(diffHash);
                 else tex = LoadTextureFromHash(diffHash);
 
+                // Priority C: Fuzzy search in entries
                 if (tex == 0) {
                      for(const auto& e : entries) {
                          if(e.isDds) {
@@ -721,6 +708,19 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                      }
                 }
             }
+            // --- UPDATED TEXTURE LOGIC END ---
+
+            // Move to Geometry Info (Offset 40 / 0x28)
+            br.Seek(smOfs + 40);
+
+            uint32_t itype = br.Read<uint32_t>();
+            uint32_t inum = br.Read<uint32_t>();
+            uint32_t iofs = br.Read<uint32_t>();
+            br.Skip(4);
+            uint32_t vnum = br.Read<uint32_t>();
+            uint32_t vofs = br.Read<uint32_t>();
+            br.Skip(8);
+            uint32_t stride = br.Read<uint32_t>();
 
             if (vnum > 100000 || inum > 300000) continue;
             if (vofs >= pcmData.size() || iofs >= pcmData.size()) continue;
@@ -769,7 +769,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             RenderMesh mesh;
             mesh.indexCount = (int)indices.size();
             mesh.mode = (itype == 4) ? GL_TRIANGLES : GL_TRIANGLE_STRIP;
-            mesh.textureId = tex;
+            mesh.textureId = tex; // Assign the resolved texture
 
             glGenVertexArrays(1, &mesh.vao);
             glGenBuffers(1, &mesh.vbo);

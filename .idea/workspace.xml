@@ -65,9 +65,7 @@
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Interface.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.h" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -350,7 +348,7 @@
       <workItem from="1764234517888" duration="5112000" />
       <workItem from="1764306433246" duration="7000" />
       <workItem from="1764306528389" duration="6473000" />
-      <workItem from="1764335210508" duration="11609000" />
+      <workItem from="1764335210508" duration="12135000" />
     </task>
     <servers />
   </component>
