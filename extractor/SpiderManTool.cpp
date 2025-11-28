@@ -1,6 +1,7 @@
 #include "SpiderManTool.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#include "imgui.h"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -46,10 +47,38 @@ struct DDS_HEADER {
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
 #endif
 
+void Normalize(float* v) {
+    float len = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    if (len > 0) { v[0]/=len; v[1]/=len; v[2]/=len; }
+}
+
+void Cross(const float* a, const float* b, float* out) {
+    out[0] = a[1]*b[2] - a[2]*b[1];
+    out[1] = a[2]*b[0] - a[0]*b[2];
+    out[2] = a[0]*b[1] - a[1]*b[0];
+}
+
+float Dot(const float* a, const float* b) {
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+void LookAt(const float* eye, const float* center, const float* up, float* dest) {
+    float f[3] = { center[0]-eye[0], center[1]-eye[1], center[2]-eye[2] };
+    Normalize(f);
+    float s[3];
+    Cross(f, up, s);
+    Normalize(s);
+    float u[3];
+    Cross(s, f, u);
+    dest[0] = s[0];  dest[4] = s[1];  dest[8] = s[2];  dest[12] = -Dot(s, eye);
+    dest[1] = u[0];  dest[5] = u[1];  dest[9] = u[2];  dest[13] = -Dot(u, eye);
+    dest[2] = -f[0]; dest[6] = -f[1]; dest[10]= -f[2]; dest[14] = Dot(f, eye);
+    dest[3] = 0;     dest[7] = 0;     dest[11]= 0;     dest[15] = 1;
+}
+
 bool InvertMatrix(const float m[16], float invOut[16]) {
     float inv[16], det;
     int i;
-
     inv[0] = m[5]  * m[10] * m[15] - m[5]  * m[11] * m[14] - m[9]  * m[6]  * m[15] + m[9]  * m[7]  * m[14] + m[13] * m[6]  * m[11] - m[13] * m[7]  * m[10];
     inv[4] = -m[4]  * m[10] * m[15] + m[4]  * m[11] * m[14] + m[8]  * m[6]  * m[15] - m[8]  * m[7]  * m[14] - m[12] * m[6]  * m[11] + m[12] * m[7]  * m[10];
     inv[8] = m[4]  * m[9] * m[15] - m[4]  * m[11] * m[13] - m[8]  * m[5] * m[15] + m[8]  * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
@@ -280,7 +309,6 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
 void SpiderManTool::OpenPCPack(const std::string& path) {
     if (loadedPCPackPath == path) return;
 
-    ClosePreview();
     selectedFileIndex = -1;
     currentPcmInfos.clear();
     currentPcmIndex = -1;
@@ -441,6 +469,37 @@ void SpiderManTool::ExtractFile(int index, bool asGlb) {
     }
 }
 
+unsigned int SpiderManTool::LoadTextureFromData(const std::vector<uint8_t>& data) {
+    if (data.size() < sizeof(DDS_HEADER) + 4) return 0;
+
+    uint32_t magic = *(uint32_t*)data.data();
+    if (magic != 0x20534444) return 0;
+
+    const DDS_HEADER* header = (const DDS_HEADER*)(data.data() + 4);
+    int width = header->dwWidth;
+    int height = header->dwHeight;
+    uint32_t fourCC = header->ddspf.dwFourCC;
+
+    GLenum format = 0;
+    if (fourCC == 0x31545844) format = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+    else if (fourCC == 0x33545844) format = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+    else if (fourCC == 0x35545844) format = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+
+    if (format == 0) return 0;
+
+    uint32_t blockSize = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
+    uint32_t imageSize = ((width + 3) / 4) * ((height + 3) / 4) * blockSize;
+
+    unsigned int tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, imageSize, data.data() + 128);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
 unsigned int SpiderManTool::LoadTextureFromHash(uint32_t hash) {
     if (textureCache.count(hash)) return textureCache[hash];
 
@@ -458,60 +517,51 @@ unsigned int SpiderManTool::LoadTextureFromHash(uint32_t hash) {
     }
 
     const auto& e = entries[foundIdx];
-    const uint8_t* data = &pcPackData[e.offset];
-    if (e.size < sizeof(DDS_HEADER) + 4) return 0;
-    uint32_t magic = *(uint32_t*)data;
-    if (magic != 0x20534444) return 0;
+    if (e.offset + e.size > pcPackData.size()) return 0;
 
-    const DDS_HEADER* header = (const DDS_HEADER*)(data + 4);
-    int width = header->dwWidth;
-    int height = header->dwHeight;
-    uint32_t fourCC = header->ddspf.dwFourCC;
-    GLenum format = 0;
-    if (fourCC == 0x31545844) format = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
-    else if (fourCC == 0x33545844) format = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
-    else if (fourCC == 0x35545844) format = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+    std::vector<uint8_t> ddsData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+    unsigned int tex = LoadTextureFromData(ddsData);
 
-    if (format == 0) return 0;
-
-    uint32_t blockSize = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
-    uint32_t imageSize = ((width + 3) / 4) * ((height + 3) / 4) * blockSize;
-
-    unsigned int tex;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, imageSize, data + 128);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    textureCache[hash] = tex;
-    Log("Loaded texture hash: " + std::to_string(hash));
+    if (tex != 0) {
+        textureCache[hash] = tex;
+        Log("Loaded texture hash: " + std::to_string(hash));
+    }
     return tex;
 }
 
 void SpiderManTool::InitModelPreview() {
     if (previewTextureId == 0) {
+        if (msFbo != 0) glDeleteFramebuffers(1, &msFbo);
+        if (msColor != 0) glDeleteTextures(1, &msColor);
+        if (msRbo != 0) glDeleteRenderbuffers(1, &msRbo);
         if (modelFbo != 0) glDeleteFramebuffers(1, &modelFbo);
-        if (modelRbo != 0) glDeleteRenderbuffers(1, &modelRbo);
-        modelFbo = 0;
-        modelRbo = 0;
+        if (previewTextureId != 0) glDeleteTextures(1, &previewTextureId);
+
+        int width = 3840;
+        int height = 2160;
+
+        glGenFramebuffers(1, &msFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, msFbo);
+
+        glGenTextures(1, &msColor);
+        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, msColor);
+        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGB, width, height, GL_TRUE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, msColor, 0);
+
+        glGenRenderbuffers(1, &msRbo);
+        glBindRenderbuffer(GL_RENDERBUFFER, msRbo);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH24_STENCIL8, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, msRbo);
 
         glGenFramebuffers(1, &modelFbo);
-        glGenTextures(1, &previewTextureId);
-        glGenRenderbuffers(1, &modelRbo);
-
         glBindFramebuffer(GL_FRAMEBUFFER, modelFbo);
 
+        glGenTextures(1, &previewTextureId);
         glBindTexture(GL_TEXTURE_2D, previewTextureId);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 800, 600, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, previewTextureId, 0);
-
-        glBindRenderbuffer(GL_RENDERBUFFER, modelRbo);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 800, 600);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, modelRbo);
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
@@ -521,7 +571,7 @@ void SpiderManTool::InitModelPreview() {
     const char* vShaderCode = "#version 130\n"
         "in vec3 pos; in vec2 texCoord; out vec2 TexCoord; uniform mat4 model; uniform mat4 view; uniform mat4 projection; void main(){ TexCoord = texCoord; gl_Position = projection * view * model * vec4(pos,1.0); }";
     const char* fShaderCode = "#version 130\n"
-        "in vec2 TexCoord; out vec4 color; uniform sampler2D diffTexture; uniform bool hasTexture; void main(){ if(hasTexture) { vec4 texColor = texture(diffTexture, TexCoord); color = vec4(texColor.rgb, 1.0); } else { color = vec4(1.0, 1.0, 1.0, 1.0); } }";
+        "in vec2 TexCoord; out vec4 color; uniform sampler2D diffTexture; uniform bool hasTexture; void main(){ if(hasTexture) { vec4 texColor = texture(diffTexture, TexCoord); if(texColor.a < 0.5) discard; color = vec4(texColor.rgb, 1.0); } else { color = vec4(1.0, 1.0, 1.0, 1.0); } }";
 
     unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex, 1, &vShaderCode, NULL);
@@ -552,7 +602,7 @@ bool SpiderManTool::IsWorldInteriorPack(const std::string& name) {
     return lower.substr(2, 4) == "_int";
 }
 
-void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData) {
+void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::function<unsigned int(uint32_t)> textureResolver) {
     BinaryReader br(pcmData);
 
     if (8 + 4 > pcmData.size()) return;
@@ -621,7 +671,11 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData) {
             unsigned int tex = 0;
             for (uint32_t u : unks) {
                 if (u > 0) {
-                    tex = LoadTextureFromHash(u);
+                    if (textureResolver) {
+                        tex = textureResolver(u);
+                    } else {
+                        tex = LoadTextureFromHash(u);
+                    }
                     if (tex != 0) break;
                 }
             }
@@ -700,6 +754,15 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData) {
 
 void SpiderManTool::LoadAllWorldGeometries() {
     previewMeshes.clear();
+    isWorldMode = true;
+
+    camPos[0] = 0.0f; camPos[1] = 2000.0f; camPos[2] = 2000.0f;
+    camFront[0] = 0.0f; camFront[1] = -0.5f; camFront[2] = -1.0f;
+    camUp[0] = 0.0f; camUp[1] = 1.0f; camUp[2] = 0.0f;
+    camYaw = -90.0f;
+    camPitch = -30.0f;
+    camSpeed = 500.0f;
+
     Log("Loading World Context...");
 
     for (const auto& path : foundPacks) {
@@ -709,13 +772,9 @@ void SpiderManTool::LoadAllWorldGeometries() {
         if (!isRelevant) continue;
 
         if (path.string() == loadedPCPackPath) {
-            // Already loaded pack
             for (const auto& e : entries) {
                 if (!e.isPcm) continue;
                 std::string entryName = StrToLower(e.name);
-
-                // Match "stem" at the start of filename (case insensitive)
-                // e.g. "ae" matches "ae.pcm", "ae_int" matches "ae_int_1.pcm"
                 if (entryName.find(stem) == 0 && e.offset + e.size <= pcPackData.size()) {
                     std::vector<uint8_t> data(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
                     AddMeshFromData(data);
@@ -723,7 +782,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
             }
         }
         else {
-            // External pack
             std::ifstream file(path, std::ios::binary);
             if (!file.is_open()) continue;
 
@@ -732,7 +790,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
             file.read((char*)&headerSize, 4);
             file.read((char*)&dataOffset, 4);
 
-            // Scan for TOC start
             size_t start = 0;
             const uint32_t magic = 0xE3E3E3E3;
             std::vector<uint8_t> tempHeader(200000);
@@ -757,6 +814,9 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
             file.seekg(start);
 
+            std::map<uint32_t, std::pair<uint32_t, uint32_t>> textureOffsets;
+            std::vector<std::pair<uint32_t, uint32_t>> pcmOffsets;
+
             while (true) {
                 uint32_t hash, type, offset, size;
                 file.read((char*)&hash, 4);
@@ -767,43 +827,64 @@ void SpiderManTool::LoadAllWorldGeometries() {
                 if (type >= 0x1000 || type == 0x0000) break;
 
                 if (size > 4) {
-                    // Check dictionary for name
-                    std::string entryName = "";
-                    if (dictionary.count(hash)) {
-                        entryName = StrToLower(dictionary[hash]);
-                    }
+                    size_t filePos = file.tellg();
+                    size_t absOffset = dataOffset + offset;
 
-                    // Only process if we know the name AND it starts with the pack stem
-                    if (!entryName.empty() && entryName.find(stem) == 0) {
-                        size_t filePos = file.tellg();
-                        size_t absOffset = dataOffset + offset;
+                    file.seekg(absOffset);
+                    uint32_t sig;
+                    file.read((char*)&sig, 4);
 
-                        file.seekg(absOffset);
-                        uint32_t sig;
-                        file.read((char*)&sig, 4);
-
-                        if (sig == 0x204D4350) { // PCM Signature
-                            file.seekg(absOffset);
-                            std::vector<uint8_t> fileData(size);
-                            file.read((char*)fileData.data(), size);
-                            AddMeshFromData(fileData);
+                    if (sig == 0x204D4350) {
+                        std::string entryName = "";
+                        if (dictionary.count(hash)) entryName = StrToLower(dictionary[hash]);
+                        if (!entryName.empty() && entryName.find(stem) == 0) {
+                            pcmOffsets.push_back({absOffset, size});
                         }
-
-                        file.seekg(filePos);
                     }
+                    else if (sig == 0x20534444) {
+                        textureOffsets[hash] = {absOffset, size};
+                    }
+
+                    file.seekg(filePos);
                 }
             }
+
+            for(auto& pcm : pcmOffsets) {
+                file.seekg(pcm.first);
+                std::vector<uint8_t> fileData(pcm.second);
+                file.read((char*)fileData.data(), pcm.second);
+
+                auto resolver = [&](uint32_t texHash) -> unsigned int {
+                    if (textureCache.count(texHash)) return textureCache[texHash];
+                    if (textureOffsets.count(texHash)) {
+                        auto texInfo = textureOffsets[texHash];
+                        size_t currentPos = file.tellg();
+                        file.seekg(texInfo.first);
+                        std::vector<uint8_t> ddsData(texInfo.second);
+                        file.read((char*)ddsData.data(), texInfo.second);
+                        file.seekg(currentPos);
+
+                        unsigned int tex = LoadTextureFromData(ddsData);
+                        if (tex != 0) {
+                            textureCache[texHash] = tex;
+                            return tex;
+                        }
+                    }
+                    return 0;
+                };
+
+                AddMeshFromData(fileData, resolver);
+            }
+
             file.close();
         }
     }
 
-    modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
-    modelRadius = 500.0f;
-    modelZoom = 1.0f;
     Log("World Context Loaded. Total meshes: " + std::to_string(previewMeshes.size()));
 }
 
 void SpiderManTool::LoadModelToGL(int index) {
+    isWorldMode = false;
     if (index < 0 || index >= entries.size()) return;
     const auto& e = entries[index];
 
@@ -819,12 +900,176 @@ void SpiderManTool::LoadModelToGL(int index) {
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
     AddMeshFromData(pcmData);
 
+    modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
+
+    if(!previewMeshes.empty()) {
+        float minP[3] = {1e9, 1e9, 1e9};
+        float maxP[3] = {-1e9, -1e9, -1e9};
+
+        BinaryReader br(pcmData);
+        br.Seek(8);
+        uint32_t num = br.Read<uint32_t>();
+        uint32_t ofs = br.Read<uint32_t>();
+
+        if (num < 1000 && ofs < pcmData.size()) {
+            br.Seek(ofs);
+            struct Info { uint16_t u1, type; uint32_t offset, u2; };
+            std::vector<Info> infos;
+            for(uint32_t i=0; i<num; i++) {
+                Info inf;
+                inf.u1 = br.Read<uint16_t>();
+                inf.type = br.Read<uint16_t>();
+                inf.offset = br.Read<uint32_t>();
+                inf.u2 = br.Read<uint32_t>();
+                infos.push_back(inf);
+            }
+
+            for(auto& inf : infos) {
+                if (inf.type != 512) continue;
+                if (inf.offset + 16 > pcmData.size()) continue;
+                br.Seek(inf.offset); br.Skip(8);
+                uint32_t numSm = br.Read<uint32_t>(); uint32_t infSmOfs = br.Read<uint32_t>();
+                if(infSmOfs >= pcmData.size()) continue;
+
+                br.Seek(infSmOfs);
+                std::vector<uint32_t> smOffsets;
+                for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
+
+                for(uint32_t smOfs : smOffsets) {
+                    if (smOfs + 64 > pcmData.size()) continue;
+                    br.Seek(smOfs); br.Skip(40);
+                    uint32_t itype = br.Read<uint32_t>();
+                    uint32_t inum = br.Read<uint32_t>();
+                    uint32_t iofs = br.Read<uint32_t>();
+                    br.Skip(4);
+                    uint32_t vnum = br.Read<uint32_t>();
+                    uint32_t vofs = br.Read<uint32_t>();
+                    br.Skip(8);
+                    uint32_t stride = br.Read<uint32_t>();
+
+                    if (vofs >= pcmData.size() || stride == 0) continue;
+                    br.Seek(vofs);
+                    for(uint32_t v=0; v<vnum; v++) {
+                        size_t sv = br.Tell();
+                        float x = br.Read<float>(); float y = br.Read<float>(); float z = br.Read<float>();
+                        if(x < minP[0]) minP[0] = x; if(x > maxP[0]) maxP[0] = x;
+                        if(y < minP[1]) minP[1] = y; if(y > maxP[1]) maxP[1] = y;
+                        if(z < minP[2]) minP[2] = z; if(z > maxP[2]) maxP[2] = z;
+                        br.Seek(sv + stride);
+                    }
+                }
+            }
+        }
+
+        if (minP[0] != 1e9) {
+            float cx = (minP[0] + maxP[0]) * 0.5f;
+            float cy = (minP[1] + maxP[1]) * 0.5f;
+            float cz = (minP[2] + maxP[2]) * 0.5f;
+
+            float radius = sqrt(pow(maxP[0]-minP[0],2) + pow(maxP[1]-minP[1],2) + pow(maxP[2]-minP[2],2));
+            if (radius < 1.0f) radius = 5.0f;
+
+            camPos[0] = cx;
+            camPos[1] = cy + radius * 0.5f;
+            camPos[2] = cz + radius * 1.5f;
+
+            float target[3] = {cx, cy, cz};
+            float dir[3] = {target[0]-camPos[0], target[1]-camPos[1], target[2]-camPos[2]};
+            Normalize(dir);
+            camFront[0] = dir[0]; camFront[1] = dir[1]; camFront[2] = dir[2];
+
+            camYaw = atan2(camFront[2], camFront[0]) * 180.0f / 3.14159f;
+            camPitch = asin(camFront[1]) * 180.0f / 3.14159f;
+        }
+    }
+}
+
+void SpiderManTool::UpdateWorldCamera(bool isHovered) {
+    GLFWwindow* window = glfwGetCurrentContext();
+    if (!window) return;
+
+    bool isCapturing = (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED);
+    if (!isHovered && !isCapturing && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) return;
+
+    float dt = ImGui::GetIO().DeltaTime;
+
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+        float xoffset = ImGui::GetIO().MouseDelta.x;
+        float yoffset = ImGui::GetIO().MouseDelta.y;
+
+        float sensitivity = 0.2f;
+        xoffset *= sensitivity;
+        yoffset *= sensitivity;
+
+        camYaw += xoffset;
+        camPitch -= yoffset;
+
+        if (camPitch > 89.0f) camPitch = 89.0f;
+        if (camPitch < -89.0f) camPitch = -89.0f;
+
+        float front[3];
+        front[0] = cos(camYaw * 3.14159f / 180.0f) * cos(camPitch * 3.14159f / 180.0f);
+        front[1] = sin(camPitch * 3.14159f / 180.0f);
+        front[2] = sin(camYaw * 3.14159f / 180.0f) * cos(camPitch * 3.14159f / 180.0f);
+        Normalize(front);
+        camFront[0] = front[0]; camFront[1] = front[1]; camFront[2] = front[2];
+
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0) {
+            float multiplier = 1.0f + (0.2f * wheel);
+            camSpeed *= multiplier;
+            if (camSpeed < 0.1f) camSpeed = 0.1f;
+            if (camSpeed > 20000.0f) camSpeed = 20000.0f;
+        }
+
+        float velocity = camSpeed * dt;
+
+        if (ImGui::IsKeyDown(ImGuiKey_W)) {
+            camPos[0] += camFront[0] * velocity;
+            camPos[1] += camFront[1] * velocity;
+            camPos[2] += camFront[2] * velocity;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_S)) {
+            camPos[0] -= camFront[0] * velocity;
+            camPos[1] -= camFront[1] * velocity;
+            camPos[2] -= camFront[2] * velocity;
+        }
+
+        float right[3];
+        Cross(camFront, camUp, right);
+        Normalize(right);
+
+        if (ImGui::IsKeyDown(ImGuiKey_A)) {
+            camPos[0] -= right[0] * velocity;
+            camPos[1] -= right[1] * velocity;
+            camPos[2] -= right[2] * velocity;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_D)) {
+            camPos[0] += right[0] * velocity;
+            camPos[1] += right[1] * velocity;
+            camPos[2] += right[2] * velocity;
+        }
+
+        if (ImGui::IsKeyDown(ImGuiKey_Z)) {
+            camPos[1] += velocity;
+        }
+        if (ImGui::IsKeyDown(ImGuiKey_X)) {
+            camPos[1] -= velocity;
+        }
+
+    } else {
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
 }
 
 void SpiderManTool::RenderModelPreview() {
-    glBindFramebuffer(GL_FRAMEBUFFER, modelFbo);
-    glViewport(0, 0, 800, 600);
+    glBindFramebuffer(GL_FRAMEBUFFER, msFbo);
+    int width = 3840;
+    int height = 2160;
+    glViewport(0, 0, width, height);
     glClearColor(0.0f, 0.5f, 0.5f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -840,11 +1085,8 @@ void SpiderManTool::RenderModelPreview() {
 
     float fov = 1.0f;
     float aspect = 800.0f / 600.0f;
-    float znear = modelRadius * 0.01f;
-    float zfar = modelRadius * 20.0f;
-
-    if (znear < 0.1f) znear = 0.1f;
-    if (zfar < 100.0f) zfar = 100.0f;
+    float znear = 0.1f;
+    float zfar = 20000.0f;
 
     float proj[16] = {0};
     float tanHalfFov = tan(fov / 2.0f);
@@ -854,30 +1096,14 @@ void SpiderManTool::RenderModelPreview() {
     proj[11] = -1.0f;
     proj[14] = -(2.0f * zfar * znear) / (zfar - znear);
 
-    float dist = modelRadius * 2.5f * (1.0f / modelZoom);
-    float tx = -modelCenter[0];
-    float ty = -modelCenter[1];
-    float tz = -modelCenter[2] - dist;
+    float view[16];
+    float model[16];
 
-    float view[16] = {
-        1,0,0,0,
-        0,1,0,0,
-        0,0,1,0,
-        0,0,0,1
-    };
-    view[12] = tx;
-    view[13] = ty;
-    view[14] = tz;
+    float target[3] = { camPos[0] + camFront[0], camPos[1] + camFront[1], camPos[2] + camFront[2] };
+    LookAt(camPos, target, camUp, view);
 
-    float cx = cos(modelRotX), sx = sin(modelRotX);
-    float cy = cos(modelRotY), sy = sin(modelRotY);
-
-    float model[16] = {
-        cy, sx*sy, -cx*sy, 0,
-        0, cx, sx, 0,
-        sy, -sx*cy, cx*cy, 0,
-        0, 0, 0, 1
-    };
+    memset(model, 0, sizeof(model));
+    model[0] = 1; model[5] = 1; model[10] = 1; model[15] = 1;
 
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "projection"), 1, GL_FALSE, proj);
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "view"), 1, GL_FALSE, view);
@@ -898,7 +1124,11 @@ void SpiderManTool::RenderModelPreview() {
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
         }
     }
-    glBindVertexArray(0);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, msFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, modelFbo);
+    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -916,8 +1146,6 @@ void SpiderManTool::LoadPreview(int index) {
         std::string packStem = StrToLower(p.stem().string());
         std::string fileStem = StrToLower(fs::path(e.name).stem().string());
 
-        // Revised Condition: Starts with check instead of equality
-        // This handles cases like BH.pcpack containing BHC.pcm
         if (IsWorldPack(packStem) && fileStem.find(packStem) == 0) {
              LoadAllWorldGeometries();
         } else {

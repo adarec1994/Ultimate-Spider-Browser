@@ -5,6 +5,7 @@
 #include <iostream>
 #include <glad/glad.h>
 #include "imgui_hex.h"
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -67,26 +68,37 @@ public:
     bool showPreview = false;
     bool isModelPreview = false;
 
-    // --- Hex Editor State ---
     bool showHexEditor = false;
     ImGuiHexEditorState hexEditor;
 
-    // --- PCM Analysis Data ---
     std::vector<PCMMeshInfo> currentPcmInfos;
     PCMSkeletonInfo currentPcmSkeleton;
     int currentPcmIndex = -1;
 
     unsigned int modelFbo = 0;
     unsigned int modelRbo = 0;
+
+    unsigned int msFbo = 0;
+    unsigned int msColor = 0;
+    unsigned int msRbo = 0;
+
     unsigned int modelProgram = 0;
     std::vector<RenderMesh> previewMeshes;
+
     std::map<uint32_t, unsigned int> textureCache;
 
-    float modelRotX = 0.0f;
-    float modelRotY = 0.0f;
-    float modelZoom = 1.0f;
-    float modelCenter[3] = {0.0f, 0.0f, 0.0f};
-    float modelRadius = 1.0f;
+    // --- RENDER STATE ---
+    bool isWorldMode = false; // Restored
+    float modelCenter[3] = {0.0f, 0.0f, 0.0f}; // Restored
+    float modelRadius = 1.0f; // Restored
+
+    // --- CAMERA STATE ---
+    float camPos[3] = {0.0f, 10.0f, 50.0f};
+    float camFront[3] = {0.0f, 0.0f, -1.0f};
+    float camUp[3] = {0.0f, 1.0f, 0.0f};
+    float camYaw = -90.0f;
+    float camPitch = 0.0f;
+    float camSpeed = 100.0f;
 
     void Log(const std::string& msg);
     void SaveConfig();
@@ -101,16 +113,18 @@ public:
     void LoadPreview(int index);
     void ClosePreview();
     void InitModelPreview();
-    void LoadModelToGL(int index); // Legacy wrapper
+    void LoadModelToGL(int index);
     void RenderModelPreview();
+    void UpdateWorldCamera(bool isHovered);
     unsigned int LoadTextureFromHash(uint32_t hash);
+    unsigned int LoadTextureFromData(const std::vector<uint8_t>& data);
 
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
     void AnalyzePCM(int index);
 
-    // --- NEW HELPERS ---
     bool IsWorldPack(const std::string& name);
     bool IsWorldInteriorPack(const std::string& name);
-    void AddMeshFromData(const std::vector<uint8_t>& pcmData);
+
+    void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::function<unsigned int(uint32_t)> textureResolver = nullptr);
     void LoadAllWorldGeometries();
 };
