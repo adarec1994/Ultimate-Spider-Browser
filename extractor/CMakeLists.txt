@@ -11,7 +11,22 @@ find_package(OpenGL REQUIRED)
 
 include(FetchContent)
 
-# --- 1. Fetch GLFW ---
+# --- 1. Fetch GLAD (Manual Populate) ---
+FetchContent_Declare(
+        glad
+        URL https://github.com/libigl/libigl-glad/archive/refs/heads/master.zip
+)
+# Explicitly populate the content to ensure glad_SOURCE_DIR is defined in this scope
+FetchContent_GetProperties(glad)
+if(NOT glad_POPULATED)
+    FetchContent_Populate(glad)
+endif()
+
+# Create the library manually using the exposed variable
+add_library(glad STATIC ${glad_SOURCE_DIR}/src/glad.c)
+target_include_directories(glad PUBLIC ${glad_SOURCE_DIR}/include)
+
+# --- 2. Fetch GLFW ---
 FetchContent_Declare(
         glfw
         GIT_REPOSITORY https://github.com/glfw/glfw
@@ -19,19 +34,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
-# --- 2. Fetch ImGui ---
+# --- 3. Fetch ImGui ---
 FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui
         GIT_TAG        docking
 )
-# We manually populate ImGui because we need to build it as a library manually below
 FetchContent_GetProperties(imgui)
 if(NOT imgui_POPULATED)
     FetchContent_Populate(imgui)
 endif()
 
-# --- 3. Fetch ImGuiFileDialog ---
+# --- 4. Fetch ImGuiFileDialog ---
 FetchContent_Declare(
         ImGuiFileDialog
         GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog
@@ -43,7 +57,6 @@ if(NOT imguifiledialog_POPULATED)
 endif()
 
 # --- Build ImGui Library ---
-# Note: We use ${imgui_SOURCE_DIR} variable instead of hardcoded paths
 add_library(imgui STATIC
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_demo.cpp
@@ -58,15 +71,17 @@ target_include_directories(imgui PUBLIC
         ${imgui_SOURCE_DIR}
         ${imgui_SOURCE_DIR}/backends
         ${glfw_SOURCE_DIR}/include
+        ${glad_SOURCE_DIR}/include
 )
 
-target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+target_link_libraries(imgui PUBLIC glfw glad OpenGL::GL)
+target_compile_definitions(imgui PRIVATE IMGUI_IMPL_OPENGL_LOADER_GLAD)
 
 # --- Main Executable ---
 add_executable(USM
         main.cpp
         SpiderManTool.cpp
-        Interface.cpp    # Corrected casing here
+        Interface.cpp
         ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
 )
 
@@ -77,11 +92,11 @@ target_include_directories(USM PRIVATE
         ${imgui_SOURCE_DIR}/backends
         ${glfw_SOURCE_DIR}/include
         ${imguifiledialog_SOURCE_DIR}
+        ${glad_SOURCE_DIR}/include
 )
 
-target_link_libraries(USM PRIVATE imgui glfw OpenGL::GL)
+target_link_libraries(USM PRIVATE imgui glad glfw OpenGL::GL)
 
-# --- Copy Dictionary File ---
 if(EXISTS "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt")
     configure_file(
             "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt"

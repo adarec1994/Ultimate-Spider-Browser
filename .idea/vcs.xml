@@ -2,8 +2,6 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/extractor/dependencies/ImGuiFileDialog" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/extractor/dependencies/imgui" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/extractor/glfw" vcs="Git" />
   </component>
 </project>

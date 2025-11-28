@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <map>
 #include <iostream>
+#include <glad/glad.h>
 
 namespace fs = std::filesystem;
 
@@ -22,6 +23,8 @@ struct RenderMesh {
     unsigned int vbo;
     unsigned int ebo;
     int indexCount;
+    GLenum mode;
+    unsigned int textureId;
 };
 
 class SpiderManTool {
@@ -51,9 +54,13 @@ public:
     unsigned int modelRbo = 0;
     unsigned int modelProgram = 0;
     std::vector<RenderMesh> previewMeshes;
+    std::map<uint32_t, unsigned int> textureCache;
+
     float modelRotX = 0.0f;
     float modelRotY = 0.0f;
     float modelZoom = 1.0f;
+    float modelCenter[3] = {0.0f, 0.0f, 0.0f};
+    float modelRadius = 1.0f;
 
     void Log(const std::string& msg);
     void SaveConfig();
@@ -62,13 +69,15 @@ public:
     void LoadDictionary(const std::string& path);
     void OpenPCPack(const std::string& path);
     void ExtractPack(const std::string& packPath, bool convertAll = false);
-    void ExtractFile(int index);
+
+    void ExtractFile(int index, bool asGlb = false);
 
     void LoadPreview(int index);
     void ClosePreview();
     void InitModelPreview();
     void LoadModelToGL(int index);
     void RenderModelPreview();
+    unsigned int LoadTextureFromHash(uint32_t hash);
 
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
 };

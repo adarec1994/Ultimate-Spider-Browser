@@ -1,4 +1,5 @@
 #include <iostream>
+#include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
 #include "SpiderManTool.h"
@@ -15,6 +16,10 @@ int main(int, char**) {
     if (!window) return 1;
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        return -1;
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();

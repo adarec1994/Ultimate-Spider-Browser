@@ -100,9 +100,38 @@ void RenderUI(SpiderManTool& tool) {
 
             if (tool.selectedFileIndex == -1) ImGui::BeginDisabled();
             if (ImGui::Button("Extract Selected")) {
-                tool.ExtractFile(tool.selectedFileIndex);
+                tool.ExtractFile(tool.selectedFileIndex, false);
             }
             if (tool.selectedFileIndex == -1) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            bool canConvert = (tool.selectedFileIndex != -1 && tool.entries[tool.selectedFileIndex].isPcm);
+            if (!canConvert) ImGui::BeginDisabled();
+
+            if (ImGui::Button("Extract as GLB")) {
+                tool.ExtractFile(tool.selectedFileIndex, true);
+                ImGui::OpenPopup("Extraction Complete");
+            }
+            if (!canConvert) ImGui::EndDisabled();
+
+            if (ImGui::BeginPopupModal("Extraction Complete", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("File extracted successfully!");
+                ImGui::Spacing();
+
+                fs::path p(tool.loadedPCPackPath);
+                std::string packName = p.stem().string();
+                ImGui::Text("Saved to folder:");
+                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "extracted/%s", packName.c_str());
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                if (ImGui::Button("OK", ImVec2(120, 0))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
 
             ImGui::SameLine();
             bool canPreview = tool.selectedFileIndex != -1 && (tool.entries[tool.selectedFileIndex].isDds || tool.entries[tool.selectedFileIndex].isPcm);
@@ -179,16 +208,20 @@ void RenderUI(SpiderManTool& tool) {
                 if (size.y > 600) { float r = 600/size.y; size.x *= r; size.y *= r; }
 
                 ImVec2 p = ImGui::GetCursorScreenPos();
-                ImGui::Image((void*)(intptr_t)tool.previewTextureId, size, ImVec2(0,1), ImVec2(1,0)); // Flip Y for OpenGL FBO
+                ImGui::Image((void*)(intptr_t)tool.previewTextureId, size, ImVec2(0,1), ImVec2(1,0));
 
                 if (tool.isModelPreview) {
-                    if (ImGui::IsItemActive() || ImGui::IsItemHovered()) {
-                        if (ImGui::IsMouseDragging(0)) {
-                            ImVec2 d = ImGui::GetMouseDragDelta(0);
-                            tool.modelRotY += d.x * 0.005f;
-                            tool.modelRotX += d.y * 0.005f;
-                            ImGui::ResetMouseDragDelta(0);
-                        }
+                    ImGui::SetCursorScreenPos(p);
+                    ImGui::InvisibleButton("ModelInteraction", size);
+
+                    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                        ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                        tool.modelRotY += d.x * 0.005f;
+                        tool.modelRotX += d.y * 0.005f;
+                        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                    }
+
+                    if (ImGui::IsItemHovered()) {
                         float wheel = ImGui::GetIO().MouseWheel;
                         if (wheel != 0) {
                             tool.modelZoom += wheel * 0.1f;
