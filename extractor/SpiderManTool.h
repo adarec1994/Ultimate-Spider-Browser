@@ -68,10 +68,13 @@ public:
     uint32_t dataOffset = 0;
     std::string logBuffer;
 
+    std::string notificationMsg;
+    float notificationTimer = 0.0f;
+    const float NOTIFICATION_DURATION = 3.0f;
+
     unsigned int viewportTextureId = 0;
     bool isModelLoaded = false;
     bool isModelPreview = false;
-
 
     unsigned int ddsTextureId = 0;
     int ddsWidth = 0;
@@ -109,6 +112,7 @@ public:
     float camSpeed = 100.0f;
 
     void Log(const std::string& msg);
+    void ShowNotification(const std::string& msg);
     void SaveConfig();
     void LoadConfig();
     void ScanDirectory();

@@ -9,7 +9,6 @@
 #include <fstream>
 #include <cctype>
 
-// --- UTILS ---
 static std::string StrToLower(const std::string& str) {
     std::string lower = str;
     std::transform(lower.begin(), lower.end(), lower.begin(),
@@ -257,6 +256,12 @@ void SpiderManTool::Log(const std::string& msg) {
     std::cout << msg << std::endl;
 }
 
+void SpiderManTool::ShowNotification(const std::string& msg) {
+    notificationMsg = msg;
+    notificationTimer = NOTIFICATION_DURATION;
+    Log(msg);
+}
+
 void SpiderManTool::SaveConfig() {
     std::ofstream f("usm_config.txt");
     if (f.is_open()) {
@@ -449,7 +454,7 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
             }
         }
     }
-    Log("Extraction complete.");
+    ShowNotification("Pack extracted to:\n" + outDir.string());
 }
 
 void SpiderManTool::ExtractFile(int index, bool asGlb) {
@@ -470,13 +475,13 @@ void SpiderManTool::ExtractFile(int index, bool asGlb) {
         glbPath.replace_extension(".glb");
         std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
         ConvertPCM(pcmData, glbPath.string());
-        Log("Extracted GLB: " + glbPath.filename().string());
+        ShowNotification("Saved GLB to:\n" + glbPath.string());
     } else {
         std::ofstream out(fullFilePath, std::ios::binary);
         if (out.is_open()) {
             out.write((char*)&pcPackData[e.offset], e.size);
             out.close();
-            Log("Extracted: " + e.name);
+            ShowNotification("Saved file to:\n" + fullFilePath.string());
         } else {
             Log("Failed to write file: " + fullFilePath.string());
         }
@@ -550,8 +555,6 @@ void SpiderManTool::InitModelPreview() {
         if (msRbo != 0) glDeleteRenderbuffers(1, &msRbo);
         if (modelFbo != 0) glDeleteFramebuffers(1, &modelFbo);
 
-        // Note: Do not delete viewportTextureId here, we are creating it below.
-        // If re-initializing, clean up first:
         if (viewportTextureId != 0) glDeleteTextures(1, &viewportTextureId);
 
         int width = 3840;
@@ -666,23 +669,16 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         for(uint32_t smOfs : smOffsets) {
             if (smOfs + 64 > pcmData.size()) continue;
 
-            // --- UPDATED TEXTURE LOGIC START ---
-
-            // 1. Read the explicit Texture Hash at offset 32 (0x20)
-            // The Python script reads 4 (name) + 12 (unks) + 16 (floats) = 32 bytes skip
             br.Seek(smOfs + 32);
             uint32_t texHash = br.Read<uint32_t>();
 
-            // 2. Resolve Texture
             unsigned int tex = 0;
 
-            // Priority A: Try the explicit hash found in the submesh header
             if (texHash != 0) {
                 if (textureResolver) tex = textureResolver(texHash);
                 else tex = LoadTextureFromHash(texHash);
             }
 
-            // Priority B: Fallback to Model Name matching (if Priority A failed)
             if (tex == 0 && !modelName.empty()) {
                 std::string cleanName = modelName;
                 size_t lastDot = cleanName.find_last_of(".");
@@ -695,7 +691,6 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 if (textureResolver) tex = textureResolver(diffHash);
                 else tex = LoadTextureFromHash(diffHash);
 
-                // Priority C: Fuzzy search in entries
                 if (tex == 0) {
                      for(const auto& e : entries) {
                          if(e.isDds) {
@@ -708,9 +703,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                      }
                 }
             }
-            // --- UPDATED TEXTURE LOGIC END ---
 
-            // Move to Geometry Info (Offset 40 / 0x28)
             br.Seek(smOfs + 40);
 
             uint32_t itype = br.Read<uint32_t>();
@@ -769,7 +762,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             RenderMesh mesh;
             mesh.indexCount = (int)indices.size();
             mesh.mode = (itype == 4) ? GL_TRIANGLES : GL_TRIANGLE_STRIP;
-            mesh.textureId = tex; // Assign the resolved texture
+            mesh.textureId = tex;
 
             glGenVertexArrays(1, &mesh.vao);
             glGenBuffers(1, &mesh.vbo);
@@ -924,8 +917,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
             std::vector<uint8_t> fileData(item.second.second);
             currentFile.read((char*)fileData.data(), item.second.second);
 
-            // Pass empty string for modelName as we don't have it easily available here
-            // unless we store it in pcmQueue, but world textures usually link correctly via hash.
             AddMeshFromData(fileData, "", globalResolver);
         }
     }
@@ -949,7 +940,7 @@ void SpiderManTool::LoadModelToGL(int index) {
     if (e.offset + e.size > pcPackData.size()) { Log("Model data out of bounds"); return; }
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-    AddMeshFromData(pcmData, e.name); // Pass model name
+    AddMeshFromData(pcmData, e.name);
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
@@ -1196,9 +1187,7 @@ void SpiderManTool::LoadPreview(int index) {
     if (pcPackData.empty()) return;
     const auto& e = entries[index];
 
-    // --- 1. HANDLE 3D MODEL ---
     if (e.isPcm) {
-        // Init viewport FBO if not exists
         InitModelPreview();
         isModelPreview = true;
 
@@ -1217,11 +1206,10 @@ void SpiderManTool::LoadPreview(int index) {
         return;
     }
 
-    // --- 2. HANDLE TEXTURE POPUP ---
     if (!e.isDds) { Log("Not a DDS/PCM file."); return; }
 
-    CloseDdsPreview(); // Close existing if open
-    isModelPreview = false; // Not a model
+    CloseDdsPreview();
+    isModelPreview = false;
 
     const uint8_t* data = &pcPackData[e.offset];
     if (e.size < sizeof(DDS_HEADER) + 4) return;

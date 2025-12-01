@@ -26,7 +26,6 @@ bool IsWorldInteriorPack(const std::string& stemName) {
 }
 
 void RenderUI(SpiderManTool& tool) {
-    // --- 1. SPLASH SCREEN ---
     if (tool.currentState == SpiderManTool::STATE_SPLASH) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -68,7 +67,6 @@ void RenderUI(SpiderManTool& tool) {
         return;
     }
 
-    // --- 2. MAIN VIEWPORT (3D MODELS ONLY) ---
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->Pos);
     ImGui::SetNextWindowSize(viewport->Size);
@@ -91,10 +89,8 @@ void RenderUI(SpiderManTool& tool) {
         bool uiHovered = ImGui::GetIO().WantCaptureMouse;
         bool isViewportActive = !uiHovered;
 
-        // Camera Logic
         tool.UpdateWorldCamera(isViewportActive);
 
-        // Instructions
         ImGui::SetCursorPos(ImVec2(20, 20));
         ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up");
 
@@ -107,8 +103,6 @@ void RenderUI(SpiderManTool& tool) {
     ImGui::End();
     ImGui::PopStyleVar(3);
 
-
-    // --- 3. POPUP TEXTURE VIEWER (SEPARATE WINDOW) ---
     if (tool.showDdsPopup && tool.ddsTextureId != 0) {
         ImGui::SetNextWindowSize(ImVec2((float)tool.ddsWidth + 20, (float)tool.ddsHeight + 40), ImGuiCond_FirstUseEver);
 
@@ -117,7 +111,6 @@ void RenderUI(SpiderManTool& tool) {
         if (ImGui::Begin(title.c_str(), &tool.showDdsPopup)) {
             ImVec2 avail = ImGui::GetContentRegionAvail();
 
-            // Aspect Ratio Scaling for Window Resizing
             float scale = 1.0f;
             if (avail.x < tool.ddsWidth || avail.y < tool.ddsHeight) {
                 float scaleX = avail.x / tool.ddsWidth;
@@ -131,8 +124,6 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::End();
     }
 
-
-    // --- 4. ASSET BROWSER WINDOW ---
     ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Asset Browser", nullptr, 0)) {
 
@@ -196,6 +187,12 @@ void RenderUI(SpiderManTool& tool) {
             if (ImGui::Button("Extract File")) tool.ExtractFile(tool.selectedFileIndex, false);
             ImGui::SameLine();
             if (ImGui::Button("Preview")) tool.LoadPreview(tool.selectedFileIndex);
+
+            if (tool.entries[tool.selectedFileIndex].isPcm) {
+                ImGui::SameLine();
+                if (ImGui::Button("Convert to GLB")) tool.ExtractFile(tool.selectedFileIndex, true);
+            }
+
             if (!canExtract) ImGui::EndDisabled();
 
             ImGui::SameLine();
@@ -230,7 +227,6 @@ void RenderUI(SpiderManTool& tool) {
     }
     ImGui::End();
 
-    // --- 5. HEX EDITOR WINDOW ---
     if (tool.showHexEditor && tool.selectedFileIndex != -1 && !tool.pcPackData.empty()) {
         const auto& e = tool.entries[tool.selectedFileIndex];
 
@@ -247,15 +243,12 @@ void RenderUI(SpiderManTool& tool) {
                 bool showSidebar = e.isPcm;
 
                 if (showSidebar) {
-                    // Analyze PCM data to populate structs
                     tool.AnalyzePCM(tool.selectedFileIndex);
 
                     ImGui::Columns(2, "HexCols");
-                    // Adjust column width: Hex Editor gets majority, Panel gets fixed amount
                     ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 320);
                 }
 
-                // --- Left Column: The Hex Editor ---
                 tool.hexEditor.Bytes = &tool.pcPackData[e.offset];
                 tool.hexEditor.MaxBytes = e.size;
 
@@ -267,7 +260,6 @@ void RenderUI(SpiderManTool& tool) {
                 if (showSidebar) {
                     ImGui::NextColumn();
 
-                    // --- Right Column: The Detail Panel ---
                     ImGui::BeginChild("SidePanel", ImVec2(0,0), false);
 
                     ImGui::Text("Global Skeleton");
@@ -304,10 +296,43 @@ void RenderUI(SpiderManTool& tool) {
                     }
                     ImGui::EndChild();
 
-                    ImGui::Columns(1); // Reset columns
+                    ImGui::Columns(1);
                 }
             }
             ImGui::End();
         }
+    }
+
+    if (tool.notificationTimer > 0.0f) {
+        tool.notificationTimer -= ImGui::GetIO().DeltaTime;
+
+        float alpha = 1.0f;
+        if (tool.notificationTimer < 0.5f) {
+            alpha = tool.notificationTimer / 0.5f;
+        }
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.8f * alpha));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, alpha));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 1.0f, 1.0f, 0.5f * alpha));
+
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImVec2 windowPos = ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y - 50.0f);
+        ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs;
+
+        if (ImGui::Begin("Toast", nullptr, flags)) {
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, alpha), "[SUCCESS]");
+            ImGui::SameLine();
+            ImGui::TextUnformatted(tool.notificationMsg.c_str());
+        }
+        ImGui::End();
+
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar(2);
     }
 }
