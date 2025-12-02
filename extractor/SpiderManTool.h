@@ -122,7 +122,11 @@ public:
     std::vector<RenderMesh> previewMeshes;
 
     std::map<uint32_t, unsigned int> textureCache;
+    std::map<std::string, unsigned int> textureNameCache;
     std::map<uint32_t, TextureLocation> globalTextureIndex;
+    std::map<std::string, TextureLocation> globalTextureNameIndex;
+
+    void BuildGlobalTextureIndex();
 
     bool isWorldMode = false;
     float modelCenter[3] = {0.0f, 0.0f, 0.0f};
@@ -153,6 +157,7 @@ public:
     void UpdateWorldCamera(bool isHovered);
     unsigned int LoadTextureFromHash(uint32_t hash);
     unsigned int LoadTextureFromData(const std::vector<uint8_t>& data);
+    unsigned int LoadTextureByName(const std::string& textureName);
 
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
     void AnalyzePCM(int index);

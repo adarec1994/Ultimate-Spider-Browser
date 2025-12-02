@@ -67,6 +67,8 @@ unsigned int SpiderManTool::LoadTextureFromData(const std::vector<uint8_t>& data
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, imageSize, data.data() + 128);
     glBindTexture(GL_TEXTURE_2D, 0);
     return tex;
@@ -96,9 +98,113 @@ unsigned int SpiderManTool::LoadTextureFromHash(uint32_t hash) {
 
     if (tex != 0) {
         textureCache[hash] = tex;
-        Log("Loaded texture hash: " + std::to_string(hash));
+        Log("Loaded texture by hash: 0x" + std::to_string(hash));
     }
     return tex;
+}
+
+unsigned int SpiderManTool::LoadTextureByName(const std::string& textureName) {
+    if (textureName.empty()) return 0;
+
+    std::string nameLower = StrToLower(textureName);
+
+    // Check name cache first
+    if (textureNameCache.count(nameLower)) {
+        return textureNameCache[nameLower];
+    }
+
+    // First try: Search current pack's entries by name
+    int foundIdx = -1;
+    for (int i = 0; i < entries.size(); i++) {
+        if (!entries[i].isDds) continue;
+
+        std::string entryName = StrToLower(entries[i].name);
+        std::string entryBase = entryName;
+        if (entryBase.size() > 4 && entryBase.substr(entryBase.size() - 4) == ".dds") {
+            entryBase = entryBase.substr(0, entryBase.size() - 4);
+        }
+
+        if (entryBase == nameLower || entryName == nameLower ||
+            entryBase == nameLower + ".dds" || entryName == nameLower + ".dds") {
+            foundIdx = i;
+            break;
+        }
+    }
+
+    if (foundIdx != -1) {
+        const auto& e = entries[foundIdx];
+        if (e.offset + e.size <= pcPackData.size()) {
+            std::vector<uint8_t> ddsData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+            unsigned int tex = LoadTextureFromData(ddsData);
+            if (tex != 0) {
+                Log("Loaded texture from current pack: " + textureName);
+                textureNameCache[nameLower] = tex;
+                return tex;
+            }
+        }
+    }
+
+    // Second try: Search global texture name index (all packs)
+    if (globalTextureNameIndex.count(nameLower)) {
+        auto& loc = globalTextureNameIndex[nameLower];
+        std::ifstream texFile(loc.packPath, std::ios::binary);
+        if (texFile.is_open()) {
+            texFile.seekg(loc.offset);
+            std::vector<uint8_t> ddsData(loc.size);
+            texFile.read((char*)ddsData.data(), loc.size);
+            texFile.close();
+
+            unsigned int tex = LoadTextureFromData(ddsData);
+            if (tex != 0) {
+                Log("Loaded texture from global index: " + textureName + " (" + fs::path(loc.packPath).filename().string() + ")");
+                textureNameCache[nameLower] = tex;
+                return tex;
+            }
+        }
+    }
+
+    // Third try: Hash-based lookup in global index
+    uint32_t hash1 = CalculateCRC32(nameLower + ".dds");
+    if (globalTextureIndex.count(hash1)) {
+        auto& loc = globalTextureIndex[hash1];
+        std::ifstream texFile(loc.packPath, std::ios::binary);
+        if (texFile.is_open()) {
+            texFile.seekg(loc.offset);
+            std::vector<uint8_t> ddsData(loc.size);
+            texFile.read((char*)ddsData.data(), loc.size);
+            texFile.close();
+
+            unsigned int tex = LoadTextureFromData(ddsData);
+            if (tex != 0) {
+                Log("Loaded texture by hash from global index: " + textureName);
+                textureNameCache[nameLower] = tex;
+                return tex;
+            }
+        }
+    }
+
+    uint32_t hash2 = CalculateCRC32(nameLower);
+    if (globalTextureIndex.count(hash2)) {
+        auto& loc = globalTextureIndex[hash2];
+        std::ifstream texFile(loc.packPath, std::ios::binary);
+        if (texFile.is_open()) {
+            texFile.seekg(loc.offset);
+            std::vector<uint8_t> ddsData(loc.size);
+            texFile.read((char*)ddsData.data(), loc.size);
+            texFile.close();
+
+            unsigned int tex = LoadTextureFromData(ddsData);
+            if (tex != 0) {
+                Log("Loaded texture by hash (no ext) from global index: " + textureName);
+                textureNameCache[nameLower] = tex;
+                return tex;
+            }
+        }
+    }
+
+    // Not found
+    textureNameCache[nameLower] = 0;
+    return 0;
 }
 
 void SpiderManTool::InitModelPreview() {
@@ -118,7 +224,7 @@ void SpiderManTool::InitModelPreview() {
 
         glGenTextures(1, &msColor);
         glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, msColor);
-        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGB, width, height, GL_TRUE);
+        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA, width, height, GL_TRUE);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, msColor, 0);
 
         glGenRenderbuffers(1, &msRbo);
@@ -131,7 +237,7 @@ void SpiderManTool::InitModelPreview() {
 
         glGenTextures(1, &viewportTextureId);
         glBindTexture(GL_TEXTURE_2D, viewportTextureId);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, viewportTextureId, 0);
@@ -141,10 +247,41 @@ void SpiderManTool::InitModelPreview() {
 
     if (modelProgram != 0) return;
 
+    // Updated shaders with proper alpha handling
     const char* vShaderCode = "#version 130\n"
-        "in vec3 pos; in vec2 texCoord; out vec2 TexCoord; uniform mat4 model; uniform mat4 view; uniform mat4 projection; void main(){ TexCoord = texCoord; gl_Position = projection * view * model * vec4(pos,1.0); }";
+        "in vec3 pos;\n"
+        "in vec2 texCoord;\n"
+        "out vec2 TexCoord;\n"
+        "uniform mat4 model;\n"
+        "uniform mat4 view;\n"
+        "uniform mat4 projection;\n"
+        "void main() {\n"
+        "    TexCoord = texCoord;\n"
+        "    gl_Position = projection * view * model * vec4(pos, 1.0);\n"
+        "}\n";
+
     const char* fShaderCode = "#version 130\n"
-        "in vec2 TexCoord; out vec4 color; uniform sampler2D diffTexture; uniform bool hasTexture; void main(){ if(hasTexture) { vec4 texColor = texture(diffTexture, TexCoord); if(texColor.a < 0.1) discard; color = vec4(texColor.rgb, texColor.a); } else { color = vec4(1.0, 1.0, 1.0, 1.0); } }";
+        "in vec2 TexCoord;\n"
+        "out vec4 FragColor;\n"
+        "uniform sampler2D diffTexture;\n"
+        "uniform bool hasTexture;\n"
+        "uniform bool isTranslucent;\n"
+        "void main() {\n"
+        "    if (hasTexture) {\n"
+        "        vec4 texColor = texture(diffTexture, TexCoord);\n"
+        "        if (isTranslucent) {\n"
+        "            // Use alpha channel for translucent materials\n"
+        "            if (texColor.a < 0.01) discard;\n"
+        "            FragColor = texColor;\n"
+        "        } else {\n"
+        "            // Opaque materials - discard very low alpha\n"
+        "            if (texColor.a < 0.1) discard;\n"
+        "            FragColor = vec4(texColor.rgb, 1.0);\n"
+        "        }\n"
+        "    } else {\n"
+        "        FragColor = vec4(0.8, 0.8, 0.8, 1.0);\n"
+        "    }\n"
+        "}\n";
 
     unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex, 1, &vShaderCode, NULL);
@@ -250,7 +387,7 @@ void SpiderManTool::RenderModelPreview() {
     int width = 3840;
     int height = 2160;
     glViewport(0, 0, width, height);
-    glClearColor(0.0f, 0.5f, 0.5f, 1.0f);
+    glClearColor(0.15f, 0.15f, 0.2f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     if (previewMeshes.empty()) {
@@ -289,6 +426,7 @@ void SpiderManTool::RenderModelPreview() {
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "view"), 1, GL_FALSE, view);
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "model"), 1, GL_FALSE, model);
 
+    // First pass: Render opaque meshes
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
 
@@ -304,15 +442,17 @@ void SpiderManTool::RenderModelPreview() {
             } else {
                 glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
             }
+            glUniform1i(glGetUniformLocation(modelProgram, "isTranslucent"), 0);
 
             glBindVertexArray(m.vao);
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
         }
     }
 
+    // Second pass: Render translucent meshes with alpha blending
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
+    glDepthMask(GL_FALSE);  // Don't write to depth buffer for translucent objects
 
     for (const auto& m : previewMeshes) {
         if (!m.isTranslucent) continue;
@@ -326,14 +466,17 @@ void SpiderManTool::RenderModelPreview() {
             } else {
                 glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
             }
+            glUniform1i(glGetUniformLocation(modelProgram, "isTranslucent"), 1);
 
             glBindVertexArray(m.vao);
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
         }
     }
+
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 
+    // Resolve multisampled buffer
     glBindFramebuffer(GL_READ_FRAMEBUFFER, msFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, modelFbo);
     glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);

@@ -19,6 +19,12 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     }
     textureCache.clear();
 
+    // Clear name-based texture cache too
+    for (auto& t : textureNameCache) {
+        if (t.second != 0) glDeleteTextures(1, &t.second);
+    }
+    textureNameCache.clear();
+
     if (ddsTextureId != 0) {
         glDeleteTextures(1, &ddsTextureId);
         ddsTextureId = 0;

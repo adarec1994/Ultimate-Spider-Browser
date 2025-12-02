@@ -123,15 +123,29 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
 
             // Try to load texture using the texture name from material
             if (!mat.textureName.empty()) {
-                uint32_t hash1 = CalculateCRC32(mat.textureName + ".dds");
-                if (textureResolver) tex = textureResolver(hash1);
-                else tex = LoadTextureFromHash(hash1);
+                Log("Looking for texture: " + mat.textureName + " (mesh: " + mat.meshName + ")");
 
-                if (tex == 0) {
-                    uint32_t hash2 = CalculateCRC32(mat.textureName);
-                    if (textureResolver) tex = textureResolver(hash2);
-                    else tex = LoadTextureFromHash(hash2);
+                if (textureResolver) {
+                    std::string texNameLower = StrToLower(mat.textureName);
+                    uint32_t hash1 = CalculateCRC32(texNameLower + ".dds");
+                    tex = textureResolver(hash1);
+
+                    if (tex == 0) {
+                        uint32_t hash2 = CalculateCRC32(texNameLower);
+                        tex = textureResolver(hash2);
+                    }
+                } else {
+                    // Use name-based lookup when not using custom resolver
+                    tex = LoadTextureByName(mat.textureName);
                 }
+
+                if (tex != 0) {
+                    Log("  -> Found texture ID: " + std::to_string(tex));
+                } else {
+                    Log("  -> Texture NOT found");
+                }
+            } else {
+                Log("No texture name in material for mesh at offset 0x" + std::to_string(smOfs));
             }
 
             // Fallback: try model name based texture
@@ -140,10 +154,25 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 size_t lastDot = cleanName.find_last_of(".");
                 if(lastDot != std::string::npos) cleanName = cleanName.substr(0, lastDot);
                 cleanName = StrToLower(cleanName);
-                std::string diffName = cleanName + "_d.dds";
-                uint32_t diffHash = CalculateCRC32(diffName);
-                if (textureResolver) tex = textureResolver(diffHash);
-                else tex = LoadTextureFromHash(diffHash);
+
+                if (textureResolver) {
+                    uint32_t diffHash = CalculateCRC32(cleanName + "_d.dds");
+                    tex = textureResolver(diffHash);
+                } else {
+                    tex = LoadTextureByName(cleanName + "_d");
+                    if (tex == 0) tex = LoadTextureByName(cleanName);
+                }
+            }
+
+            // Fallback: try mesh name as texture name
+            if (tex == 0 && !mat.meshName.empty()) {
+                if (textureResolver) {
+                    std::string meshNameLower = StrToLower(mat.meshName);
+                    uint32_t hash4 = CalculateCRC32(meshNameLower + ".dds");
+                    tex = textureResolver(hash4);
+                } else {
+                    tex = LoadTextureByName(mat.meshName);
+                }
             }
 
             br.Seek(smOfs + 40);
@@ -211,9 +240,10 @@ void SpiderManTool::LoadModelToGL(int index) {
     if (e.offset + e.size > pcPackData.size()) { Log("Model data out of bounds"); return; }
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-    AddMeshFromData(pcmData, e.name, [&](uint32_t hash) -> unsigned int {
-        return LoadTextureFromHash(hash);
-    });
+
+    // Don't pass a custom resolver - let AddMeshFromData use LoadTextureByName
+    // which searches all pcpacks for textures
+    AddMeshFromData(pcmData, e.name, nullptr);
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
