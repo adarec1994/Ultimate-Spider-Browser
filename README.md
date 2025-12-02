@@ -13,3 +13,5 @@ Currently includes exploring and viewing the contents of all pcpacks, loading an
 WIP:
 
 Rigged models, shaders, and audio.
+
+![spider-browser.png](source/spider-browser.png)
