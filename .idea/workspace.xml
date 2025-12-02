@@ -64,12 +64,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/Archive.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Archive.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Model.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Render.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractor/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Interface.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractor/World.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/World.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -125,12 +125,12 @@
   }
 }</component>
   <component name="RunManager" selected="CMake Application.USM">
-    <configuration name="USM" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="USM" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="USM">
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
-        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
       </method>
     </configuration>
-    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
+    <configuration name="USM" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="USM" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="USM">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -361,6 +361,7 @@
       <workItem from="1764605522179" duration="4866000" />
       <workItem from="1764645569368" duration="2405000" />
       <workItem from="1764652857011" duration="4972000" />
+      <workItem from="1764681225829" duration="2721000" />
     </task>
     <servers />
   </component>

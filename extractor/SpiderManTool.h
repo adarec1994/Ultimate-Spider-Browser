@@ -66,10 +66,28 @@ struct TextureLocation {
     uint32_t size;
 };
 
+struct WorldPCMItem {
+    std::string packPath;
+    uint32_t offset;
+    uint32_t size;
+};
+
 class SpiderManTool {
 public:
-    enum AppState { STATE_SPLASH, STATE_BROWSER };
+    enum AppState { STATE_SPLASH, STATE_BROWSER, STATE_LOADING, STATE_LOADING_WORLD };
     AppState currentState = STATE_SPLASH;
+
+    // Loading progress state (for indexing)
+    bool isIndexing = false;
+    int indexingProgress = 0;
+    int indexingTotal = 0;
+    std::string indexingCurrentPack;
+
+    // World loading progress state
+    bool isLoadingWorld = false;
+    int worldLoadProgress = 0;
+    int worldLoadTotal = 0;
+    std::vector<WorldPCMItem> worldPcmQueue;
 
     std::string searchPath = ".";
     std::vector<fs::path> foundPacks;
@@ -127,6 +145,7 @@ public:
     std::map<std::string, TextureLocation> globalTextureNameIndex;
 
     void BuildGlobalTextureIndex();
+    void BuildGlobalTextureIndexStep(int packIndex);
 
     bool isWorldMode = false;
     float modelCenter[3] = {0.0f, 0.0f, 0.0f};
@@ -170,4 +189,5 @@ public:
 
     void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr);
     void LoadAllWorldGeometries();
+    void LoadWorldGeometryStep(int index);
 };

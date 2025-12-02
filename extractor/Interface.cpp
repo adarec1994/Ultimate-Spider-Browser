@@ -27,6 +27,98 @@ bool IsWorldInteriorPack(const std::string& stemName) {
 }
 
 void RenderUI(SpiderManTool& tool) {
+    // Handle indexing loading state
+    if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
+        const int PACKS_PER_FRAME = 5;
+        for (int i = 0; i < PACKS_PER_FRAME && tool.indexingProgress < tool.indexingTotal; i++) {
+            tool.BuildGlobalTextureIndexStep(tool.indexingProgress);
+            tool.indexingProgress++;
+        }
+
+        if (tool.indexingProgress >= tool.indexingTotal) {
+            tool.isIndexing = false;
+            tool.currentState = SpiderManTool::STATE_BROWSER;
+            tool.Log("Indexed " + std::to_string(tool.globalTextureIndex.size()) + " textures from " +
+                     std::to_string(tool.foundPacks.size()) + " packs");
+        }
+
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::Begin("LoadingBackground", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
+
+        ImVec2 center = ImVec2(ImGui::GetWindowWidth() / 2.0f, ImGui::GetWindowHeight() / 2.0f);
+        float boxWidth = 400.0f;
+        float boxHeight = 100.0f;
+
+        ImGui::SetCursorPos(ImVec2(center.x - boxWidth / 2.0f, center.y - boxHeight / 2.0f));
+        ImGui::BeginChild("LoadingContent", ImVec2(boxWidth, boxHeight), true, ImGuiWindowFlags_NoScrollbar);
+
+        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize("Loading PCPacks...").x) / 2.0f);
+        ImGui::Text("Loading PCPacks...");
+
+        ImGui::Spacing();
+
+        float progress = (tool.indexingTotal > 0) ? (float)tool.indexingProgress / (float)tool.indexingTotal : 0.0f;
+        ImGui::ProgressBar(progress, ImVec2(-1, 20), "");
+
+        ImGui::Spacing();
+
+        char progressText[128];
+        snprintf(progressText, sizeof(progressText), "%d / %d", tool.indexingProgress, tool.indexingTotal);
+        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize(progressText).x) / 2.0f);
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", progressText);
+
+        ImGui::EndChild();
+        ImGui::End();
+        return;
+    }
+
+    // Handle world loading state
+    if (tool.currentState == SpiderManTool::STATE_LOADING_WORLD && tool.isLoadingWorld) {
+        const int MODELS_PER_FRAME = 2;
+        for (int i = 0; i < MODELS_PER_FRAME && tool.worldLoadProgress < tool.worldLoadTotal; i++) {
+            tool.LoadWorldGeometryStep(tool.worldLoadProgress);
+            tool.worldLoadProgress++;
+        }
+
+        if (tool.worldLoadProgress >= tool.worldLoadTotal) {
+            tool.isLoadingWorld = false;
+            tool.currentState = SpiderManTool::STATE_BROWSER;
+            tool.isModelLoaded = true;
+            tool.Log("World Context Loaded. Total meshes: " + std::to_string(tool.previewMeshes.size()));
+        }
+
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::Begin("LoadingWorldBackground", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
+
+        ImVec2 center = ImVec2(ImGui::GetWindowWidth() / 2.0f, ImGui::GetWindowHeight() / 2.0f);
+        float boxWidth = 400.0f;
+        float boxHeight = 100.0f;
+
+        ImGui::SetCursorPos(ImVec2(center.x - boxWidth / 2.0f, center.y - boxHeight / 2.0f));
+        ImGui::BeginChild("LoadingWorldContent", ImVec2(boxWidth, boxHeight), true, ImGuiWindowFlags_NoScrollbar);
+
+        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize("Loading World...").x) / 2.0f);
+        ImGui::Text("Loading World...");
+
+        ImGui::Spacing();
+
+        float progress = (tool.worldLoadTotal > 0) ? (float)tool.worldLoadProgress / (float)tool.worldLoadTotal : 0.0f;
+        ImGui::ProgressBar(progress, ImVec2(-1, 20), "");
+
+        ImGui::Spacing();
+
+        char progressText[128];
+        snprintf(progressText, sizeof(progressText), "%d / %d models", tool.worldLoadProgress, tool.worldLoadTotal);
+        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize(progressText).x) / 2.0f);
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", progressText);
+
+        ImGui::EndChild();
+        ImGui::End();
+        return;
+    }
+
     if (tool.currentState == SpiderManTool::STATE_SPLASH) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -154,7 +246,7 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::BeginChild("PackList", ImVec2(0, 200), true);
             auto RenderPackNode = [&](const char* label, std::function<bool(const std::string&)> filterFunc) {
                 if (ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_DefaultOpen)) {
-                    for (int i = 0; i < tool.foundPacks.size(); i++) {
+                    for (int i = 0; i < (int)tool.foundPacks.size(); i++) {
                         std::string stem = tool.foundPacks[i].stem().string();
                         if (filterFunc(stem)) {
                             if (useFilter && ToLower(stem).find(searchLower) == std::string::npos) continue;
@@ -183,7 +275,7 @@ void RenderUI(SpiderManTool& tool) {
 
             ImGui::BeginChild("FileList", ImVec2(0, 0), true);
             if (!tool.entries.empty()) {
-                bool fileSelected = tool.selectedFileIndex >= 0 && tool.selectedFileIndex < tool.entries.size();
+                bool fileSelected = tool.selectedFileIndex >= 0 && tool.selectedFileIndex < (int)tool.entries.size();
                 float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
                 if (!fileSelected) ImGui::BeginDisabled();
@@ -215,7 +307,7 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.0f);
                     ImGui::TableHeadersRow();
 
-                    for (int i = 0; i < tool.entries.size(); i++) {
+                    for (int i = 0; i < (int)tool.entries.size(); i++) {
                         const auto& e = tool.entries[i];
                         if (useFileFilter && ToLower(e.name).find(fileSearchLower) == std::string::npos) continue;
 
