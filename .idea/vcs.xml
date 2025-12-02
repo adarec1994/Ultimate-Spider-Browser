@@ -2,7 +2,6 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/extractor/cmake-build-debug/_deps/glfw-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/extractor/glfw" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/source/glfw" vcs="Git" />
   </component>
 </project>
