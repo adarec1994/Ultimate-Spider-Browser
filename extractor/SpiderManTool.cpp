@@ -124,133 +124,6 @@ bool InvertMatrix(const float m[16], float invOut[16]) {
     return true;
 }
 
-class SkinningGLBWriter {
-    struct Accessor {
-        int bufferView; int componentType; int count; std::string type;
-        std::vector<float> min; std::vector<float> max;
-    };
-    struct BufferView { int byteOffset; int byteLength; int target; };
-
-    std::vector<uint8_t> buffer;
-    std::vector<Accessor> accessors;
-    std::vector<BufferView> bufferViews;
-    std::stringstream nodesJson;
-    std::stringstream meshesJson;
-    std::vector<int> rootNodes;
-    std::vector<int> jointIndices;
-    int meshCount = 0;
-    int nodeCount = 0;
-
-    void AlignBuffer() { while (buffer.size() % 4 != 0) buffer.push_back(0); }
-
-public:
-    void AddMeshNode(const std::string& name, int meshIndex) {
-        if (nodeCount > 0) nodesJson << ",";
-        nodesJson << "{\"name\":\"" << name << "\",\"mesh\":" << meshIndex;
-        if (!jointIndices.empty()) nodesJson << ",\"skin\":0";
-        nodesJson << "}";
-        rootNodes.push_back(nodeCount++);
-    }
-
-    void AddBoneNode(const std::string& name, const float* matrix) {
-        if (nodeCount > 0) nodesJson << ",";
-        nodesJson << "{\"name\":\"" << name << "\",\"matrix\":[";
-        for(int i=0; i<16; i++) nodesJson << matrix[i] << (i<15?",":"");
-        nodesJson << "]}";
-        jointIndices.push_back(nodeCount);
-        rootNodes.push_back(nodeCount++);
-    }
-
-    int AddBufferView(const void* data, size_t size, int target) {
-        AlignBuffer();
-        int offset = (int)buffer.size();
-        const uint8_t* ptr = (const uint8_t*)data;
-        buffer.insert(buffer.end(), ptr, ptr + size);
-        bufferViews.push_back({offset, (int)size, target});
-        return (int)bufferViews.size() - 1;
-    }
-
-    int AddAccessor(int bufferView, int componentType, int count, const char* type, float* minVal = nullptr, float* maxVal = nullptr) {
-        Accessor acc = {bufferView, componentType, count, type};
-        if (minVal) acc.min = { minVal[0], minVal[1], minVal[2] };
-        if (maxVal) acc.max = { maxVal[0], maxVal[1], maxVal[2] };
-        accessors.push_back(acc);
-        return (int)accessors.size() - 1;
-    }
-
-    int StartMesh(const std::string& name) {
-        if (meshCount > 0) meshesJson << ",";
-        meshesJson << "{\"name\":\"" << name << "\",\"primitives\":[";
-        return meshCount++;
-    }
-
-    void EndMesh() { meshesJson << "]}"; }
-
-    void AddPrimitive(int posAcc, int normAcc, int uvAcc, int indAcc, int jointAcc, int weightAcc) {
-        meshesJson << "{\"attributes\":{";
-        meshesJson << "\"POSITION\":" << posAcc;
-        if (normAcc >= 0) meshesJson << ",\"NORMAL\":" << normAcc;
-        if (uvAcc >= 0) meshesJson << ",\"TEXCOORD_0\":" << uvAcc;
-        if (jointAcc >= 0) meshesJson << ",\"JOINTS_0\":" << jointAcc;
-        if (weightAcc >= 0) meshesJson << ",\"WEIGHTS_0\":" << weightAcc;
-        meshesJson << "},\"indices\":" << indAcc << "}";
-    }
-
-    void WriteToFile(const std::string& path, int ibmAccessor = -1) {
-        AlignBuffer();
-        std::stringstream json;
-        json << "{\"asset\":{\"version\":\"2.0\"},";
-
-        json << "\"scene\":0,\"scenes\":[{\"nodes\":[";
-        for (size_t i = 0; i < rootNodes.size(); i++) json << rootNodes[i] << (i < rootNodes.size() - 1 ? "," : "");
-        json << "]}],";
-
-        if (!jointIndices.empty()) {
-            json << "\"skins\":[{\"inverseBindMatrices\":" << ibmAccessor << ",\"joints\":[";
-            for (size_t i = 0; i < jointIndices.size(); i++) json << jointIndices[i] << (i < jointIndices.size() - 1 ? "," : "");
-            json << "]}],";
-        }
-
-        json << "\"nodes\":[" << nodesJson.str() << "],";
-        json << "\"meshes\":[" << meshesJson.str() << "],";
-
-        json << "\"accessors\":[";
-        for (size_t i = 0; i < accessors.size(); i++) {
-            auto& acc = accessors[i];
-            json << "{\"bufferView\":" << acc.bufferView << ",\"componentType\":" << acc.componentType
-                 << ",\"count\":" << acc.count << ",\"type\":\"" << acc.type << "\"";
-            if (!acc.min.empty()) json << ",\"min\":[" << acc.min[0] << "," << acc.min[1] << "," << acc.min[2] << "],\"max\":[" << acc.max[0] << "," << acc.max[1] << "," << acc.max[2] << "]";
-            json << "}" << (i < accessors.size() - 1 ? "," : "");
-        }
-        json << "],";
-
-        json << "\"bufferViews\":[";
-        for (size_t i = 0; i < bufferViews.size(); i++) {
-            auto& bv = bufferViews[i];
-            json << "{\"buffer\":0,\"byteOffset\":" << bv.byteOffset
-                 << ",\"byteLength\":" << bv.byteLength << ",\"target\":" << bv.target << "}"
-                 << (i < bufferViews.size() - 1 ? "," : "");
-        }
-        json << "],";
-
-        json << "\"buffers\":[{\"byteLength\":" << buffer.size() << "}]}";
-
-        std::string jsonStr = json.str();
-        while (jsonStr.size() % 4 != 0) jsonStr += " ";
-        uint32_t totalLen = 12 + 8 + (uint32_t)jsonStr.size() + 8 + (uint32_t)buffer.size();
-
-        std::ofstream out(path, std::ios::binary);
-        uint32_t magic = 0x46546C67; uint32_t version = 2;
-        out.write((char*)&magic, 4); out.write((char*)&version, 4); out.write((char*)&totalLen, 4);
-        uint32_t chunkLen = (uint32_t)jsonStr.size(); uint32_t chunkType = 0x4E4F534A;
-        out.write((char*)&chunkLen, 4); out.write((char*)&chunkType, 4); out.write(jsonStr.c_str(), chunkLen);
-        chunkLen = (uint32_t)buffer.size(); chunkType = 0x004E4942;
-        out.write((char*)&chunkLen, 4); out.write((char*)&chunkType, 4);
-        if (chunkLen > 0) out.write((char*)buffer.data(), chunkLen);
-        out.close();
-    }
-};
-
 void SpiderManTool::Log(const std::string& msg) {
     logBuffer += msg + "\n";
     std::cout << msg << std::endl;
@@ -328,14 +201,31 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
 void SpiderManTool::OpenPCPack(const std::string& path) {
     if (loadedPCPackPath == path) return;
 
-    selectedFileIndex = -1;
-    currentPcmInfos.clear();
-    currentPcmIndex = -1;
+    isModelLoaded = false;
+    isModelPreview = false;
+    for (auto& m : previewMeshes) {
+        if (m.vao) glDeleteVertexArrays(1, &m.vao);
+        if (m.vbo) glDeleteBuffers(1, &m.vbo);
+        if (m.ebo) glDeleteBuffers(1, &m.ebo);
+    }
+    previewMeshes.clear();
 
     for (auto& t : textureCache) {
         if (t.second != 0) glDeleteTextures(1, &t.second);
     }
     textureCache.clear();
+
+    if (ddsTextureId != 0) {
+        glDeleteTextures(1, &ddsTextureId);
+        ddsTextureId = 0;
+    }
+    showDdsPopup = false;
+
+    selectedFileIndex = -1;
+    currentPcmInfos.clear();
+    currentPcmIndex = -1;
+
+    materialMap.clear();
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) { Log("Failed to open " + path); return; }
@@ -419,6 +309,11 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
         br.Seek(start + (counter + 1) * 16);
         counter++;
     }
+
+    std::sort(entries.begin(), entries.end(), [](const FileEntry& a, const FileEntry& b) {
+        return a.name < b.name;
+    });
+
     Log("Opened " + fs::path(path).filename().string());
 }
 
@@ -591,7 +486,7 @@ void SpiderManTool::InitModelPreview() {
     const char* vShaderCode = "#version 130\n"
         "in vec3 pos; in vec2 texCoord; out vec2 TexCoord; uniform mat4 model; uniform mat4 view; uniform mat4 projection; void main(){ TexCoord = texCoord; gl_Position = projection * view * model * vec4(pos,1.0); }";
     const char* fShaderCode = "#version 130\n"
-        "in vec2 TexCoord; out vec4 color; uniform sampler2D diffTexture; uniform bool hasTexture; void main(){ if(hasTexture) { vec4 texColor = texture(diffTexture, TexCoord); if(texColor.a < 0.5) discard; color = vec4(texColor.rgb, 1.0); } else { color = vec4(1.0, 1.0, 1.0, 1.0); } }";
+        "in vec2 TexCoord; out vec4 color; uniform sampler2D diffTexture; uniform bool hasTexture; void main(){ if(hasTexture) { vec4 texColor = texture(diffTexture, TexCoord); if(texColor.a < 0.1) discard; color = vec4(texColor.rgb, texColor.a); } else { color = vec4(1.0, 1.0, 1.0, 1.0); } }";
 
     unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex, 1, &vShaderCode, NULL);
@@ -622,9 +517,64 @@ bool SpiderManTool::IsWorldInteriorPack(const std::string& name) {
     return lower.substr(2, 4) == "_int";
 }
 
-void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver) {
-    BinaryReader br(pcmData);
+void SpiderManTool::ParseMaterialBlock(const std::vector<uint8_t>& pcmData) {
+    materialMap.clear();
 
+    const char* sigSimple = "smsimple";
+    const char* sigTrans = "smtranslucent";
+    const char* sigGlass = "smglass";
+
+    if (pcmData.size() < 100) return;
+
+    for (size_t i = 0; i < pcmData.size() - 64; ++i) {
+        if (pcmData[i] != 's') continue;
+
+        bool isShader = false;
+        bool isTranslucent = false;
+
+        if (strncmp((const char*)&pcmData[i], sigSimple, 8) == 0) isShader = true;
+        else if (strncmp((const char*)&pcmData[i], sigTrans, 13) == 0) { isShader = true; isTranslucent = true; }
+        else if (strncmp((const char*)&pcmData[i], sigGlass, 7) == 0) { isShader = true; isTranslucent = true; }
+
+        if (isShader) {
+            if (i < 36) continue;
+
+            size_t texRecordStart = (i - 4) - 32;
+            size_t matRecordStart = (i - 4) + 32;
+
+            if (texRecordStart >= pcmData.size() || matRecordStart + 32 > pcmData.size()) continue;
+
+            std::string texName = "";
+            size_t tStrStart = texRecordStart + 4;
+            if (pcmData[tStrStart] != 0) {
+                 const char* p = (const char*)&pcmData[tStrStart];
+                 size_t maxLen = 24; size_t len=0;
+                 while(len < maxLen && p[len] != 0) { texName += p[len]; len++; }
+            }
+
+            uint32_t matHash = *(uint32_t*)&pcmData[matRecordStart];
+
+            if (matHash != 0) {
+                MaterialDef def;
+                def.textureName = texName;
+                def.isTranslucent = isTranslucent;
+                materialMap[matHash] = def;
+            }
+        }
+    }
+}
+
+MaterialDef SpiderManTool::ResolveMaterial(uint32_t hash, const std::vector<uint8_t>& pcmData) {
+    if (materialMap.count(hash)) {
+        return materialMap[hash];
+    }
+    return MaterialDef();
+}
+
+void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver) {
+    ParseMaterialBlock(pcmData);
+
+    BinaryReader br(pcmData);
     if (8 + 4 > pcmData.size()) return;
     br.Seek(8);
     uint32_t num = br.Read<uint32_t>();
@@ -637,12 +587,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
     struct Info { uint16_t u1, type; uint32_t offset, u2; };
     std::vector<Info> infos;
     for(uint32_t i=0; i<num; i++) {
-        Info inf;
-        inf.u1 = br.Read<uint16_t>();
-        inf.type = br.Read<uint16_t>();
-        inf.offset = br.Read<uint32_t>();
-        inf.u2 = br.Read<uint32_t>();
-        infos.push_back(inf);
+        Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
 
     struct Vertex { float x,y,z; float u,v; };
@@ -651,32 +596,38 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         if (inf.type != 512) continue;
         if (inf.offset + 16 > pcmData.size()) continue;
 
-        br.Seek(inf.offset);
-        br.Skip(8);
-        uint32_t numSm = br.Read<uint32_t>();
-        uint32_t infSmOfs = br.Read<uint32_t>();
-
-        if (numSm > 256) continue;
-        if (infSmOfs >= pcmData.size()) continue;
+        br.Seek(inf.offset); br.Skip(8);
+        uint32_t numSm = br.Read<uint32_t>(); uint32_t infSmOfs = br.Read<uint32_t>();
+        if (numSm > 256 || infSmOfs >= pcmData.size()) continue;
 
         br.Seek(infSmOfs);
         std::vector<uint32_t> smOffsets;
-        for(uint32_t s=0; s<numSm; s++) {
-            br.Skip(4);
-            smOffsets.push_back(br.Read<uint32_t>());
-        }
+        for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
 
         for(uint32_t smOfs : smOffsets) {
             if (smOfs + 64 > pcmData.size()) continue;
 
             br.Seek(smOfs + 32);
-            uint32_t texHash = br.Read<uint32_t>();
+            uint32_t materialHash = br.Read<uint32_t>();
 
+            MaterialDef mat = ResolveMaterial(materialHash, pcmData);
             unsigned int tex = 0;
 
-            if (texHash != 0) {
-                if (textureResolver) tex = textureResolver(texHash);
-                else tex = LoadTextureFromHash(texHash);
+            if (!mat.textureName.empty()) {
+                uint32_t hash1 = CalculateCRC32(mat.textureName + ".dds");
+                if (textureResolver) tex = textureResolver(hash1);
+                else tex = LoadTextureFromHash(hash1);
+
+                if (tex == 0) {
+                    uint32_t hash2 = CalculateCRC32(mat.textureName);
+                    if (textureResolver) tex = textureResolver(hash2);
+                    else tex = LoadTextureFromHash(hash2);
+                }
+            }
+
+            if (tex == 0 && materialHash != 0) {
+                 if (textureResolver) tex = textureResolver(materialHash);
+                 else tex = LoadTextureFromHash(materialHash);
             }
 
             if (tex == 0 && !modelName.empty()) {
@@ -684,40 +635,18 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 size_t lastDot = cleanName.find_last_of(".");
                 if(lastDot != std::string::npos) cleanName = cleanName.substr(0, lastDot);
                 cleanName = StrToLower(cleanName);
-
                 std::string diffName = cleanName + "_d.dds";
                 uint32_t diffHash = CalculateCRC32(diffName);
-
                 if (textureResolver) tex = textureResolver(diffHash);
                 else tex = LoadTextureFromHash(diffHash);
-
-                if (tex == 0) {
-                     for(const auto& e : entries) {
-                         if(e.isDds) {
-                             std::string lowerEntry = StrToLower(e.name);
-                             if(lowerEntry.find(cleanName) == 0) {
-                                 tex = LoadTextureFromHash(e.hash);
-                                 if(tex != 0) break;
-                             }
-                         }
-                     }
-                }
             }
 
             br.Seek(smOfs + 40);
+            uint32_t itype = br.Read<uint32_t>(); uint32_t inum = br.Read<uint32_t>(); uint32_t iofs = br.Read<uint32_t>();
+            br.Skip(4); uint32_t vnum = br.Read<uint32_t>(); uint32_t vofs = br.Read<uint32_t>();
+            br.Skip(8); uint32_t stride = br.Read<uint32_t>();
 
-            uint32_t itype = br.Read<uint32_t>();
-            uint32_t inum = br.Read<uint32_t>();
-            uint32_t iofs = br.Read<uint32_t>();
-            br.Skip(4);
-            uint32_t vnum = br.Read<uint32_t>();
-            uint32_t vofs = br.Read<uint32_t>();
-            br.Skip(8);
-            uint32_t stride = br.Read<uint32_t>();
-
-            if (vnum > 100000 || inum > 300000) continue;
-            if (vofs >= pcmData.size() || iofs >= pcmData.size()) continue;
-            if (stride == 0) continue;
+            if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
 
             br.Seek(vofs);
             std::vector<Vertex> vertices;
@@ -725,26 +654,14 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             for(uint32_t v=0; v<vnum; v++) {
                 size_t startV = br.Tell();
                 if (startV + stride > pcmData.size()) { valid = false; break; }
-
                 Vertex vert;
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
                 vert.u = 0; vert.v = 0;
-
                 if (stride == 64) {
-                    if (startV + 24 + 8 <= pcmData.size()) {
-                        br.Seek(startV + 24);
-                        vert.u = br.Read<float>();
-                        vert.v = 1.0f - br.Read<float>();
-                    }
+                    if (startV + 24 + 8 <= pcmData.size()) { br.Seek(startV + 24); vert.u = br.Read<float>(); vert.v = 1.0f - br.Read<float>(); }
+                } else if (stride == 24) {
+                    if (startV + 12 + 8 <= pcmData.size()) { br.Seek(startV + 12); vert.u = br.Read<float>(); vert.v = 1.0f - br.Read<float>(); }
                 }
-                else if (stride == 24) {
-                    if (startV + 12 + 8 <= pcmData.size()) {
-                        br.Seek(startV + 12);
-                        vert.u = br.Read<float>();
-                        vert.v = 1.0f - br.Read<float>();
-                    }
-                }
-
                 vertices.push_back(vert);
                 br.Seek(startV + stride);
             }
@@ -752,35 +669,22 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
 
             br.Seek(iofs);
             std::vector<uint16_t> indices;
-
             if (iofs + inum * 2 > pcmData.size()) continue;
-
             for(uint32_t i=0; i<inum; i++) indices.push_back(br.Read<uint16_t>());
-
             if (vertices.empty() || indices.empty()) continue;
 
             RenderMesh mesh;
             mesh.indexCount = (int)indices.size();
             mesh.mode = (itype == 4) ? GL_TRIANGLES : GL_TRIANGLE_STRIP;
             mesh.textureId = tex;
+            mesh.isTranslucent = mat.isTranslucent;
 
-            glGenVertexArrays(1, &mesh.vao);
-            glGenBuffers(1, &mesh.vbo);
-            glGenBuffers(1, &mesh.ebo);
-
+            glGenVertexArrays(1, &mesh.vao); glGenBuffers(1, &mesh.vbo); glGenBuffers(1, &mesh.ebo);
             glBindVertexArray(mesh.vao);
-            glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
-            glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
-
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_STATIC_DRAW);
-
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
-            glEnableVertexAttribArray(0);
-
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float)));
-            glEnableVertexAttribArray(1);
-
+            glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo); glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_STATIC_DRAW);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0); glEnableVertexAttribArray(0);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
         }
@@ -916,7 +820,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
             currentFile.seekg(item.second.first);
             std::vector<uint8_t> fileData(item.second.second);
             currentFile.read((char*)fileData.data(), item.second.second);
-
             AddMeshFromData(fileData, "", globalResolver);
         }
     }
@@ -940,7 +843,9 @@ void SpiderManTool::LoadModelToGL(int index) {
     if (e.offset + e.size > pcPackData.size()) { Log("Model data out of bounds"); return; }
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-    AddMeshFromData(pcmData, e.name);
+    AddMeshFromData(pcmData, e.name, [&](uint32_t hash) -> unsigned int {
+        return LoadTextureFromHash(hash);
+    });
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
@@ -1151,7 +1056,12 @@ void SpiderManTool::RenderModelPreview() {
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "view"), 1, GL_FALSE, view);
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "model"), 1, GL_FALSE, model);
 
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+
     for (const auto& m : previewMeshes) {
+        if (m.isTranslucent) continue;
+
         if (m.indexCount > 0) {
             if (m.textureId != 0) {
                 glActiveTexture(GL_TEXTURE0);
@@ -1166,6 +1076,30 @@ void SpiderManTool::RenderModelPreview() {
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
         }
     }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    for (const auto& m : previewMeshes) {
+        if (!m.isTranslucent) continue;
+
+        if (m.indexCount > 0) {
+            if (m.textureId != 0) {
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, m.textureId);
+                glUniform1i(glGetUniformLocation(modelProgram, "diffTexture"), 0);
+                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 1);
+            } else {
+                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
+            }
+
+            glBindVertexArray(m.vao);
+            glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
+        }
+    }
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, msFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, modelFbo);
@@ -1242,6 +1176,8 @@ void SpiderManTool::LoadPreview(int index) {
 }
 
 void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath) {
+    ParseMaterialBlock(pcmData);
+
     BinaryReader br(pcmData);
     if (8 + 4 > pcmData.size()) return;
     br.Seek(8);
@@ -1258,12 +1194,23 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     SkinningGLBWriter glb;
     std::vector<float> allIBMs;
 
+    auto ReadName = [&](uint32_t offset) -> std::string {
+        if (offset == 0 || offset + 4 >= pcmData.size()) return "";
+        size_t strStart = offset + 4;
+        size_t end = strStart;
+        while (end < pcmData.size() && pcmData[end] != 0) end++;
+        return std::string((char*)&pcmData[strStart], end - strStart);
+    };
+
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
         if (inf.offset + 20 > pcmData.size()) continue;
 
         br.Seek(inf.offset);
         uint32_t nameOfs = br.Read<uint32_t>();
+        std::string modelName = ReadName(nameOfs);
+        if (modelName.empty()) modelName = "Model_" + std::to_string(inf.u1);
+
         br.Skip(4); uint32_t numSm = br.Read<uint32_t>(); uint32_t infSmOfs = br.Read<uint32_t>();
 
         uint32_t numBn = br.Read<uint32_t>();
@@ -1277,7 +1224,9 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                  for(int m=0; m<16; m++) mat[m] = br.Read<float>();
 
                  std::stringstream bnName; bnName << "bone_" << b;
-                 glb.AddBoneNode(bnName.str(), mat);
+                 int boneNodeIdx = glb.AddNode(bnName.str(), -1, -1, mat);
+                 glb.AddJoint(boneNodeIdx);
+                 glb.AddToScene(boneNodeIdx);
 
                  float invMat[16];
                  if (InvertMatrix(mat, invMat)) {
@@ -1293,17 +1242,31 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         br.Seek(infSmOfs);
         std::vector<uint32_t> smOffsets;
         for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
+
+        std::vector<int> currentModelChildren;
+
         for(uint32_t smOfs : smOffsets) {
             if (smOfs + 64 > pcmData.size()) continue;
             br.Seek(smOfs);
             uint32_t smNameOfs = br.Read<uint32_t>();
+            std::string smName = ReadName(smNameOfs);
+            if (smName.empty()) smName = "mesh";
 
-            br.Skip(36);
+            br.Seek(smOfs + 32);
+            uint32_t materialHash = br.Read<uint32_t>();
+
+            MaterialDef mat = ResolveMaterial(materialHash, pcmData);
+            std::string matName = "DefaultMat";
+            if (!mat.textureName.empty()) matName = mat.textureName;
+            else if (materialHash != 0) matName = "Hash_" + std::to_string(materialHash);
+
+            int matIdx = glb.AddMaterial(matName, mat.isTranslucent);
+
+            br.Seek(smOfs + 40);
 
             uint32_t itype = br.Read<uint32_t>(); uint32_t inum = br.Read<uint32_t>(); uint32_t iofs = br.Read<uint32_t>();
             br.Skip(4); uint32_t vnum = br.Read<uint32_t>(); uint32_t vofs = br.Read<uint32_t>();
             br.Skip(8); uint32_t stride = br.Read<uint32_t>();
-            std::string smName = "mesh";
 
             if (vofs >= pcmData.size() || iofs >= pcmData.size()) continue;
 
@@ -1319,7 +1282,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 if (stride == 64) {
                     br.Seek(startV + 12); norm.push_back(br.Read<float>()); norm.push_back(br.Read<float>()); norm.push_back(br.Read<float>());
                     br.Seek(startV + 24); uvs.push_back(br.Read<float>()); uvs.push_back(1.0f - br.Read<float>());
-
                     br.Seek(startV + 32);
                     for(int k=0; k<4; k++) {
                         float val = br.Read<float>();
@@ -1327,11 +1289,9 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                         if (idx < 0 || (numBn > 0 && idx >= (int)numBn)) idx = 0;
                         joints.push_back((uint16_t)idx);
                     }
-
                     br.Seek(startV + 48);
                     weights.push_back(br.Read<float>()); weights.push_back(br.Read<float>());
                     weights.push_back(br.Read<float>()); weights.push_back(br.Read<float>());
-
                 } else if (stride == 24) {
                     br.Seek(startV + 12); uvs.push_back(br.Read<float>()); uvs.push_back(1.0f - br.Read<float>());
                 }
@@ -1366,14 +1326,20 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
 
             if(!norm.empty()) normAcc = glb.AddAccessor(glb.AddBufferView(norm.data(), norm.size()*4, 34962), 5126, vnum, "VEC3");
             if(!uvs.empty()) uvAcc = glb.AddAccessor(glb.AddBufferView(uvs.data(), uvs.size()*4, 34962), 5126, vnum, "VEC2");
-
             if(!joints.empty()) jointAcc = glb.AddAccessor(glb.AddBufferView(joints.data(), joints.size()*2, 34963), 5123, vnum, "VEC4");
             if(!weights.empty()) weightAcc = glb.AddAccessor(glb.AddBufferView(weights.data(), weights.size()*4, 34962), 5126, vnum, "VEC4");
 
             int meshIdx = glb.StartMesh(smName);
-            glb.AddPrimitive(posAcc, normAcc, uvAcc, indAcc, jointAcc, weightAcc);
+            glb.AddPrimitive(posAcc, normAcc, uvAcc, indAcc, jointAcc, weightAcc, matIdx);
             glb.EndMesh();
-            glb.AddMeshNode(smName, meshIdx);
+
+            int meshNodeIdx = glb.AddNode(smName, meshIdx, (glb.HasJoints() ? 0 : -1));
+            currentModelChildren.push_back(meshNodeIdx);
+        }
+
+        if (!currentModelChildren.empty()) {
+            int containerIdx = glb.AddNode(modelName, -1, -1, nullptr, currentModelChildren);
+            glb.AddToScene(containerIdx);
         }
     }
 
@@ -1396,6 +1362,9 @@ void SpiderManTool::AnalyzePCM(int index) {
     if (e.offset + e.size > pcPackData.size()) return;
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+
+    ParseMaterialBlock(pcmData);
+
     BinaryReader br(pcmData);
 
     if (8 + 4 > pcmData.size()) return;
@@ -1446,6 +1415,10 @@ void SpiderManTool::AnalyzePCM(int index) {
         for(uint32_t smOfs : smOffsets) {
             if (smOfs + 64 > pcmData.size()) continue;
 
+            br.Seek(smOfs + 32);
+            uint32_t materialHash = br.Read<uint32_t>();
+            MaterialDef mat = ResolveMaterial(materialHash, pcmData);
+
             br.Seek(smOfs);
             br.Skip(40);
 
@@ -1465,6 +1438,18 @@ void SpiderManTool::AnalyzePCM(int index) {
             info.vCount = vnum;
             info.vOffset = vofs;
             info.stride = stride;
+
+            info.isTranslucent = mat.isTranslucent;
+
+            if (!mat.textureName.empty()) {
+                info.assignedTexture = mat.textureName;
+            } else if (materialHash != 0) {
+                std::stringstream ss;
+                ss << "Hash: " << std::hex << materialHash;
+                info.assignedTexture = ss.str();
+            } else {
+                info.assignedTexture = "None";
+            }
 
             if (stride == 64) {
                 info.hasUV = true;

@@ -9,6 +9,12 @@
 
 namespace fs = std::filesystem;
 
+struct MaterialDef {
+    std::string textureName;
+    std::string shaderName;
+    bool isTranslucent = false;
+};
+
 struct FileEntry {
     uint32_t hash;
     uint32_t type;
@@ -27,6 +33,7 @@ struct RenderMesh {
     int indexCount;
     GLenum mode;
     unsigned int textureId;
+    bool isTranslucent = false;
 };
 
 struct PCMSkeletonInfo {
@@ -43,6 +50,8 @@ struct PCMMeshInfo {
     uint32_t primitiveType;
     bool hasUV;
     bool hasBones;
+    std::string assignedTexture;
+    bool isTranslucent;
 };
 
 struct TextureLocation {
@@ -60,6 +69,11 @@ public:
     std::vector<fs::path> foundPacks;
     int selectedPackIndex = -1;
     int selectedFileIndex = -1;
+
+    bool showAssetBrowser = true;
+    char searchBuffer[256] = "";
+
+    int currentFileFilter = 0;
 
     std::map<uint32_t, std::string> dictionary;
     std::vector<FileEntry> entries;
@@ -87,6 +101,8 @@ public:
     std::vector<PCMMeshInfo> currentPcmInfos;
     PCMSkeletonInfo currentPcmSkeleton;
     int currentPcmIndex = -1;
+
+    std::map<uint32_t, MaterialDef> materialMap;
 
     unsigned int modelFbo = 0;
     unsigned int modelRbo = 0;
@@ -133,6 +149,9 @@ public:
 
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
     void AnalyzePCM(int index);
+
+    void ParseMaterialBlock(const std::vector<uint8_t>& pcmData);
+    MaterialDef ResolveMaterial(uint32_t hash, const std::vector<uint8_t>& pcmData);
 
     bool IsWorldPack(const std::string& name);
     bool IsWorldInteriorPack(const std::string& name);

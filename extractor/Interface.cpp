@@ -1,5 +1,6 @@
 #include "Interface.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "ImGuiFileDialog.h"
 #include <algorithm>
 #include <string>
@@ -67,16 +68,39 @@ void RenderUI(SpiderManTool& tool) {
         return;
     }
 
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("View")) {
+            ImGui::MenuItem("Asset Browser", nullptr, &tool.showAssetBrowser);
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->Pos);
-    ImGui::SetNextWindowSize(viewport->Size);
+    ImGuiID dockspace_id = ImGui::GetID("USM_DockSpace");
+
+    static bool dockLayoutInitialized = false;
+    if (!dockLayoutInitialized) {
+        ImGui::DockBuilderRemoveNode(dockspace_id);
+        ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->Size);
+
+        ImGuiID dock_main_id = dockspace_id;
+        ImGuiID dock_id_left = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.25f, nullptr, &dock_main_id);
+
+        ImGui::DockBuilderDockWindow("Asset Browser", dock_id_left);
+        ImGui::DockBuilderDockWindow("Viewport", dock_main_id);
+        ImGui::DockBuilderFinish(dockspace_id);
+        dockLayoutInitialized = true;
+    }
+
+    ImGui::DockSpaceOverViewport(dockspace_id, viewport, ImGuiDockNodeFlags_PassthruCentralNode);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
 
     ImGuiWindowFlags bgFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
                                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 
@@ -96,7 +120,8 @@ void RenderUI(SpiderManTool& tool) {
 
         tool.RenderModelPreview();
     } else {
-        ImGui::SetCursorPos(ImVec2(viewport->Size.x * 0.5f - 100, viewport->Size.y * 0.5f));
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        ImGui::SetCursorPos(ImVec2(avail.x * 0.5f - 100, avail.y * 0.5f));
         ImGui::TextDisabled("Select a 3D Model (.pcm) to preview");
     }
 
@@ -110,122 +135,121 @@ void RenderUI(SpiderManTool& tool) {
 
         if (ImGui::Begin(title.c_str(), &tool.showDdsPopup)) {
             ImVec2 avail = ImGui::GetContentRegionAvail();
-
             float scale = 1.0f;
             if (avail.x < tool.ddsWidth || avail.y < tool.ddsHeight) {
                 float scaleX = avail.x / tool.ddsWidth;
                 float scaleY = avail.y / tool.ddsHeight;
                 scale = (scaleX < scaleY) ? scaleX : scaleY;
             }
-
-            ImGui::Image((void*)(intptr_t)tool.ddsTextureId,
-                         ImVec2(tool.ddsWidth * scale, tool.ddsHeight * scale));
+            ImGui::Image((void*)(intptr_t)tool.ddsTextureId, ImVec2(tool.ddsWidth * scale, tool.ddsHeight * scale));
         }
         ImGui::End();
     }
 
-    ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Asset Browser", nullptr, 0)) {
+    if (tool.showAssetBrowser) {
+        if (ImGui::Begin("Asset Browser", &tool.showAssetBrowser)) {
+            ImGui::InputTextWithHint("##SearchPacks", "Search packs...", tool.searchBuffer, sizeof(tool.searchBuffer));
+            std::string searchLower = ToLower(tool.searchBuffer);
+            bool useFilter = !searchLower.empty();
 
-        ImGui::Text("Found %zu Packs", tool.foundPacks.size());
-        ImGui::Separator();
+            ImGui::Separator();
+            ImGui::Text("Found %zu Packs", tool.foundPacks.size());
+            ImGui::Separator();
 
-        ImGui::BeginChild("PackList", ImVec2(0, 200), true);
-
-        if (ImGui::TreeNodeEx("World", ImGuiTreeNodeFlags_DefaultOpen)) {
-            for (int i = 0; i < tool.foundPacks.size(); i++) {
-                std::string stem = tool.foundPacks[i].stem().string();
-                if (IsWorldPack(stem)) {
-                    bool isSelected = (tool.selectedPackIndex == i);
-                    if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
-                        tool.selectedPackIndex = i;
-                        tool.OpenPCPack(tool.foundPacks[i].string());
+            ImGui::BeginChild("PackList", ImVec2(0, 200), true);
+            auto RenderPackNode = [&](const char* label, std::function<bool(const std::string&)> filterFunc) {
+                if (ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (int i = 0; i < tool.foundPacks.size(); i++) {
+                        std::string stem = tool.foundPacks[i].stem().string();
+                        if (filterFunc(stem)) {
+                            if (useFilter && ToLower(stem).find(searchLower) == std::string::npos) continue;
+                            bool isSelected = (tool.selectedPackIndex == i);
+                            if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
+                                tool.selectedPackIndex = i;
+                                tool.OpenPCPack(tool.foundPacks[i].string());
+                            }
+                        }
                     }
+                    ImGui::TreePop();
                 }
-            }
-            ImGui::TreePop();
-        }
-        if (ImGui::TreeNodeEx("World Interiors", ImGuiTreeNodeFlags_DefaultOpen)) {
-            for (int i = 0; i < tool.foundPacks.size(); i++) {
-                std::string stem = tool.foundPacks[i].stem().string();
-                if (IsWorldInteriorPack(stem)) {
-                    bool isSelected = (tool.selectedPackIndex == i);
-                    if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
-                        tool.selectedPackIndex = i;
-                        tool.OpenPCPack(tool.foundPacks[i].string());
-                    }
-                }
-            }
-            ImGui::TreePop();
-        }
-        if (ImGui::TreeNodeEx("Other", ImGuiTreeNodeFlags_DefaultOpen)) {
-            for (int i = 0; i < tool.foundPacks.size(); i++) {
-                std::string stem = tool.foundPacks[i].stem().string();
-                if (!IsWorldPack(stem) && !IsWorldInteriorPack(stem)) {
-                    bool isSelected = (tool.selectedPackIndex == i);
-                    if (ImGui::Selectable(tool.foundPacks[i].filename().string().c_str(), isSelected)) {
-                        tool.selectedPackIndex = i;
-                        tool.OpenPCPack(tool.foundPacks[i].string());
-                    }
-                }
-            }
-            ImGui::TreePop();
-        }
-        ImGui::EndChild();
+            };
+            RenderPackNode("World", IsWorldPack);
+            RenderPackNode("World Interiors", IsWorldInteriorPack);
+            RenderPackNode("Other", [](const std::string& s) { return !IsWorldPack(s) && !IsWorldInteriorPack(s); });
+            ImGui::EndChild();
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Text("Files");
+            ImGui::Spacing();
+            ImGui::Separator();
 
-        ImGui::BeginChild("FileList", ImVec2(0, 0), true);
+            static char fileSearchBuffer[256] = "";
+            ImGui::InputTextWithHint("##SearchFiles", "Search files inside pack...", fileSearchBuffer, sizeof(fileSearchBuffer));
+            std::string fileSearchLower = ToLower(fileSearchBuffer);
+            bool useFileFilter = !fileSearchLower.empty();
 
-        if (tool.selectedPackIndex != -1 && !tool.entries.empty()) {
-            if (ImGui::Button("Extract Pack")) tool.ExtractPack(tool.loadedPCPackPath, false);
-            ImGui::SameLine();
-            bool canExtract = tool.selectedFileIndex != -1;
-            if (!canExtract) ImGui::BeginDisabled();
-            if (ImGui::Button("Extract File")) tool.ExtractFile(tool.selectedFileIndex, false);
-            ImGui::SameLine();
-            if (ImGui::Button("Preview")) tool.LoadPreview(tool.selectedFileIndex);
+            ImGui::BeginChild("FileList", ImVec2(0, 0), true);
+            if (tool.selectedPackIndex != -1 && !tool.entries.empty()) {
+                float availWidth = ImGui::GetContentRegionAvail().x;
+                float halfWidth = (availWidth - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-            if (tool.entries[tool.selectedFileIndex].isPcm) {
+                if (ImGui::Button("Extract Pack", ImVec2(-1, 0))) tool.ExtractPack(tool.loadedPCPackPath, false);
+                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+                bool fileSelected = tool.selectedFileIndex != -1;
+                if (!fileSelected) ImGui::BeginDisabled();
+                if (ImGui::Button("Extract File", ImVec2(halfWidth, 0))) tool.ExtractFile(tool.selectedFileIndex, false);
                 ImGui::SameLine();
-                if (ImGui::Button("Convert to GLB")) tool.ExtractFile(tool.selectedFileIndex, true);
-            }
+                if (ImGui::Button("Preview", ImVec2(halfWidth, 0))) tool.LoadPreview(tool.selectedFileIndex);
 
-            if (!canExtract) ImGui::EndDisabled();
+                bool isPcm = fileSelected && tool.entries[tool.selectedFileIndex].isPcm;
+                float hexWidth = isPcm ? halfWidth : -1.0f;
+                if (ImGui::Button("Hex View", ImVec2(hexWidth, 0))) tool.showHexEditor = true;
 
-            ImGui::SameLine();
-            if (ImGui::Button("Hex")) tool.showHexEditor = true;
-
-            if (ImGui::BeginTable("FileTable", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
-                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-                ImGui::TableHeadersRow();
-
-                for (int i = 0; i < tool.entries.size(); i++) {
-                    const auto& e = tool.entries[i];
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-
-                    bool isSelected = (tool.selectedFileIndex == i);
-                    if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
-                        tool.selectedFileIndex = i;
-                    }
-
-                    ImGui::TableSetColumnIndex(1);
-                    if (e.isPcm) ImGui::Text("MDL");
-                    else if (e.isDds) ImGui::Text("TEX");
-                    else ImGui::Text("DAT");
+                if (isPcm) {
+                    ImGui::SameLine();
+                    if (ImGui::Button("To GLB", ImVec2(halfWidth, 0))) tool.ExtractFile(tool.selectedFileIndex, true);
                 }
-                ImGui::EndTable();
+                if (!fileSelected) ImGui::EndDisabled();
+
+                ImGui::Spacing();
+                if (ImGui::BeginTabBar("FileFilterTabs")) {
+                    if (ImGui::BeginTabItem("All")) { tool.currentFileFilter = 0; ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem("Textures")) { tool.currentFileFilter = 1; ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem("Models")) { tool.currentFileFilter = 2; ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem("Data")) { tool.currentFileFilter = 3; ImGui::EndTabItem(); }
+                    ImGui::EndTabBar();
+                }
+
+                if (ImGui::BeginTable("FileTable", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                    ImGui::TableHeadersRow();
+
+                    for (int i = 0; i < tool.entries.size(); i++) {
+                        const auto& e = tool.entries[i];
+                        if (useFileFilter && ToLower(e.name).find(fileSearchLower) == std::string::npos) continue;
+
+                        bool showEntry = true;
+                        if (tool.currentFileFilter == 1 && !e.isDds) showEntry = false;
+                        else if (tool.currentFileFilter == 2 && !e.isPcm) showEntry = false;
+                        else if (tool.currentFileFilter == 3 && (e.isPcm || e.isDds)) showEntry = false;
+                        if (!showEntry) continue;
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        bool isSelected = (tool.selectedFileIndex == i);
+                        if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) tool.selectedFileIndex = i;
+                        ImGui::TableSetColumnIndex(1);
+                        if (e.isPcm) ImGui::Text("MDL"); else if (e.isDds) ImGui::Text("TEX"); else ImGui::Text("DAT");
+                    }
+                    ImGui::EndTable();
+                }
+            } else {
+                ImGui::TextDisabled("Select a pack to view files.");
             }
-        } else {
-            ImGui::TextDisabled("Select a pack to view files.");
+            ImGui::EndChild();
         }
-        ImGui::EndChild();
+        ImGui::End();
     }
-    ImGui::End();
 
     if (tool.showHexEditor && tool.selectedFileIndex != -1 && !tool.pcPackData.empty()) {
         const auto& e = tool.entries[tool.selectedFileIndex];
@@ -239,12 +263,10 @@ void RenderUI(SpiderManTool& tool) {
 
             ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
             if (ImGui::Begin(title.c_str(), &tool.showHexEditor)) {
-
                 bool showSidebar = e.isPcm;
 
                 if (showSidebar) {
                     tool.AnalyzePCM(tool.selectedFileIndex);
-
                     ImGui::Columns(2, "HexCols");
                     ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 320);
                 }
@@ -259,7 +281,6 @@ void RenderUI(SpiderManTool& tool) {
 
                 if (showSidebar) {
                     ImGui::NextColumn();
-
                     ImGui::BeginChild("SidePanel", ImVec2(0,0), false);
 
                     ImGui::Text("Global Skeleton");
@@ -278,6 +299,15 @@ void RenderUI(SpiderManTool& tool) {
                     for(size_t i=0; i<tool.currentPcmInfos.size(); i++) {
                         const auto& info = tool.currentPcmInfos[i];
                         if (ImGui::CollapsingHeader(("Mesh " + std::to_string(i)).c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+
+                            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Texture: %s", info.assignedTexture.c_str());
+
+                            if (info.isTranslucent) {
+                                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Type: Translucent");
+                            } else {
+                                ImGui::TextDisabled("Type: Opaque");
+                            }
+
                             ImGui::Text("Vertices:   %u", info.vCount);
                             ImGui::Text("V Offset:   0x%X", info.vOffset);
                             ImGui::Text("Faces:      %u", info.iCount);
@@ -295,7 +325,6 @@ void RenderUI(SpiderManTool& tool) {
                         }
                     }
                     ImGui::EndChild();
-
                     ImGui::Columns(1);
                 }
             }
@@ -305,11 +334,8 @@ void RenderUI(SpiderManTool& tool) {
 
     if (tool.notificationTimer > 0.0f) {
         tool.notificationTimer -= ImGui::GetIO().DeltaTime;
-
         float alpha = 1.0f;
-        if (tool.notificationTimer < 0.5f) {
-            alpha = tool.notificationTimer / 0.5f;
-        }
+        if (tool.notificationTimer < 0.5f) alpha = tool.notificationTimer / 0.5f;
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
@@ -331,7 +357,6 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::TextUnformatted(tool.notificationMsg.c_str());
         }
         ImGui::End();
-
         ImGui::PopStyleColor(3);
         ImGui::PopStyleVar(2);
     }

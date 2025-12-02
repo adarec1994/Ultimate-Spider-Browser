@@ -23,6 +23,12 @@ int main(int, char**) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+
+    // --- ADDED: Enable Docking ---
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    // -----------------------------
+
     ImGui::StyleColorsDark();
 
     ImGuiStyle& style = ImGui::GetStyle();
