@@ -10,8 +10,9 @@
 namespace fs = std::filesystem;
 
 struct MaterialDef {
-    std::string textureName;
-    std::string shaderName;
+    std::string meshName;      // +0x00: mesh name this material applies to
+    std::string alphaFlag;     // +0x04: "smsimple", "smtranslucent", etc.
+    std::string textureName;   // +0x60: actual texture name
     bool isTranslucent = false;
 };
 
@@ -42,6 +43,7 @@ struct PCMSkeletonInfo {
 };
 
 struct PCMMeshInfo {
+    std::string name;
     uint32_t vCount;
     uint32_t vOffset;
     uint32_t iCount;
@@ -50,7 +52,11 @@ struct PCMMeshInfo {
     uint32_t primitiveType;
     bool hasUV;
     bool hasBones;
-    std::string assignedTexture;
+
+    // Material info (linked from material entry)
+    std::string materialMeshName;  // From material +0x00
+    std::string materialAlphaFlag; // From material +0x04
+    std::string materialTexture;   // From material +0x60
     bool isTranslucent;
 };
 
@@ -102,6 +108,7 @@ public:
     PCMSkeletonInfo currentPcmSkeleton;
     int currentPcmIndex = -1;
 
+    // Material map keyed by mesh_name offset for linking
     std::map<uint32_t, MaterialDef> materialMap;
 
     unsigned int modelFbo = 0;
@@ -150,8 +157,8 @@ public:
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
     void AnalyzePCM(int index);
 
-    void ParseMaterialBlock(const std::vector<uint8_t>& pcmData);
-    MaterialDef ResolveMaterial(uint32_t hash, const std::vector<uint8_t>& pcmData);
+    void ParseMaterialEntries(const std::vector<uint8_t>& pcmData);
+    MaterialDef ResolveMaterialByMeshOffset(uint32_t meshNameOffset);
 
     bool IsWorldPack(const std::string& name);
     bool IsWorldInteriorPack(const std::string& name);

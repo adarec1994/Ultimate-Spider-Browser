@@ -64,15 +64,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/extractor/Archive.cpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/extractor/Model.cpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/extractor/Render.cpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/extractor/World.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/Helpers.h" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Helpers.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractor/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Interface.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractor/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/Model.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractor/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/extractor/SpiderManTool.h" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -363,7 +358,7 @@
       <workItem from="1764594462489" duration="4877000" />
       <workItem from="1764605522179" duration="4866000" />
       <workItem from="1764645569368" duration="2405000" />
-      <workItem from="1764652857011" duration="1203000" />
+      <workItem from="1764652857011" duration="3148000" />
     </task>
     <servers />
   </component>

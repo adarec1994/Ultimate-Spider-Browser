@@ -168,30 +168,26 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::TreePop();
                 }
             };
-            RenderPackNode("World", IsWorldPack);
-            RenderPackNode("World Interiors", IsWorldInteriorPack);
-            RenderPackNode("Other", [](const std::string& s) { return !IsWorldPack(s) && !IsWorldInteriorPack(s); });
+
+            RenderPackNode("World Packs", [](const std::string& s) { return IsWorldPack(s); });
+            RenderPackNode("Interior Packs", [](const std::string& s) { return IsWorldInteriorPack(s); });
+            RenderPackNode("Asset Packs", [](const std::string& s) { return !IsWorldPack(s) && !IsWorldInteriorPack(s); });
             ImGui::EndChild();
 
-            ImGui::Spacing();
             ImGui::Separator();
 
             static char fileSearchBuffer[256] = "";
-            ImGui::InputTextWithHint("##SearchFiles", "Search files inside pack...", fileSearchBuffer, sizeof(fileSearchBuffer));
+            ImGui::InputTextWithHint("##SearchFiles", "Search files...", fileSearchBuffer, sizeof(fileSearchBuffer));
             std::string fileSearchLower = ToLower(fileSearchBuffer);
             bool useFileFilter = !fileSearchLower.empty();
 
             ImGui::BeginChild("FileList", ImVec2(0, 0), true);
-            if (tool.selectedPackIndex != -1 && !tool.entries.empty()) {
-                float availWidth = ImGui::GetContentRegionAvail().x;
-                float halfWidth = (availWidth - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            if (!tool.entries.empty()) {
+                bool fileSelected = tool.selectedFileIndex >= 0 && tool.selectedFileIndex < tool.entries.size();
+                float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
-                if (ImGui::Button("Extract Pack", ImVec2(-1, 0))) tool.ExtractPack(tool.loadedPCPackPath, false);
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-
-                bool fileSelected = tool.selectedFileIndex != -1;
                 if (!fileSelected) ImGui::BeginDisabled();
-                if (ImGui::Button("Extract File", ImVec2(halfWidth, 0))) tool.ExtractFile(tool.selectedFileIndex, false);
+                if (ImGui::Button("Extract", ImVec2(halfWidth, 0))) tool.ExtractFile(tool.selectedFileIndex);
                 ImGui::SameLine();
                 if (ImGui::Button("Preview", ImVec2(halfWidth, 0))) tool.LoadPreview(tool.selectedFileIndex);
 
@@ -293,16 +289,38 @@ void RenderUI(SpiderManTool& tool) {
 
                     for(size_t i=0; i<tool.currentPcmInfos.size(); i++) {
                         const auto& info = tool.currentPcmInfos[i];
-                        if (ImGui::CollapsingHeader(("Mesh " + std::to_string(i)).c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                        std::string headerLabel = "Mesh " + std::to_string(i);
+                        if (!info.name.empty()) headerLabel += ": " + info.name;
 
-                            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Texture: %s", info.assignedTexture.c_str());
+                        if (ImGui::CollapsingHeader(headerLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
 
-                            if (info.isTranslucent) {
-                                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Type: Translucent");
+                            // Material Info Section
+                            ImGui::Text("Material:");
+                            ImGui::Indent();
+
+                            if (!info.materialMeshName.empty()) {
+                                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.4f, 1.0f), "Mesh: %s", info.materialMeshName.c_str());
                             } else {
-                                ImGui::TextDisabled("Type: Opaque");
+                                ImGui::TextDisabled("Mesh: (none)");
                             }
 
+                            if (!info.materialAlphaFlag.empty()) {
+                                ImVec4 color = info.isTranslucent ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+                                ImGui::TextColored(color, "Alpha: %s", info.materialAlphaFlag.c_str());
+                            } else {
+                                ImGui::TextDisabled("Alpha: (none)");
+                            }
+
+                            if (!info.materialTexture.empty()) {
+                                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Texture: %s", info.materialTexture.c_str());
+                            } else {
+                                ImGui::TextDisabled("Texture: (none)");
+                            }
+
+                            ImGui::Unindent();
+                            ImGui::Spacing();
+
+                            // Geometry Info
                             ImGui::Text("Vertices:   %u", info.vCount);
                             ImGui::Text("V Offset:   0x%X", info.vOffset);
                             ImGui::Text("Faces:      %u", info.iCount);
