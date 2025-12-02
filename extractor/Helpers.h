@@ -8,6 +8,84 @@
 #include <fstream>
 #include <iomanip>
 #include <cstring>
+#include <cmath>
+
+inline std::string StrToLower(const std::string& str) {
+    std::string lower = str;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return lower;
+}
+
+inline uint32_t CalculateCRC32(const std::string& str) {
+    std::string lower = StrToLower(str);
+    uint32_t crc = 0xFFFFFFFF;
+    for (char c : lower) {
+        crc ^= (uint8_t)c;
+        for (int i = 0; i < 8; i++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320;
+            else crc >>= 1;
+        }
+    }
+    return ~crc;
+}
+
+inline void Normalize(float* v) {
+    float len = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    if (len > 0) { v[0]/=len; v[1]/=len; v[2]/=len; }
+}
+
+inline void Cross(const float* a, const float* b, float* out) {
+    out[0] = a[1]*b[2] - a[2]*b[1];
+    out[1] = a[2]*b[0] - a[0]*b[2];
+    out[2] = a[0]*b[1] - a[1]*b[0];
+}
+
+inline float Dot(const float* a, const float* b) {
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+inline void LookAt(const float* eye, const float* center, const float* up, float* dest) {
+    float f[3] = { center[0]-eye[0], center[1]-eye[1], center[2]-eye[2] };
+    Normalize(f);
+    float s[3];
+    Cross(f, up, s);
+    Normalize(s);
+    float u[3];
+    Cross(s, f, u);
+    dest[0] = s[0];  dest[4] = s[1];  dest[8] = s[2];  dest[12] = -Dot(s, eye);
+    dest[1] = u[0];  dest[5] = u[1];  dest[9] = u[2];  dest[13] = -Dot(u, eye);
+    dest[2] = -f[0]; dest[6] = -f[1]; dest[10]= -f[2]; dest[14] = Dot(f, eye);
+    dest[3] = 0;     dest[7] = 0;     dest[11]= 0;     dest[15] = 1;
+}
+
+inline bool InvertMatrix(const float m[16], float invOut[16]) {
+    float inv[16], det;
+    int i;
+    inv[0] = m[5]  * m[10] * m[15] - m[5]  * m[11] * m[14] - m[9]  * m[6]  * m[15] + m[9]  * m[7]  * m[14] + m[13] * m[6]  * m[11] - m[13] * m[7]  * m[10];
+    inv[4] = -m[4]  * m[10] * m[15] + m[4]  * m[11] * m[14] + m[8]  * m[6]  * m[15] - m[8]  * m[7]  * m[14] - m[12] * m[6]  * m[11] + m[12] * m[7]  * m[10];
+    inv[8] = m[4]  * m[9] * m[15] - m[4]  * m[11] * m[13] - m[8]  * m[5] * m[15] + m[8]  * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4]  * m[9] * m[14] + m[4]  * m[10] * m[13] + m[8]  * m[5] * m[14] - m[8]  * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1]  * m[10] * m[15] + m[1]  * m[11] * m[14] + m[9]  * m[2] * m[15] - m[9]  * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0]  * m[10] * m[15] - m[0]  * m[11] * m[14] - m[8]  * m[2] * m[15] + m[8]  * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0]  * m[9] * m[15] + m[0]  * m[11] * m[13] + m[8]  * m[1] * m[15] - m[8]  * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0]  * m[9] * m[14] - m[0]  * m[10] * m[13] - m[8]  * m[1] * m[14] + m[8]  * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1]  * m[6] * m[15] - m[1]  * m[7] * m[14] - m[5]  * m[2] * m[15] + m[5]  * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0]  * m[6] * m[15] + m[0]  * m[7] * m[14] + m[4]  * m[2] * m[15] - m[4]  * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0]  * m[5] * m[15] - m[0]  * m[7] * m[13] - m[4]  * m[1] * m[15] + m[4]  * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0]  * m[5] * m[14] + m[0]  * m[6] * m[13] + m[4]  * m[1] * m[14] - m[4]  * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+
+    det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (det == 0) return false;
+
+    det = 1.0f / det;
+    for (i = 0; i < 16; i++) invOut[i] = inv[i] * det;
+    return true;
+}
 
 class BinaryReader {
 public:
@@ -45,31 +123,10 @@ public:
     }
 };
 
-struct GLBAccessor {
-    int bufferView;
-    int componentType;
-    int count;
-    std::string type;
-    std::vector<float> min;
-    std::vector<float> max;
-};
-
-struct GLBBufferView {
-    int buffer;
-    int byteOffset;
-    int byteLength;
-    int target;
-};
-
-// Added for Material Support
 struct GLBMaterial {
     std::string name;
     bool doubleSided;
-    std::string alphaMode; // OPAQUE or BLEND
-};
-
-class GLBWriter {
-    // Basic implementation omitted in favor of SkinningGLBWriter
+    std::string alphaMode;
 };
 
 class SkinningGLBWriter {
@@ -82,7 +139,7 @@ class SkinningGLBWriter {
     std::vector<uint8_t> buffer;
     std::vector<Accessor> accessors;
     std::vector<BufferView> bufferViews;
-    std::vector<GLBMaterial> materials; // Added materials list
+    std::vector<GLBMaterial> materials;
     std::stringstream nodesJson;
     std::stringstream meshesJson;
     std::vector<int> rootNodes;
@@ -124,7 +181,6 @@ public:
         jointIndices.push_back(nodeIndex);
     }
 
-    // Material Support Method
     int AddMaterial(const std::string& name, bool translucent) {
         GLBMaterial m;
         m.name = name;
@@ -159,7 +215,6 @@ public:
 
     void EndMesh() { meshesJson << "]}"; }
 
-    // Updated to accept material index
     void AddPrimitive(int posAcc, int normAcc, int uvAcc, int indAcc, int jointAcc, int weightAcc, int matIdx = -1) {
         meshesJson << "{\"attributes\":{";
         meshesJson << "\"POSITION\":" << posAcc;
@@ -190,7 +245,6 @@ public:
             json << "]}],";
         }
 
-        // Write Materials
         if (!materials.empty()) {
             json << "\"materials\":[";
             for(size_t i=0; i<materials.size(); i++) {

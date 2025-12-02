@@ -11,7 +11,6 @@ find_package(OpenGL REQUIRED)
 
 include(FetchContent)
 
-# --- 1. Fetch GLFW ---
 FetchContent_Declare(
         glfw
         GIT_REPOSITORY https://github.com/glfw/glfw
@@ -19,7 +18,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
-# --- 2. Fetch Glad ---
 FetchContent_Declare(
         glad
         GIT_REPOSITORY https://github.com/libigl/libigl-glad.git
@@ -33,7 +31,6 @@ endif()
 add_library(glad STATIC ${glad_SOURCE_DIR}/src/glad.c)
 target_include_directories(glad PUBLIC ${glad_SOURCE_DIR}/include)
 
-# --- 3. Fetch ImGui ---
 FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui
@@ -44,7 +41,6 @@ if(NOT imgui_POPULATED)
     FetchContent_Populate(imgui)
 endif()
 
-# --- 4. Fetch ImGuiFileDialog ---
 FetchContent_Declare(
         ImGuiFileDialog
         GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog
@@ -55,7 +51,6 @@ if(NOT imguifiledialog_POPULATED)
     FetchContent_Populate(ImGuiFileDialog)
 endif()
 
-# --- 5. Fetch Teselka ImGui Hex Editor ---
 FetchContent_Declare(
         imgui_hex_editor
         GIT_REPOSITORY https://github.com/Teselka/imgui_hex_editor
@@ -63,7 +58,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui_hex_editor)
 
-# --- Build ImGui Library ---
 add_library(imgui STATIC
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_demo.cpp
@@ -82,13 +76,16 @@ target_include_directories(imgui PUBLIC
 
 target_link_libraries(imgui PUBLIC glfw glad OpenGL::GL)
 
-# --- Main Executable ---
 add_executable(USM
         main.cpp
-        SpiderManTool.cpp
         Interface.cpp
+        SpiderManTool.cpp
+        Archive.cpp
+        Render.cpp
+        Model.cpp
+        World.cpp
         ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
-        ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp # <--- ADDED: Pointing to the correct .cpp filename
+        ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp
 )
 
 target_compile_definitions(USM PRIVATE USE_STD_FILESYSTEM)
@@ -103,7 +100,6 @@ target_include_directories(USM PRIVATE
 
 target_link_libraries(USM PRIVATE imgui glfw glad OpenGL::GL)
 
-# --- Copy Dictionary File ---
 if(EXISTS "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt")
     configure_file(
             "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt"

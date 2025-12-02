@@ -35,11 +35,6 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth()/2 - 175, ImGui::GetWindowHeight()/2 - 75));
         ImGui::BeginChild("SplashContent", ImVec2(350, 150), false, ImGuiWindowFlags_NoBackground);
 
-        const char* title = "Ultimate Spider-Man (PC) Tool";
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize(title).x) * 0.5f);
-        ImGui::TextUnformatted(title);
-        ImGui::Spacing(); ImGui::Spacing(); ImGui::Spacing();
-
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 320) * 0.5f);
         if (ImGui::Button("Browse to Ultimate Spiderman Directory", ImVec2(320, 50))) {
             IGFD::FileDialogConfig config; config.path = ".";
