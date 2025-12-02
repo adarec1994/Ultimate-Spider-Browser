@@ -2,10 +2,8 @@
 #include <glad/glad.h>
 #include <sstream>
 
-// Read a string from string table entry (4-byte hash + 28-byte null-padded string)
 static std::string ReadStringTableEntry(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset == 0 || offset + 32 > data.size()) return "";
-    // Skip 4-byte hash, read up to 28 chars
     size_t strStart = offset + 4;
     size_t end = strStart;
     while (end < strStart + 28 && end < data.size() && data[end] != 0) end++;
@@ -24,7 +22,6 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
 
     if (numEntries > 1000 || entryTableOfs >= pcmData.size()) return;
 
-    // Parse entry table
     br.Seek(entryTableOfs);
     struct EntryInfo { uint16_t type; uint16_t tag; uint32_t dataOffset; uint32_t nameOffset; };
     std::vector<EntryInfo> entries;
@@ -38,18 +35,11 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         entries.push_back(e);
     }
 
-    // Parse material entries (tag 256)
     for (auto& e : entries) {
         if (e.tag != 256) continue;
         if (e.dataOffset + 0x64 > pcmData.size()) continue;
 
         br.Seek(e.dataOffset);
-
-        // Material structure:
-        // +0x00: mesh_name offset (string table)
-        // +0x04: alpha_flag offset (string table) - "smsimple", "smtranslucent", etc.
-        // +0x08-0x5F: other data (floats, flags, etc.)
-        // +0x60: texture_name offset (string table)
 
         uint32_t meshNameOfs = br.Read<uint32_t>();
         uint32_t alphaFlagOfs = br.Read<uint32_t>();
@@ -64,7 +54,6 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         mat.isTranslucent = (mat.alphaFlag.find("translucent") != std::string::npos) ||
                             (mat.alphaFlag.find("glass") != std::string::npos);
 
-        // Key by mesh_name offset so submeshes can look up their material
         if (meshNameOfs != 0) {
             materialMap[meshNameOfs] = mat;
         }
@@ -97,7 +86,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
 
-    struct Vertex { float x,y,z; float u,v; };
+    struct Vertex { float x,y,z; float nx,ny,nz; float u,v; };
 
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
@@ -114,41 +103,26 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         for(uint32_t smOfs : smOffsets) {
             if (smOfs + 64 > pcmData.size()) continue;
 
-            // Read mesh_name_ref at +0x00 - this links to material
             br.Seek(smOfs);
             uint32_t meshNameRef = br.Read<uint32_t>();
 
             MaterialDef mat = ResolveMaterialByMeshOffset(meshNameRef);
             unsigned int tex = 0;
 
-            // Try to load texture using the texture name from material
             if (!mat.textureName.empty()) {
-                Log("Looking for texture: " + mat.textureName + " (mesh: " + mat.meshName + ")");
-
                 if (textureResolver) {
                     std::string texNameLower = StrToLower(mat.textureName);
                     uint32_t hash1 = CalculateCRC32(texNameLower + ".dds");
                     tex = textureResolver(hash1);
-
                     if (tex == 0) {
                         uint32_t hash2 = CalculateCRC32(texNameLower);
                         tex = textureResolver(hash2);
                     }
                 } else {
-                    // Use name-based lookup when not using custom resolver
                     tex = LoadTextureByName(mat.textureName);
                 }
-
-                if (tex != 0) {
-                    Log("  -> Found texture ID: " + std::to_string(tex));
-                } else {
-                    Log("  -> Texture NOT found");
-                }
-            } else {
-                Log("No texture name in material for mesh at offset 0x" + std::to_string(smOfs));
             }
 
-            // Fallback: try model name based texture
             if (tex == 0 && !modelName.empty()) {
                 std::string cleanName = modelName;
                 size_t lastDot = cleanName.find_last_of(".");
@@ -164,7 +138,6 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 }
             }
 
-            // Fallback: try mesh name as texture name
             if (tex == 0 && !mat.meshName.empty()) {
                 if (textureResolver) {
                     std::string meshNameLower = StrToLower(mat.meshName);
@@ -190,11 +163,22 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 if (startV + stride > pcmData.size()) { valid = false; break; }
                 Vertex vert;
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
+                vert.nx = 0; vert.ny = 1; vert.nz = 0;
                 vert.u = 0; vert.v = 0;
                 if (stride == 64) {
-                    if (startV + 24 + 8 <= pcmData.size()) { br.Seek(startV + 24); vert.u = br.Read<float>(); vert.v = 1.0f - br.Read<float>(); }
+                    if (startV + 24 <= pcmData.size()) {
+                        br.Seek(startV + 12);
+                        vert.nx = br.Read<float>(); vert.ny = br.Read<float>(); vert.nz = br.Read<float>();
+                    }
+                    if (startV + 32 <= pcmData.size()) {
+                        br.Seek(startV + 24);
+                        vert.u = br.Read<float>(); vert.v = 1.0f - br.Read<float>();
+                    }
                 } else if (stride == 24) {
-                    if (startV + 12 + 8 <= pcmData.size()) { br.Seek(startV + 12); vert.u = br.Read<float>(); vert.v = 1.0f - br.Read<float>(); }
+                    if (startV + 20 <= pcmData.size()) {
+                        br.Seek(startV + 12);
+                        vert.u = br.Read<float>(); vert.v = 1.0f - br.Read<float>();
+                    }
                 }
                 vertices.push_back(vert);
                 br.Seek(startV + stride);
@@ -218,7 +202,8 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo); glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_STATIC_DRAW);
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0); glEnableVertexAttribArray(0);
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6*sizeof(float))); glEnableVertexAttribArray(2);
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
         }
@@ -227,7 +212,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
 
 void SpiderManTool::LoadModelToGL(int index) {
     isWorldMode = false;
-    if (index < 0 || index >= entries.size()) return;
+    if (index < 0 || index >= (int)entries.size()) return;
     const auto& e = entries[index];
 
     for (auto& m : previewMeshes) {
@@ -237,12 +222,9 @@ void SpiderManTool::LoadModelToGL(int index) {
     }
     previewMeshes.clear();
 
-    if (e.offset + e.size > pcPackData.size()) { Log("Model data out of bounds"); return; }
+    if (e.offset + e.size > pcPackData.size()) return;
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-
-    // Don't pass a custom resolver - let AddMeshFromData use LoadTextureByName
-    // which searches all pcpacks for textures
     AddMeshFromData(pcmData, e.name, nullptr);
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
@@ -406,10 +388,8 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             std::string smName = ReadName(smNameOfs);
             if (smName.empty()) smName = "Submesh_" + std::to_string(smIdx);
 
-            // Get material info
             MaterialDef mat = ResolveMaterialByMeshOffset(smNameOfs);
 
-            // Add material to GLB
             int matIdx = glb.AddMaterial(
                 mat.textureName.empty() ? smName : mat.textureName,
                 mat.isTranslucent
@@ -508,7 +488,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         ibmAccIndex = glb.AddAccessor(glb.AddBufferView(allIBMs.data(), allIBMs.size()*4, 0), 5126, (int)allIBMs.size() / 16, "MAT4");
     }
     glb.WriteToFile(outPath, ibmAccIndex);
-    Log("Converted GLB: " + fs::path(outPath).filename().string());
 }
 
 void SpiderManTool::AnalyzePCM(int index) {
@@ -517,13 +496,12 @@ void SpiderManTool::AnalyzePCM(int index) {
     currentPcmIndex = index;
     currentPcmSkeleton = PCMSkeletonInfo();
 
-    if (index < 0 || index >= entries.size()) return;
+    if (index < 0 || index >= (int)entries.size()) return;
     const auto& e = entries[index];
     if (e.offset + e.size > pcPackData.size()) return;
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
 
-    // Parse material entries first
     ParseMaterialEntries(pcmData);
 
     BinaryReader br(pcmData);
@@ -580,7 +558,6 @@ void SpiderManTool::AnalyzePCM(int index) {
             uint32_t smNameOfs = br.Read<uint32_t>();
             std::string smName = ReadStringTableEntry(pcmData, smNameOfs);
 
-            // Get material info by matching mesh_name offset
             MaterialDef mat = ResolveMaterialByMeshOffset(smNameOfs);
 
             br.Seek(smOfs + 40);
@@ -603,7 +580,6 @@ void SpiderManTool::AnalyzePCM(int index) {
             info.vOffset = vofs;
             info.stride = stride;
 
-            // Material info from parsed material entries
             info.materialMeshName = mat.meshName;
             info.materialAlphaFlag = mat.alphaFlag;
             info.materialTexture = mat.textureName;
