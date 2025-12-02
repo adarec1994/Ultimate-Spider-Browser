@@ -32,6 +32,16 @@ add_library(glad STATIC ${glad_SOURCE_DIR}/src/glad.c)
 target_include_directories(glad PUBLIC ${glad_SOURCE_DIR}/include)
 
 FetchContent_Declare(
+        stb
+        GIT_REPOSITORY https://github.com/nothings/stb.git
+        GIT_TAG        master
+)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+    FetchContent_Populate(stb)
+endif()
+
+FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui
         GIT_TAG        docking
@@ -86,6 +96,7 @@ add_executable(USM
         World.cpp
         ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
         ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp
+        resource.rc
 )
 
 target_compile_definitions(USM PRIVATE USE_STD_FILESYSTEM)
@@ -96,6 +107,7 @@ target_include_directories(USM PRIVATE
         ${glfw_SOURCE_DIR}/include
         ${imguifiledialog_SOURCE_DIR}
         ${imgui_hex_editor_SOURCE_DIR}
+        ${stb_SOURCE_DIR}
 )
 
 target_link_libraries(USM PRIVATE imgui glfw glad OpenGL::GL)
@@ -104,6 +116,14 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt")
     configure_file(
             "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt"
             "${CMAKE_CURRENT_BINARY_DIR}/string_hash_dictionary.txt"
+            COPYONLY
+    )
+endif()
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/spider-browser.png")
+    configure_file(
+            "${CMAKE_SOURCE_DIR}/spider-browser.png"
+            "${CMAKE_CURRENT_BINARY_DIR}/spider-browser.png"
             COPYONLY
     )
 endif()

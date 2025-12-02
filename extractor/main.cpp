@@ -1,6 +1,9 @@
 #include <iostream>
 #include <glad/glad.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
+#include <windows.h>
 
 #include "SpiderManTool.h"
 #include "Interface.h"
@@ -12,8 +15,16 @@
 int main(int, char**) {
     if (!glfwInit()) return 1;
     const char* glsl_version = "#version 130";
-    GLFWwindow* window = glfwCreateWindow(1024, 768, "USM Tool", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(1024, 768, "Ultimate Spider-Browser", NULL, NULL);
     if (!window) return 1;
+
+    HWND hwnd = glfwGetWin32Window(window);
+    HICON hIcon = (HICON)LoadImage(GetModuleHandle(NULL), "IDI_ICON1", IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+    if (hIcon) {
+        SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+    }
+
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
@@ -24,10 +35,8 @@ int main(int, char**) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
-    // --- ADDED: Enable Docking ---
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    // -----------------------------
 
     ImGui::StyleColorsDark();
 
