@@ -195,16 +195,34 @@ void RenderUI(SpiderManTool& tool) {
     ImGui::Begin("Viewport", nullptr, bgFlags);
 
     if (tool.isModelLoaded && tool.viewportTextureId != 0) {
+        ImVec2 winPos = ImGui::GetCursorScreenPos();
         ImVec2 winSize = ImGui::GetContentRegionAvail();
         ImGui::Image((void*)(intptr_t)tool.viewportTextureId, winSize, ImVec2(0,1), ImVec2(1,0));
 
         bool uiHovered = ImGui::GetIO().WantCaptureMouse;
         bool isViewportActive = !uiHovered;
 
+        // Handle mesh picking in world mode on left click (when not holding right mouse)
+        if (tool.isWorldMode && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            float localX = mousePos.x - winPos.x;
+            float localY = mousePos.y - winPos.y;
+            tool.HandleMeshPicking(localX, localY, winSize.x, winSize.y);
+        }
+
         tool.UpdateWorldCamera(isViewportActive);
 
         ImGui::SetCursorPos(ImVec2(20, 20));
-        ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up");
+        if (tool.isWorldMode) {
+            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up | LMB to Select Mesh");
+            if (tool.selectedMeshIndex >= 0 && tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
+                const auto& m = tool.previewMeshes[tool.selectedMeshIndex];
+                ImGui::SetCursorPos(ImVec2(20, 45));
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 0.9f), "Selected: %s", m.meshName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)).c_str() : m.meshName.c_str());
+            }
+        } else {
+            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up");
+        }
 
         tool.RenderModelPreview();
     } else {
@@ -270,12 +288,117 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::Separator();
 
             static char fileSearchBuffer[256] = "";
+            static bool searchAllPacks = true;
+
+            ImGui::Checkbox("Search all packs", &searchAllPacks);
             ImGui::InputTextWithHint("##SearchFiles", "Search files...", fileSearchBuffer, sizeof(fileSearchBuffer));
+
+            // Trigger search when typing (with debounce via static timer)
+            static float searchTimer = 0.0f;
+            static std::string pendingSearch = "";
+            std::string currentSearch = fileSearchBuffer;
+
+            if (currentSearch != pendingSearch) {
+                pendingSearch = currentSearch;
+                searchTimer = 0.3f; // 300ms debounce
+            }
+
+            if (searchTimer > 0.0f) {
+                searchTimer -= ImGui::GetIO().DeltaTime;
+                if (searchTimer <= 0.0f && searchAllPacks) {
+                    tool.SearchAllPacks(pendingSearch);
+                }
+            }
+
             std::string fileSearchLower = ToLower(fileSearchBuffer);
             bool useFileFilter = !fileSearchLower.empty();
 
+            // If not in global search mode or checkbox unchecked, reset
+            if (!searchAllPacks && tool.isGlobalSearchMode) {
+                tool.isGlobalSearchMode = false;
+                tool.globalSearchResults.clear();
+            }
+
             ImGui::BeginChild("FileList", ImVec2(0, 0), true);
-            if (!tool.entries.empty()) {
+
+            // Show global search results if active
+            if (searchAllPacks && tool.isGlobalSearchMode && !tool.globalSearchResults.empty()) {
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Found %d results across all packs", (int)tool.globalSearchResults.size());
+                ImGui::Separator();
+
+                bool hasSelection = tool.selectedGlobalSearchIndex >= 0 && tool.selectedGlobalSearchIndex < (int)tool.globalSearchResults.size();
+                float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+                if (!hasSelection) ImGui::BeginDisabled();
+                if (ImGui::Button("Extract", ImVec2(halfWidth, 0))) {
+                    tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
+                    tool.ExtractFile(tool.selectedFileIndex);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Preview", ImVec2(halfWidth, 0))) {
+                    tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
+                    tool.LoadPreview(tool.selectedFileIndex);
+                }
+
+                bool isPcm = hasSelection && tool.globalSearchResults[tool.selectedGlobalSearchIndex].isPcm;
+                float hexWidth = isPcm ? halfWidth : -1.0f;
+                if (ImGui::Button("Hex View", ImVec2(hexWidth, 0))) {
+                    tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
+                    tool.showHexEditor = true;
+                }
+
+                if (isPcm) {
+                    ImGui::SameLine();
+                    if (ImGui::Button("To GLB", ImVec2(halfWidth, 0))) {
+                        tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
+                        tool.ExtractFile(tool.selectedFileIndex, true);
+                    }
+                }
+                if (!hasSelection) ImGui::EndDisabled();
+
+                ImGui::Spacing();
+                if (ImGui::BeginTabBar("GlobalFileFilterTabs")) {
+                    if (ImGui::BeginTabItem("All")) { tool.currentFileFilter = 0; ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem("Textures")) { tool.currentFileFilter = 1; ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem("Models")) { tool.currentFileFilter = 2; ImGui::EndTabItem(); }
+                    if (ImGui::BeginTabItem("Data")) { tool.currentFileFilter = 3; ImGui::EndTabItem(); }
+                    ImGui::EndTabBar();
+                }
+
+                if (ImGui::BeginTable("GlobalFileTable", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Pack", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                    ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+                    ImGui::TableHeadersRow();
+
+                    for (int i = 0; i < (int)tool.globalSearchResults.size(); i++) {
+                        const auto& r = tool.globalSearchResults[i];
+
+                        bool showEntry = true;
+                        if (tool.currentFileFilter == 1 && !r.isDds) showEntry = false;
+                        else if (tool.currentFileFilter == 2 && !r.isPcm) showEntry = false;
+                        else if (tool.currentFileFilter == 3 && (r.isPcm || r.isDds)) showEntry = false;
+                        if (!showEntry) continue;
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        bool isSelected = (tool.selectedGlobalSearchIndex == i);
+                        if (ImGui::Selectable(r.fileName.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
+                            tool.selectedGlobalSearchIndex = i;
+                        }
+                        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                            tool.SelectGlobalSearchResult(i);
+                            tool.LoadPreview(tool.selectedFileIndex);
+                        }
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextDisabled("%s", r.packName.c_str());
+                        ImGui::TableSetColumnIndex(2);
+                        if (r.isPcm) ImGui::Text("MDL"); else if (r.isDds) ImGui::Text("TEX"); else ImGui::Text("DAT");
+                    }
+                    ImGui::EndTable();
+                }
+            }
+            else if (!tool.entries.empty()) {
                 bool fileSelected = tool.selectedFileIndex >= 0 && tool.selectedFileIndex < (int)tool.entries.size();
                 float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
@@ -327,8 +450,10 @@ void RenderUI(SpiderManTool& tool) {
                     }
                     ImGui::EndTable();
                 }
+            } else if (searchAllPacks && tool.isGlobalSearchMode && tool.globalSearchResults.empty()) {
+                ImGui::TextDisabled("No results found for '%s'", fileSearchBuffer);
             } else {
-                ImGui::TextDisabled("Select a pack to view files.");
+                ImGui::TextDisabled("Select a pack to view files, or search all packs.");
             }
             ImGui::EndChild();
         }
@@ -436,6 +561,78 @@ void RenderUI(SpiderManTool& tool) {
             }
             ImGui::End();
         }
+    }
+
+    // World mesh hex editor (for selected mesh in world view)
+    if (tool.showWorldMeshHexEditor && tool.selectedMeshIndex >= 0 && !tool.selectedMeshPcmData.empty()) {
+        const auto& m = tool.previewMeshes[tool.selectedMeshIndex];
+        std::string title = "World Mesh Hex View: " + (m.meshName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)) : m.meshName);
+
+        ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin(title.c_str(), &tool.showWorldMeshHexEditor)) {
+            // Sidebar with mesh info
+            ImGui::Columns(2, "WorldHexCols");
+            ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 300);
+
+            tool.worldMeshHexEditor.Bytes = tool.selectedMeshPcmData.data();
+            tool.worldMeshHexEditor.MaxBytes = tool.selectedMeshPcmData.size();
+
+            ImGui::BeginChild("WorldHexPanel", ImVec2(0,0), false);
+            ImGui::BeginHexEditor("##WorldHex", &tool.worldMeshHexEditor);
+            ImGui::EndHexEditor();
+            ImGui::EndChild();
+
+            ImGui::NextColumn();
+            ImGui::BeginChild("WorldMeshInfoPanel", ImVec2(0,0), false);
+
+            ImGui::Text("Mesh Info");
+            ImGui::Separator();
+
+            ImGui::Text("Index: %d / %d", tool.selectedMeshIndex, (int)tool.previewMeshes.size());
+            if (!m.meshName.empty()) {
+                ImGui::Text("Name: %s", m.meshName.c_str());
+            }
+
+            ImGui::Spacing();
+            ImGui::Text("Bounding Box:");
+            ImGui::Text("  Min: (%.1f, %.1f, %.1f)", m.bboxMin[0], m.bboxMin[1], m.bboxMin[2]);
+            ImGui::Text("  Max: (%.1f, %.1f, %.1f)", m.bboxMax[0], m.bboxMax[1], m.bboxMax[2]);
+
+            ImGui::Spacing();
+            ImGui::Text("Source:");
+            if (!m.sourcePack.empty()) {
+                fs::path packPath(m.sourcePack);
+                ImGui::Text("  Pack: %s", packPath.filename().string().c_str());
+                ImGui::Text("  Offset: 0x%X", m.sourceOffset);
+                ImGui::Text("  Size: %u bytes", m.sourceSize);
+            } else {
+                ImGui::TextDisabled("  (no source info)");
+            }
+
+            ImGui::Spacing();
+            ImGui::Text("Rendering:");
+            ImGui::Text("  Indices: %d", m.indexCount);
+            ImGui::Text("  Texture ID: %u", m.textureId);
+            ImGui::Text("  Translucent: %s", m.isTranslucent ? "Yes" : "No");
+
+            ImGui::Spacing();
+            if (ImGui::Button("Export PCM", ImVec2(-1, 0))) {
+                tool.ExportSelectedWorldMesh(false);
+            }
+            if (ImGui::Button("Export GLB", ImVec2(-1, 0))) {
+                tool.ExportSelectedWorldMesh(true);
+            }
+            ImGui::Spacing();
+            if (ImGui::Button("Deselect", ImVec2(-1, 0))) {
+                tool.selectedMeshIndex = -1;
+                tool.showWorldMeshHexEditor = false;
+                tool.selectedMeshPcmData.clear();
+            }
+
+            ImGui::EndChild();
+            ImGui::Columns(1);
+        }
+        ImGui::End();
     }
 
     if (tool.notificationTimer > 0.0f) {

@@ -35,6 +35,12 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     currentPcmInfos.clear();
     currentPcmIndex = -1;
 
+    // Reset world mesh selection
+    selectedMeshIndex = -1;
+    selectedMeshPcmData.clear();
+    showWorldMeshHexEditor = false;
+    isWorldMode = false;
+
     materialMap.clear();
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);

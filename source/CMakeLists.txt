@@ -86,6 +86,12 @@ target_include_directories(imgui PUBLIC
 
 target_link_libraries(imgui PUBLIC glfw glad OpenGL::GL)
 
+# Platform-specific sources
+set(PLATFORM_SOURCES "")
+if(WIN32)
+    list(APPEND PLATFORM_SOURCES resource.rc)
+endif()
+
 add_executable(USM
         main.cpp
         Interface.cpp
@@ -96,7 +102,7 @@ add_executable(USM
         World.cpp
         ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
         ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp
-        resource.rc
+        ${PLATFORM_SOURCES}
 )
 
 target_compile_definitions(USM PRIVATE USE_STD_FILESYSTEM)

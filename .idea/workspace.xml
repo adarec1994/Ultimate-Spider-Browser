@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="BackendCodeEditorMiscSettings">
-    <option name="/Default/Environment/Hierarchy/GeneratedFilesCacheKey/Timestamp/@EntryValue" value="16" type="long" />
+    <option name="/Default/Environment/Hierarchy/GeneratedFilesCacheKey/Timestamp/@EntryValue" value="5" type="long" />
     <option name="/Default/Housekeeping/FeatureSuggestion/FeatureSuggestionManager/DisabledSuggesters/=SwitchToGoToActionSuggester/@EntryIndexedValue" value="true" type="bool" />
     <option name="/Default/Housekeeping/GlobalSettingsUpgraded/IsUpgraded/@EntryValue" value="true" type="bool" />
     <option name="/Default/RiderDebugger/RiderRestoreDecompile/RestoreDecompileSetting/@EntryValue" value="false" type="bool" />
@@ -66,9 +66,15 @@
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/Archive.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Archive.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/source/CMakeLists.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Model.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Render.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/World.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/World.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -124,6 +130,11 @@
   }
 }</component>
   <component name="RunManager" selected="CMake Application.USM">
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="USM" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="USM" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="USM">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
@@ -300,40 +311,40 @@
       </method>
     </configuration>
     <list>
-      <item itemvalue="CMake Application.glad" />
-      <item itemvalue="CMake Application.imgui" />
       <item itemvalue="CMake Application.USM" />
-      <item itemvalue="CMake Application.uninstall" />
       <item itemvalue="CMake Application.boing" />
-      <item itemvalue="CMake Application.gears" />
-      <item itemvalue="CMake Application.heightmap" />
-      <item itemvalue="CMake Application.offscreen" />
-      <item itemvalue="CMake Application.particles" />
-      <item itemvalue="CMake Application.sharing" />
-      <item itemvalue="CMake Application.simple" />
-      <item itemvalue="CMake Application.splitview" />
-      <item itemvalue="CMake Application.wave" />
-      <item itemvalue="CMake Application.glfw" />
-      <item itemvalue="CMake Application.update_mappings" />
       <item itemvalue="CMake Application.clipboard" />
       <item itemvalue="CMake Application.cursor" />
       <item itemvalue="CMake Application.empty" />
       <item itemvalue="CMake Application.events" />
       <item itemvalue="CMake Application.gamma" />
+      <item itemvalue="CMake Application.gears" />
+      <item itemvalue="CMake Application.glad" />
+      <item itemvalue="CMake Application.glfw" />
       <item itemvalue="CMake Application.glfwinfo" />
+      <item itemvalue="CMake Application.heightmap" />
       <item itemvalue="CMake Application.icon" />
       <item itemvalue="CMake Application.iconify" />
+      <item itemvalue="CMake Application.imgui" />
       <item itemvalue="CMake Application.inputlag" />
       <item itemvalue="CMake Application.joysticks" />
       <item itemvalue="CMake Application.monitors" />
       <item itemvalue="CMake Application.msaa" />
+      <item itemvalue="CMake Application.offscreen" />
       <item itemvalue="CMake Application.opacity" />
+      <item itemvalue="CMake Application.particles" />
       <item itemvalue="CMake Application.reopen" />
+      <item itemvalue="CMake Application.sharing" />
+      <item itemvalue="CMake Application.simple" />
+      <item itemvalue="CMake Application.splitview" />
       <item itemvalue="CMake Application.tearing" />
       <item itemvalue="CMake Application.threads" />
       <item itemvalue="CMake Application.timeout" />
       <item itemvalue="CMake Application.title" />
       <item itemvalue="CMake Application.triangle-vulkan" />
+      <item itemvalue="CMake Application.uninstall" />
+      <item itemvalue="CMake Application.update_mappings" />
+      <item itemvalue="CMake Application.wave" />
       <item itemvalue="CMake Application.windows" />
     </list>
   </component>
@@ -358,6 +369,9 @@
       <workItem from="1764681225829" duration="8013000" />
       <workItem from="1764692558958" duration="326000" />
       <workItem from="1764733328213" duration="1086000" />
+      <workItem from="1764751993115" duration="33000" />
+      <workItem from="1764752070377" duration="3814000" />
+      <workItem from="1764759954993" duration="388000" />
     </task>
     <servers />
   </component>

@@ -6,6 +6,5 @@
     <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/imgui-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/imgui_hex_editor-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/imguifiledialog-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/source/glfw" vcs="Git" />
   </component>
 </project>

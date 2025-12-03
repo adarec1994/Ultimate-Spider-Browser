@@ -6,6 +6,11 @@ void SpiderManTool::LoadAllWorldGeometries() {
     worldPcmQueue.clear();
     isWorldMode = true;
 
+    // Reset mesh selection
+    selectedMeshIndex = -1;
+    selectedMeshPcmData.clear();
+    showWorldMeshHexEditor = false;
+
     // DON'T clear globalTextureIndex - we already built it during startup!
 
     camPos[0] = 0.0f; camPos[1] = 2000.0f; camPos[2] = 2000.0f;
@@ -245,10 +250,8 @@ void SpiderManTool::LoadWorldGeometryStep(int index) {
             file.close();
 
             if (!fileData.empty()) {
-                // Pass nullptr for textureResolver - this makes AddMeshFromData use
-                // LoadTextureByName() which searches globalTextureNameIndex and
-                // globalTextureIndex (built during startup indexing)
-                AddMeshFromData(fileData, "", nullptr);
+                // Pass source pack info for mesh picking and hex view
+                AddMeshFromData(fileData, "", nullptr, item.packPath, item.offset);
             }
         } else {
             file.close();

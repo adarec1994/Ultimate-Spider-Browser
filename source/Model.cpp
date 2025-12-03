@@ -1,6 +1,7 @@
 #include "SpiderManTool.h"
 #include <glad/glad.h>
 #include <sstream>
+#include <fstream>
 
 static std::string ReadStringTableEntry(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset == 0 || offset + 32 > data.size()) return "";
@@ -67,7 +68,7 @@ MaterialDef SpiderManTool::ResolveMaterialByMeshOffset(uint32_t meshNameOffset) 
     return MaterialDef();
 }
 
-void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver) {
+void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset) {
     ParseMaterialEntries(pcmData);
 
     BinaryReader br(pcmData);
@@ -105,6 +106,15 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
 
             br.Seek(smOfs);
             uint32_t meshNameRef = br.Read<uint32_t>();
+
+            // Read mesh name for display
+            std::string meshName;
+            if (meshNameRef != 0 && meshNameRef + 32 <= pcmData.size()) {
+                size_t strStart = meshNameRef + 4;
+                size_t end = strStart;
+                while (end < strStart + 28 && end < pcmData.size() && pcmData[end] != 0) end++;
+                meshName = std::string((char*)&pcmData[strStart], end - strStart);
+            }
 
             MaterialDef mat = ResolveMaterialByMeshOffset(meshNameRef);
             unsigned int tex = 0;
@@ -158,6 +168,11 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             br.Seek(vofs);
             std::vector<Vertex> vertices;
             bool valid = true;
+
+            // Initialize bounding box
+            float bboxMin[3] = {1e30f, 1e30f, 1e30f};
+            float bboxMax[3] = {-1e30f, -1e30f, -1e30f};
+
             for(uint32_t v=0; v<vnum; v++) {
                 size_t startV = br.Tell();
                 if (startV + stride > pcmData.size()) { valid = false; break; }
@@ -165,6 +180,15 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
                 vert.nx = 0; vert.ny = 1; vert.nz = 0;
                 vert.u = 0; vert.v = 0;
+
+                // Update bounding box
+                if (vert.x < bboxMin[0]) bboxMin[0] = vert.x;
+                if (vert.y < bboxMin[1]) bboxMin[1] = vert.y;
+                if (vert.z < bboxMin[2]) bboxMin[2] = vert.z;
+                if (vert.x > bboxMax[0]) bboxMax[0] = vert.x;
+                if (vert.y > bboxMax[1]) bboxMax[1] = vert.y;
+                if (vert.z > bboxMax[2]) bboxMax[2] = vert.z;
+
                 if (stride == 64) {
                     if (startV + 24 <= pcmData.size()) {
                         br.Seek(startV + 12);
@@ -197,6 +221,22 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             mesh.textureId = tex;
             mesh.isTranslucent = mat.isTranslucent;
 
+            // Check for fake_shadow texture
+            std::string texNameLower = StrToLower(mat.textureName);
+            mesh.isFakeShadow = (texNameLower.find("fake_shadow") != std::string::npos);
+
+            // Store bounding box
+            for (int i = 0; i < 3; i++) {
+                mesh.bboxMin[i] = bboxMin[i];
+                mesh.bboxMax[i] = bboxMax[i];
+            }
+
+            // Store source info for hex editor
+            mesh.sourcePack = sourcePack;
+            mesh.sourceOffset = sourceOffset;
+            mesh.sourceSize = (uint32_t)pcmData.size();
+            mesh.meshName = meshName.empty() ? modelName : meshName;
+
             glGenVertexArrays(1, &mesh.vao); glGenBuffers(1, &mesh.vbo); glGenBuffers(1, &mesh.ebo);
             glBindVertexArray(mesh.vao);
             glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo); glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
@@ -207,6 +247,127 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
         }
+    }
+}
+
+void SpiderManTool::LoadBackgroundMeshes() {
+    // Load oceanmesh.pcm and sky_day.pcm as background meshes for every preview
+    // These are loaded from the global pack files using the texture index
+
+    std::vector<std::pair<std::string, std::string>> backgroundModels = {
+        {"oceanmesh", "city_arena"},
+        {"sky_day", "city_arena"}
+    };
+
+    for (const auto& [modelName, packName] : backgroundModels) {
+        // Find the pack file
+        std::string packPath;
+        for (const auto& path : foundPacks) {
+            std::string stem = StrToLower(path.stem().string());
+            if (stem == packName) {
+                packPath = path.string();
+                break;
+            }
+        }
+
+        if (packPath.empty()) continue;
+
+        // Open and parse the pack to find the PCM
+        std::ifstream file(packPath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) continue;
+
+        size_t fileSize = file.tellg();
+        if (fileSize < 32) {
+            file.close();
+            continue;
+        }
+
+        file.seekg(24);
+        uint32_t headerSize, packDataOffset;
+        file.read((char*)&headerSize, 4);
+        file.read((char*)&packDataOffset, 4);
+
+        if (!file.good()) {
+            file.close();
+            continue;
+        }
+
+        // Find entry table start
+        size_t start = 0;
+        const uint32_t magic = 0xE3E3E3E3;
+        size_t headerReadSize = std::min((size_t)200000, fileSize);
+        std::vector<uint8_t> tempHeader(headerReadSize);
+        file.seekg(0);
+        file.read((char*)tempHeader.data(), headerReadSize);
+
+        for (size_t i = 0; i + 4 <= tempHeader.size(); i++) {
+            if (*(uint32_t*)&tempHeader[i] == magic) {
+                for (size_t j = i + 4; j < i + 1000 && j + 4 <= tempHeader.size(); j++) {
+                    if (*(uint32_t*)&tempHeader[j] == magic) {
+                        start = j + 4;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        if (start == 0) {
+            file.close();
+            continue;
+        }
+
+        // Parse entries to find our target PCM
+        file.clear();
+        file.seekg(start);
+
+        bool found = false;
+        while (file.good() && !found) {
+            uint32_t hash, type, offset, size;
+            file.read((char*)&hash, 4);
+            file.read((char*)&type, 4);
+            file.read((char*)&offset, 4);
+            file.read((char*)&size, 4);
+
+            if (!file.good()) break;
+            if (type >= 0x1000 || type == 0x0000) break;
+
+            if (size > 4) {
+                size_t filePos = file.tellg();
+                uint32_t absOffset = packDataOffset + offset;
+
+                if (absOffset + 4 > fileSize) {
+                    file.seekg(filePos);
+                    continue;
+                }
+
+                file.seekg(absOffset);
+                uint32_t sig = 0;
+                file.read((char*)&sig, 4);
+
+                if (file.good() && sig == 0x204D4350) { // "PCM "
+                    std::string entryName = "";
+                    if (dictionary.count(hash)) entryName = StrToLower(dictionary[hash]);
+
+                    if (entryName == modelName) {
+                        // Found it! Load the PCM data
+                        file.seekg(absOffset);
+                        std::vector<uint8_t> pcmData(size);
+                        file.read((char*)pcmData.data(), size);
+
+                        if (file.good()) {
+                            AddMeshFromData(pcmData, modelName, nullptr);
+                            found = true;
+                        }
+                    }
+                }
+
+                file.clear();
+                file.seekg(filePos);
+            }
+        }
+
+        file.close();
     }
 }
 
@@ -597,6 +758,46 @@ void SpiderManTool::AnalyzePCM(int index) {
             }
 
             currentPcmInfos.push_back(info);
+        }
+    }
+}
+
+void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
+    if (selectedMeshIndex < 0 || selectedMeshIndex >= (int)previewMeshes.size()) return;
+
+    const auto& mesh = previewMeshes[selectedMeshIndex];
+    if (mesh.sourcePack.empty() || mesh.sourceSize == 0) {
+        Log("No source data for selected mesh");
+        return;
+    }
+
+    std::ifstream file(mesh.sourcePack, std::ios::binary);
+    if (!file.is_open()) {
+        Log("Failed to open source pack");
+        return;
+    }
+
+    file.seekg(mesh.sourceOffset);
+    std::vector<uint8_t> pcmData(mesh.sourceSize);
+    file.read((char*)pcmData.data(), mesh.sourceSize);
+    file.close();
+
+    fs::path outDir = fs::current_path() / "extracted" / "world_meshes";
+    fs::create_directories(outDir);
+
+    std::string baseName = mesh.meshName.empty() ? ("mesh_" + std::to_string(selectedMeshIndex)) : mesh.meshName;
+
+    if (asGlb) {
+        fs::path glbPath = outDir / (baseName + ".glb");
+        ConvertPCM(pcmData, glbPath.string());
+        ShowNotification("Exported GLB to:\n" + glbPath.string());
+    } else {
+        fs::path pcmPath = outDir / (baseName + ".pcm");
+        std::ofstream out(pcmPath, std::ios::binary);
+        if (out.is_open()) {
+            out.write((char*)pcmData.data(), pcmData.size());
+            out.close();
+            ShowNotification("Exported PCM to:\n" + pcmPath.string());
         }
     }
 }

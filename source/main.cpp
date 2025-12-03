@@ -1,9 +1,13 @@
 #include <iostream>
 #include <glad/glad.h>
+
+#ifdef _WIN32
 #define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <windows.h>
+#endif
+
+#include <GLFW/glfw3.h>
 
 #include "SpiderManTool.h"
 #include "Interface.h"
@@ -18,12 +22,14 @@ int main(int, char**) {
     GLFWwindow* window = glfwCreateWindow(1024, 768, "Ultimate Spider-Browser", NULL, NULL);
     if (!window) return 1;
 
+#ifdef _WIN32
     HWND hwnd = glfwGetWin32Window(window);
     HICON hIcon = (HICON)LoadImage(GetModuleHandle(NULL), "IDI_ICON1", IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
     if (hIcon) {
         SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
         SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
     }
+#endif
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);

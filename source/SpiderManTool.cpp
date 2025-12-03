@@ -238,3 +238,164 @@ bool SpiderManTool::IsWorldInteriorPack(const std::string& name) {
     if (lower.length() < 6) return false;
     return lower.substr(2, 4) == "_int";
 }
+
+void SpiderManTool::SearchAllPacks(const std::string& query) {
+    globalSearchResults.clear();
+    selectedGlobalSearchIndex = -1;
+    lastGlobalSearchQuery = query;
+
+    if (query.empty()) {
+        isGlobalSearchMode = false;
+        return;
+    }
+
+    isGlobalSearchMode = true;
+    std::string queryLower = StrToLower(query);
+
+    for (int packIdx = 0; packIdx < (int)foundPacks.size(); packIdx++) {
+        const auto& packPath = foundPacks[packIdx];
+
+        std::ifstream file(packPath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) continue;
+
+        size_t fileSize = file.tellg();
+        if (fileSize < 32) {
+            file.close();
+            continue;
+        }
+
+        file.seekg(24);
+        uint32_t headerSize, dataOffset;
+        file.read((char*)&headerSize, 4);
+        file.read((char*)&dataOffset, 4);
+
+        if (!file.good()) {
+            file.close();
+            continue;
+        }
+
+        // Find entry table start
+        size_t start = 0;
+        const uint32_t magic = 0xE3E3E3E3;
+        size_t headerReadSize = std::min((size_t)200000, fileSize);
+        std::vector<uint8_t> tempHeader(headerReadSize);
+        file.seekg(0);
+        file.read((char*)tempHeader.data(), headerReadSize);
+
+        for (size_t i = 0; i + 4 <= tempHeader.size(); i++) {
+            if (*(uint32_t*)&tempHeader[i] == magic) {
+                for (size_t j = i + 4; j < i + 1000 && j + 4 <= tempHeader.size(); j++) {
+                    if (*(uint32_t*)&tempHeader[j] == magic) {
+                        start = j + 4;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        if (start == 0) {
+            file.close();
+            continue;
+        }
+
+        file.clear();
+        file.seekg(start);
+
+        while (file.good()) {
+            uint32_t hash, type, offset, size;
+            file.read((char*)&hash, 4);
+            file.read((char*)&type, 4);
+            file.read((char*)&offset, 4);
+            file.read((char*)&size, 4);
+
+            if (!file.good()) break;
+            if (type >= 0x1000 || type == 0x0000) break;
+
+            // Get file name
+            std::string fileName;
+            if (dictionary.count(hash)) {
+                fileName = dictionary[hash];
+            } else {
+                std::stringstream ss;
+                ss << "Unknown_" << std::hex << hash;
+                fileName = ss.str();
+            }
+
+            // Check file type
+            bool isPcm = false;
+            bool isDds = false;
+
+            if (size > 4) {
+                size_t filePos = file.tellg();
+                uint32_t absOffset = dataOffset + offset;
+
+                if (absOffset + 4 <= fileSize) {
+                    file.seekg(absOffset);
+                    uint32_t sig = 0;
+                    file.read((char*)&sig, 4);
+
+                    if (file.good()) {
+                        if (sig == 0x204D4350) { // "PCM "
+                            isPcm = true;
+                            fileName += ".pcm";
+                        } else if (sig == 0x20534444) { // "DDS "
+                            isDds = true;
+                            fileName += ".dds";
+                        } else {
+                            fileName += ".dat";
+                        }
+                    }
+
+                    file.clear();
+                    file.seekg(filePos);
+                }
+            }
+
+            // Check if matches query
+            std::string fileNameLower = StrToLower(fileName);
+            if (fileNameLower.find(queryLower) != std::string::npos) {
+                GlobalSearchResult result;
+                result.packIndex = packIdx;
+                result.packName = packPath.filename().string();
+                result.fileName = fileName;
+                result.hash = hash;
+                result.offset = dataOffset + offset;
+                result.size = size;
+                result.isPcm = isPcm;
+                result.isDds = isDds;
+                globalSearchResults.push_back(result);
+            }
+        }
+
+        file.close();
+    }
+
+    // Sort results by file name
+    std::sort(globalSearchResults.begin(), globalSearchResults.end(),
+        [](const GlobalSearchResult& a, const GlobalSearchResult& b) {
+            return a.fileName < b.fileName;
+        });
+}
+
+void SpiderManTool::SelectGlobalSearchResult(int index) {
+    if (index < 0 || index >= (int)globalSearchResults.size()) return;
+
+    const auto& result = globalSearchResults[index];
+    selectedGlobalSearchIndex = index;
+
+    // Open the pack if not already open
+    std::string packPath = foundPacks[result.packIndex].string();
+    if (loadedPCPackPath != packPath) {
+        OpenPCPack(packPath);
+        selectedPackIndex = result.packIndex;
+    }
+
+    // Find and select the file in the current entries
+    for (int i = 0; i < (int)entries.size(); i++) {
+        if (entries[i].hash == result.hash) {
+            selectedFileIndex = i;
+            break;
+        }
+    }
+}

@@ -35,6 +35,17 @@ struct RenderMesh {
     GLenum mode;
     unsigned int textureId;
     bool isTranslucent = false;
+    bool isFakeShadow = false;
+
+    // Bounding box for ray picking
+    float bboxMin[3] = {0, 0, 0};
+    float bboxMax[3] = {0, 0, 0};
+
+    // Source data for hex view
+    std::string sourcePack;
+    uint32_t sourceOffset = 0;
+    uint32_t sourceSize = 0;
+    std::string meshName;
 };
 
 struct PCMSkeletonInfo {
@@ -70,6 +81,17 @@ struct WorldPCMItem {
     std::string packPath;
     uint32_t offset;
     uint32_t size;
+};
+
+struct GlobalSearchResult {
+    int packIndex;
+    std::string packName;
+    std::string fileName;
+    uint32_t hash;
+    uint32_t offset;
+    uint32_t size;
+    bool isPcm;
+    bool isDds;
 };
 
 class SpiderManTool {
@@ -147,6 +169,19 @@ public:
     void BuildGlobalTextureIndex();
     void BuildGlobalTextureIndexStep(int packIndex);
 
+    // Mesh selection for world view
+    int selectedMeshIndex = -1;
+    std::vector<uint8_t> selectedMeshPcmData;
+    bool showWorldMeshHexEditor = false;
+    ImGuiHexEditorState worldMeshHexEditor;
+
+    // Ray picking
+    bool RayIntersectAABB(const float rayOrigin[3], const float rayDir[3],
+                          const float bboxMin[3], const float bboxMax[3], float& tMin);
+    int PickMeshAtScreenPos(float screenX, float screenY, float viewportWidth, float viewportHeight);
+    void HandleMeshPicking(float viewportX, float viewportY, float viewportWidth, float viewportHeight);
+    void LoadSelectedMeshPcmData();
+
     bool isWorldMode = false;
     float modelCenter[3] = {0.0f, 0.0f, 0.0f};
     float modelRadius = 1.0f;
@@ -187,7 +222,18 @@ public:
     bool IsWorldPack(const std::string& name);
     bool IsWorldInteriorPack(const std::string& name);
 
-    void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr);
+    void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0);
+    void LoadBackgroundMeshes();
     void LoadAllWorldGeometries();
     void LoadWorldGeometryStep(int index);
+
+    // Global file search across all packs
+    std::vector<GlobalSearchResult> globalSearchResults;
+    int selectedGlobalSearchIndex = -1;
+    bool isGlobalSearchMode = false;
+    std::string lastGlobalSearchQuery;
+    void SearchAllPacks(const std::string& query);
+    void SelectGlobalSearchResult(int index);
+
+    void ExportSelectedWorldMesh(bool asGlb);
 };

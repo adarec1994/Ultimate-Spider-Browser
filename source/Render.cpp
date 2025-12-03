@@ -2,6 +2,8 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include "imgui.h"
+#include <fstream>
+#include <algorithm>
 
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
@@ -262,6 +264,8 @@ void SpiderManTool::InitModelPreview() {
         "uniform sampler2D diffTexture;\n"
         "uniform bool hasTexture;\n"
         "uniform bool isTranslucent;\n"
+        "uniform bool isFakeShadow;\n"
+        "uniform bool isHighlighted;\n"
         "uniform vec3 viewPos;\n"
         "void main() {\n"
         "    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));\n"
@@ -273,16 +277,26 @@ void SpiderManTool::InitModelPreview() {
         "    else if (diff > 0.0) toon = 0.5;\n"
         "    else toon = 0.3;\n"
         "    vec3 baseColor;\n"
-        "    if (hasTexture) {\n"
+        "    float alpha = 1.0;\n"
+        "    if (isFakeShadow) {\n"
+        "        baseColor = vec3(0.0, 0.0, 0.0);\n"
+        "        alpha = 0.3;\n"
+        "    } else if (hasTexture) {\n"
         "        vec4 texColor = texture(diffTexture, TexCoord);\n"
         "        baseColor = texColor.rgb;\n"
         "    } else {\n"
         "        baseColor = vec3(0.8, 0.8, 0.8);\n"
         "    }\n"
+        "    if (isTranslucent && !isFakeShadow) {\n"
+        "        alpha = 0.5;\n"
+        "    }\n"
+        "    if (isHighlighted) {\n"
+        "        baseColor = mix(baseColor, vec3(0.2, 1.0, 0.3), 0.6);\n"
+        "    }\n"
         "    vec3 ambient = 0.2 * baseColor;\n"
         "    vec3 diffuse = toon * baseColor;\n"
         "    vec3 result = ambient + diffuse;\n"
-        "    FragColor = vec4(result, 1.0);\n"
+        "    FragColor = vec4(result, alpha);\n"
         "}\n";
 
     unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
@@ -433,8 +447,10 @@ void SpiderManTool::RenderModelPreview() {
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
 
-    for (const auto& m : previewMeshes) {
-        if (m.indexCount > 0) {
+    // First pass: render opaque meshes
+    for (int i = 0; i < (int)previewMeshes.size(); i++) {
+        const auto& m = previewMeshes[i];
+        if (m.indexCount > 0 && !m.isTranslucent && !m.isFakeShadow) {
             if (m.textureId != 0) {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, m.textureId);
@@ -444,11 +460,41 @@ void SpiderManTool::RenderModelPreview() {
                 glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
             }
             glUniform1i(glGetUniformLocation(modelProgram, "isTranslucent"), 0);
+            glUniform1i(glGetUniformLocation(modelProgram, "isFakeShadow"), 0);
+            glUniform1i(glGetUniformLocation(modelProgram, "isHighlighted"), (i == selectedMeshIndex) ? 1 : 0);
 
             glBindVertexArray(m.vao);
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
         }
     }
+
+    // Second pass: render translucent meshes with blending
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    for (int i = 0; i < (int)previewMeshes.size(); i++) {
+        const auto& m = previewMeshes[i];
+        if (m.indexCount > 0 && (m.isTranslucent || m.isFakeShadow)) {
+            if (m.textureId != 0 && !m.isFakeShadow) {
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, m.textureId);
+                glUniform1i(glGetUniformLocation(modelProgram, "diffTexture"), 0);
+                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 1);
+            } else {
+                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
+            }
+            glUniform1i(glGetUniformLocation(modelProgram, "isTranslucent"), m.isTranslucent ? 1 : 0);
+            glUniform1i(glGetUniformLocation(modelProgram, "isFakeShadow"), m.isFakeShadow ? 1 : 0);
+            glUniform1i(glGetUniformLocation(modelProgram, "isHighlighted"), (i == selectedMeshIndex) ? 1 : 0);
+
+            glBindVertexArray(m.vao);
+            glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
+        }
+    }
+
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, msFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, modelFbo);
@@ -520,4 +566,150 @@ void SpiderManTool::LoadPreview(int index) {
     glBindTexture(GL_TEXTURE_2D, 0);
 
     showDdsPopup = true;
+}
+
+bool SpiderManTool::RayIntersectAABB(const float rayOrigin[3], const float rayDir[3],
+                                      const float bboxMin[3], const float bboxMax[3], float& tMin) {
+    float tmax = 1e30f;
+    tMin = -1e30f;
+
+    for (int i = 0; i < 3; i++) {
+        if (fabs(rayDir[i]) < 1e-8f) {
+            // Ray is parallel to slab
+            if (rayOrigin[i] < bboxMin[i] || rayOrigin[i] > bboxMax[i]) {
+                return false;
+            }
+        } else {
+            float ood = 1.0f / rayDir[i];
+            float t1 = (bboxMin[i] - rayOrigin[i]) * ood;
+            float t2 = (bboxMax[i] - rayOrigin[i]) * ood;
+            if (t1 > t2) std::swap(t1, t2);
+            if (t1 > tMin) tMin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tMin > tmax) return false;
+        }
+    }
+
+    return tMin >= 0;
+}
+
+int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float viewportWidth, float viewportHeight) {
+    // Convert screen position to normalized device coordinates
+    float ndcX = (2.0f * screenX / viewportWidth) - 1.0f;
+    float ndcY = 1.0f - (2.0f * screenY / viewportHeight);
+
+    // Build projection matrix (same as in RenderModelPreview)
+    float fov = 1.0f;
+    float aspect = 800.0f / 600.0f;
+    float znear = 0.1f;
+    float zfar = 20000.0f;
+
+    float proj[16] = {0};
+    float tanHalfFov = tan(fov / 2.0f);
+    proj[0] = 1.0f / (aspect * tanHalfFov);
+    proj[5] = 1.0f / tanHalfFov;
+    proj[10] = -(zfar + znear) / (zfar - znear);
+    proj[11] = -1.0f;
+    proj[14] = -(2.0f * zfar * znear) / (zfar - znear);
+
+    // Build view matrix
+    float view[16];
+    float target[3] = { camPos[0] + camFront[0], camPos[1] + camFront[1], camPos[2] + camFront[2] };
+    LookAt(camPos, target, camUp, view);
+
+    // Invert projection and view matrices
+    float invProj[16], invView[16];
+    if (!InvertMatrix(proj, invProj)) return -1;
+    if (!InvertMatrix(view, invView)) return -1;
+
+    // Unproject to get ray direction
+    // Near plane point in clip space
+    float clipNear[4] = { ndcX, ndcY, -1.0f, 1.0f };
+    // Far plane point in clip space
+    float clipFar[4] = { ndcX, ndcY, 1.0f, 1.0f };
+
+    // Transform through inverse projection
+    auto transformVec4 = [](const float m[16], const float v[4], float out[4]) {
+        out[0] = m[0]*v[0] + m[4]*v[1] + m[8]*v[2] + m[12]*v[3];
+        out[1] = m[1]*v[0] + m[5]*v[1] + m[9]*v[2] + m[13]*v[3];
+        out[2] = m[2]*v[0] + m[6]*v[1] + m[10]*v[2] + m[14]*v[3];
+        out[3] = m[3]*v[0] + m[7]*v[1] + m[11]*v[2] + m[15]*v[3];
+    };
+
+    float viewNear[4], viewFar[4];
+    transformVec4(invProj, clipNear, viewNear);
+    transformVec4(invProj, clipFar, viewFar);
+
+    // Perspective divide
+    viewNear[0] /= viewNear[3]; viewNear[1] /= viewNear[3]; viewNear[2] /= viewNear[3];
+    viewFar[0] /= viewFar[3]; viewFar[1] /= viewFar[3]; viewFar[2] /= viewFar[3];
+
+    // Transform through inverse view to world space
+    float worldNear[4], worldFar[4];
+    transformVec4(invView, viewNear, worldNear);
+    transformVec4(invView, viewFar, worldFar);
+
+    // Ray origin is camera position, direction is from near to far
+    float rayOrigin[3] = { camPos[0], camPos[1], camPos[2] };
+    float rayDir[3] = {
+        worldFar[0] - worldNear[0],
+        worldFar[1] - worldNear[1],
+        worldFar[2] - worldNear[2]
+    };
+    Normalize(rayDir);
+
+    // Test all meshes
+    int closestMesh = -1;
+    float closestT = 1e30f;
+
+    for (int i = 0; i < (int)previewMeshes.size(); i++) {
+        const auto& m = previewMeshes[i];
+        float t;
+        if (RayIntersectAABB(rayOrigin, rayDir, m.bboxMin, m.bboxMax, t)) {
+            if (t < closestT) {
+                closestT = t;
+                closestMesh = i;
+            }
+        }
+    }
+
+    return closestMesh;
+}
+
+void SpiderManTool::HandleMeshPicking(float viewportX, float viewportY, float viewportWidth, float viewportHeight) {
+    if (!isWorldMode || !isModelLoaded) return;
+
+    int pickedMesh = PickMeshAtScreenPos(viewportX, viewportY, viewportWidth, viewportHeight);
+
+    if (pickedMesh >= 0) {
+        selectedMeshIndex = pickedMesh;
+        LoadSelectedMeshPcmData();
+        showWorldMeshHexEditor = true;
+
+        const auto& m = previewMeshes[pickedMesh];
+        if (!m.meshName.empty()) {
+            Log("Selected mesh: " + m.meshName);
+        } else {
+            Log("Selected mesh index: " + std::to_string(pickedMesh));
+        }
+    }
+}
+
+void SpiderManTool::LoadSelectedMeshPcmData() {
+    selectedMeshPcmData.clear();
+
+    if (selectedMeshIndex < 0 || selectedMeshIndex >= (int)previewMeshes.size()) return;
+
+    const auto& m = previewMeshes[selectedMeshIndex];
+    if (m.sourcePack.empty() || m.sourceSize == 0) return;
+
+    std::ifstream file(m.sourcePack, std::ios::binary);
+    if (!file.is_open()) return;
+
+    file.seekg(m.sourceOffset);
+    if (!file.good()) return;
+
+    selectedMeshPcmData.resize(m.sourceSize);
+    file.read((char*)selectedMeshPcmData.data(), m.sourceSize);
+    file.close();
 }
