@@ -444,6 +444,43 @@ void SpiderManTool::RenderModelPreview() {
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "model"), 1, GL_FALSE, model);
     glUniform3f(glGetUniformLocation(modelProgram, "viewPos"), camPos[0], camPos[1], camPos[2]);
 
+    // Cache uniform locations for performance
+    GLint locDiffTexture = glGetUniformLocation(modelProgram, "diffTexture");
+    GLint locHasTexture = glGetUniformLocation(modelProgram, "hasTexture");
+    GLint locIsTranslucent = glGetUniformLocation(modelProgram, "isTranslucent");
+    GLint locIsFakeShadow = glGetUniformLocation(modelProgram, "isFakeShadow");
+    GLint locIsHighlighted = glGetUniformLocation(modelProgram, "isHighlighted");
+
+    // Build frustum planes for culling (simplified - just check if bbox center is roughly in front)
+    auto isInFrustum = [&](const float bboxMin[3], const float bboxMax[3]) -> bool {
+        // Calculate bbox center
+        float cx = (bboxMin[0] + bboxMax[0]) * 0.5f;
+        float cy = (bboxMin[1] + bboxMax[1]) * 0.5f;
+        float cz = (bboxMin[2] + bboxMax[2]) * 0.5f;
+
+        // Calculate bbox radius (half diagonal)
+        float rx = (bboxMax[0] - bboxMin[0]) * 0.5f;
+        float ry = (bboxMax[1] - bboxMin[1]) * 0.5f;
+        float rz = (bboxMax[2] - bboxMin[2]) * 0.5f;
+        float radius = sqrt(rx*rx + ry*ry + rz*rz);
+
+        // Vector from camera to bbox center
+        float dx = cx - camPos[0];
+        float dy = cy - camPos[1];
+        float dz = cz - camPos[2];
+
+        // Distance along view direction
+        float dist = dx * camFront[0] + dy * camFront[1] + dz * camFront[2];
+
+        // Cull if behind camera (with radius margin)
+        if (dist < -radius) return false;
+
+        // Cull if too far
+        if (dist > 15000.0f + radius) return false;
+
+        return true;
+    };
+
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
 
@@ -451,17 +488,20 @@ void SpiderManTool::RenderModelPreview() {
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
         if (m.indexCount > 0 && !m.isTranslucent && !m.isFakeShadow) {
+            // Frustum culling
+            if (!isInFrustum(m.bboxMin, m.bboxMax)) continue;
+
             if (m.textureId != 0) {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, m.textureId);
-                glUniform1i(glGetUniformLocation(modelProgram, "diffTexture"), 0);
-                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 1);
+                glUniform1i(locDiffTexture, 0);
+                glUniform1i(locHasTexture, 1);
             } else {
-                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
+                glUniform1i(locHasTexture, 0);
             }
-            glUniform1i(glGetUniformLocation(modelProgram, "isTranslucent"), 0);
-            glUniform1i(glGetUniformLocation(modelProgram, "isFakeShadow"), 0);
-            glUniform1i(glGetUniformLocation(modelProgram, "isHighlighted"), (i == selectedMeshIndex) ? 1 : 0);
+            glUniform1i(locIsTranslucent, 0);
+            glUniform1i(locIsFakeShadow, 0);
+            glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
 
             glBindVertexArray(m.vao);
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
@@ -476,17 +516,20 @@ void SpiderManTool::RenderModelPreview() {
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
         if (m.indexCount > 0 && (m.isTranslucent || m.isFakeShadow)) {
+            // Frustum culling
+            if (!isInFrustum(m.bboxMin, m.bboxMax)) continue;
+
             if (m.textureId != 0 && !m.isFakeShadow) {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, m.textureId);
-                glUniform1i(glGetUniformLocation(modelProgram, "diffTexture"), 0);
-                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 1);
+                glUniform1i(locDiffTexture, 0);
+                glUniform1i(locHasTexture, 1);
             } else {
-                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
+                glUniform1i(locHasTexture, 0);
             }
-            glUniform1i(glGetUniformLocation(modelProgram, "isTranslucent"), m.isTranslucent ? 1 : 0);
-            glUniform1i(glGetUniformLocation(modelProgram, "isFakeShadow"), m.isFakeShadow ? 1 : 0);
-            glUniform1i(glGetUniformLocation(modelProgram, "isHighlighted"), (i == selectedMeshIndex) ? 1 : 0);
+            glUniform1i(locIsTranslucent, m.isTranslucent ? 1 : 0);
+            glUniform1i(locIsFakeShadow, m.isFakeShadow ? 1 : 0);
+            glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
 
             glBindVertexArray(m.vao);
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
@@ -660,6 +703,9 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
 
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
+
+        // Skip meshes marked for no picking (sky, ocean, collision volumes)
+        if (m.skipPicking) continue;
 
         // Skip invisible meshes
         if (m.isFakeShadow) continue;

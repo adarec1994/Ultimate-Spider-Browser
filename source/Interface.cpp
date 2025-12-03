@@ -29,7 +29,7 @@ bool IsWorldInteriorPack(const std::string& stemName) {
 void RenderUI(SpiderManTool& tool) {
     // Handle indexing loading state
     if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
-        const int PACKS_PER_FRAME = 5;
+        const int PACKS_PER_FRAME = 10;  // Increased from 5 for faster indexing
         for (int i = 0; i < PACKS_PER_FRAME && tool.indexingProgress < tool.indexingTotal; i++) {
             tool.BuildGlobalTextureIndexStep(tool.indexingProgress);
             tool.indexingProgress++;
@@ -75,7 +75,7 @@ void RenderUI(SpiderManTool& tool) {
 
     // Handle world loading state
     if (tool.currentState == SpiderManTool::STATE_LOADING_WORLD && tool.isLoadingWorld) {
-        const int MODELS_PER_FRAME = 2;
+        const int MODELS_PER_FRAME = 20;  // Load more per frame for faster loading
         for (int i = 0; i < MODELS_PER_FRAME && tool.worldLoadProgress < tool.worldLoadTotal; i++) {
             tool.LoadWorldGeometryStep(tool.worldLoadProgress);
             tool.worldLoadProgress++;

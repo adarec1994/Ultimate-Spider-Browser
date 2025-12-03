@@ -36,14 +36,21 @@ struct RenderMesh {
     unsigned int textureId;
     bool isTranslucent = false;
     bool isFakeShadow = false;
+    bool skipPicking = false;  // Don't include in ray picking (for sky, ocean, etc)
 
     // Bounding box for ray picking (fast rejection)
     float bboxMin[3] = {0, 0, 0};
     float bboxMax[3] = {0, 0, 0};
 
-    // Vertex positions for triangle picking
+    // Vertex data for triangle picking and export
     std::vector<float> positions;  // x,y,z triplets
+    std::vector<float> normals;    // nx,ny,nz triplets
+    std::vector<float> uvs;        // u,v pairs
     std::vector<uint16_t> indices;
+
+    // Texture info for export
+    std::string textureName;
+    uint32_t textureHash = 0;
 
     // Source data for hex view
     std::string sourcePack;
