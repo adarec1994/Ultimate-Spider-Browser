@@ -1,13 +1,12 @@
 #include <iostream>
 #include <glad/glad.h>
+#include <GLFW/glfw3.h>
 
 #ifdef _WIN32
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 #include <windows.h>
 #endif
-
-#include <GLFW/glfw3.h>
 
 #include "SpiderManTool.h"
 #include "Interface.h"

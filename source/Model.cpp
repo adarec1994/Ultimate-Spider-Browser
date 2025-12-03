@@ -231,6 +231,15 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 mesh.bboxMax[i] = bboxMax[i];
             }
 
+            // Store positions for triangle picking
+            mesh.positions.reserve(vertices.size() * 3);
+            for (const auto& v : vertices) {
+                mesh.positions.push_back(v.x);
+                mesh.positions.push_back(v.y);
+                mesh.positions.push_back(v.z);
+            }
+            mesh.indices = indices;
+
             // Store source info for hex editor
             mesh.sourcePack = sourcePack;
             mesh.sourceOffset = sourceOffset;

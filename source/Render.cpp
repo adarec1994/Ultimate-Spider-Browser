@@ -418,7 +418,7 @@ void SpiderManTool::RenderModelPreview() {
     glUseProgram(modelProgram);
 
     float fov = 1.0f;
-    float aspect = 800.0f / 600.0f;
+    float aspect = (float)width / (float)height;  // Use framebuffer aspect (3840/2160)
     float znear = 0.1f;
     float zfar = 20000.0f;
 
@@ -575,7 +575,6 @@ bool SpiderManTool::RayIntersectAABB(const float rayOrigin[3], const float rayDi
 
     for (int i = 0; i < 3; i++) {
         if (fabs(rayDir[i]) < 1e-8f) {
-            // Ray is parallel to slab
             if (rayOrigin[i] < bboxMin[i] || rayOrigin[i] > bboxMax[i]) {
                 return false;
             }
@@ -593,82 +592,141 @@ bool SpiderManTool::RayIntersectAABB(const float rayOrigin[3], const float rayDi
     return tMin >= 0;
 }
 
-int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float viewportWidth, float viewportHeight) {
-    // Convert screen position to normalized device coordinates
-    float ndcX = (2.0f * screenX / viewportWidth) - 1.0f;
-    float ndcY = 1.0f - (2.0f * screenY / viewportHeight);
+// Möller–Trumbore ray-triangle intersection
+static bool RayIntersectTriangle(const float rayOrigin[3], const float rayDir[3],
+                                  const float v0[3], const float v1[3], const float v2[3],
+                                  float& t) {
+    const float EPSILON = 1e-7f;
 
-    // Build projection matrix (same as in RenderModelPreview)
-    float fov = 1.0f;
-    float aspect = 800.0f / 600.0f;
-    float znear = 0.1f;
-    float zfar = 20000.0f;
+    float edge1[3] = { v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] };
+    float edge2[3] = { v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] };
 
-    float proj[16] = {0};
+    float h[3];
+    Cross(rayDir, edge2, h);
+    float a = Dot(edge1, h);
+
+    if (fabs(a) < EPSILON) return false;
+
+    float f = 1.0f / a;
+    float s[3] = { rayOrigin[0] - v0[0], rayOrigin[1] - v0[1], rayOrigin[2] - v0[2] };
+    float u = f * Dot(s, h);
+
+    if (u < 0.0f || u > 1.0f) return false;
+
+    float q[3];
+    Cross(s, edge1, q);
+    float v = f * Dot(rayDir, q);
+
+    if (v < 0.0f || u + v > 1.0f) return false;
+
+    t = f * Dot(edge2, q);
+    return t > EPSILON;
+}
+
+int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWidth, float vpHeight) {
+    // Convert screen position to NDC (-1 to 1)
+    float ndcX = (2.0f * screenX / vpWidth) - 1.0f;
+    float ndcY = 1.0f - (2.0f * screenY / vpHeight);
+
+    // Use same FOV and aspect as rendering
+    const float fbAspect = 3840.0f / 2160.0f;
+    float fov = 1.0f;  // radians
     float tanHalfFov = tan(fov / 2.0f);
-    proj[0] = 1.0f / (aspect * tanHalfFov);
-    proj[5] = 1.0f / tanHalfFov;
-    proj[10] = -(zfar + znear) / (zfar - znear);
-    proj[11] = -1.0f;
-    proj[14] = -(2.0f * zfar * znear) / (zfar - znear);
 
-    // Build view matrix
-    float view[16];
-    float target[3] = { camPos[0] + camFront[0], camPos[1] + camFront[1], camPos[2] + camFront[2] };
-    LookAt(camPos, target, camUp, view);
+    // Calculate right vector from camera
+    float right[3];
+    Cross(camFront, camUp, right);
+    Normalize(right);
 
-    // Invert projection and view matrices
-    float invProj[16], invView[16];
-    if (!InvertMatrix(proj, invProj)) return -1;
-    if (!InvertMatrix(view, invView)) return -1;
+    // Calculate proper up vector (orthogonal to front and right)
+    float up[3];
+    Cross(right, camFront, up);
+    Normalize(up);
 
-    // Unproject to get ray direction
-    // Near plane point in clip space
-    float clipNear[4] = { ndcX, ndcY, -1.0f, 1.0f };
-    // Far plane point in clip space
-    float clipFar[4] = { ndcX, ndcY, 1.0f, 1.0f };
-
-    // Transform through inverse projection
-    auto transformVec4 = [](const float m[16], const float v[4], float out[4]) {
-        out[0] = m[0]*v[0] + m[4]*v[1] + m[8]*v[2] + m[12]*v[3];
-        out[1] = m[1]*v[0] + m[5]*v[1] + m[9]*v[2] + m[13]*v[3];
-        out[2] = m[2]*v[0] + m[6]*v[1] + m[10]*v[2] + m[14]*v[3];
-        out[3] = m[3]*v[0] + m[7]*v[1] + m[11]*v[2] + m[15]*v[3];
-    };
-
-    float viewNear[4], viewFar[4];
-    transformVec4(invProj, clipNear, viewNear);
-    transformVec4(invProj, clipFar, viewFar);
-
-    // Perspective divide
-    viewNear[0] /= viewNear[3]; viewNear[1] /= viewNear[3]; viewNear[2] /= viewNear[3];
-    viewFar[0] /= viewFar[3]; viewFar[1] /= viewFar[3]; viewFar[2] /= viewFar[3];
-
-    // Transform through inverse view to world space
-    float worldNear[4], worldFar[4];
-    transformVec4(invView, viewNear, worldNear);
-    transformVec4(invView, viewFar, worldFar);
-
-    // Ray origin is camera position, direction is from near to far
-    float rayOrigin[3] = { camPos[0], camPos[1], camPos[2] };
+    // Ray direction in world space
+    // Scale NDC by tan(fov/2) and aspect ratio
     float rayDir[3] = {
-        worldFar[0] - worldNear[0],
-        worldFar[1] - worldNear[1],
-        worldFar[2] - worldNear[2]
+        camFront[0] + right[0] * ndcX * tanHalfFov * fbAspect + up[0] * ndcY * tanHalfFov,
+        camFront[1] + right[1] * ndcX * tanHalfFov * fbAspect + up[1] * ndcY * tanHalfFov,
+        camFront[2] + right[2] * ndcX * tanHalfFov * fbAspect + up[2] * ndcY * tanHalfFov
     };
     Normalize(rayDir);
 
-    // Test all meshes
+    float rayOrigin[3] = { camPos[0], camPos[1], camPos[2] };
+
+    // Test all meshes with triangle intersection
     int closestMesh = -1;
     float closestT = 1e30f;
 
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
-        float t;
-        if (RayIntersectAABB(rayOrigin, rayDir, m.bboxMin, m.bboxMax, t)) {
-            if (t < closestT) {
-                closestT = t;
-                closestMesh = i;
+
+        // Skip invisible meshes
+        if (m.isFakeShadow) continue;
+
+        // Quick AABB rejection test first
+        float bboxT;
+        if (!RayIntersectAABB(rayOrigin, rayDir, m.bboxMin, m.bboxMax, bboxT)) continue;
+        if (bboxT >= closestT) continue;
+
+        // Test actual triangles
+        if (m.positions.empty() || m.indices.empty()) continue;
+
+        if (m.mode == GL_TRIANGLES) {
+            for (size_t j = 0; j + 2 < m.indices.size(); j += 3) {
+                uint16_t i0 = m.indices[j];
+                uint16_t i1 = m.indices[j + 1];
+                uint16_t i2 = m.indices[j + 2];
+
+                if (i0 * 3 + 2 >= m.positions.size() ||
+                    i1 * 3 + 2 >= m.positions.size() ||
+                    i2 * 3 + 2 >= m.positions.size()) continue;
+
+                float v0[3] = { m.positions[i0*3], m.positions[i0*3+1], m.positions[i0*3+2] };
+                float v1[3] = { m.positions[i1*3], m.positions[i1*3+1], m.positions[i1*3+2] };
+                float v2[3] = { m.positions[i2*3], m.positions[i2*3+1], m.positions[i2*3+2] };
+
+                float t;
+                if (RayIntersectTriangle(rayOrigin, rayDir, v0, v1, v2, t)) {
+                    if (t < closestT) {
+                        closestT = t;
+                        closestMesh = i;
+                    }
+                }
+            }
+        } else {
+            // Triangle strip
+            for (size_t j = 0; j + 2 < m.indices.size(); j++) {
+                uint16_t i0 = m.indices[j];
+                uint16_t i1 = m.indices[j + 1];
+                uint16_t i2 = m.indices[j + 2];
+
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+
+                if (i0 * 3 + 2 >= m.positions.size() ||
+                    i1 * 3 + 2 >= m.positions.size() ||
+                    i2 * 3 + 2 >= m.positions.size()) continue;
+
+                float v0[3] = { m.positions[i0*3], m.positions[i0*3+1], m.positions[i0*3+2] };
+                float v1[3] = { m.positions[i1*3], m.positions[i1*3+1], m.positions[i1*3+2] };
+                float v2[3] = { m.positions[i2*3], m.positions[i2*3+1], m.positions[i2*3+2] };
+
+                float t;
+                if (j % 2 == 0) {
+                    if (RayIntersectTriangle(rayOrigin, rayDir, v0, v1, v2, t)) {
+                        if (t < closestT) {
+                            closestT = t;
+                            closestMesh = i;
+                        }
+                    }
+                } else {
+                    if (RayIntersectTriangle(rayOrigin, rayDir, v0, v2, v1, t)) {
+                        if (t < closestT) {
+                            closestT = t;
+                            closestMesh = i;
+                        }
+                    }
+                }
             }
         }
     }

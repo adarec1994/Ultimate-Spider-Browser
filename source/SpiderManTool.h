@@ -37,9 +37,13 @@ struct RenderMesh {
     bool isTranslucent = false;
     bool isFakeShadow = false;
 
-    // Bounding box for ray picking
+    // Bounding box for ray picking (fast rejection)
     float bboxMin[3] = {0, 0, 0};
     float bboxMax[3] = {0, 0, 0};
+
+    // Vertex positions for triangle picking
+    std::vector<float> positions;  // x,y,z triplets
+    std::vector<uint16_t> indices;
 
     // Source data for hex view
     std::string sourcePack;
