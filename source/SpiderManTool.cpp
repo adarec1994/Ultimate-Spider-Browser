@@ -17,7 +17,8 @@ void SpiderManTool::ShowNotification(const std::string& msg) {
 void SpiderManTool::SaveConfig() {
     std::ofstream f("usm_config.txt");
     if (f.is_open()) {
-        f << searchPath;
+        f << searchPath << "\n";
+        f << (foundPacks.empty() ? "0" : "1");
         f.close();
     }
 }
@@ -29,6 +30,19 @@ void SpiderManTool::LoadConfig() {
         if (std::getline(f, line) && !line.empty()) {
             if (fs::exists(line)) {
                 searchPath = line;
+            }
+        }
+        if (std::getline(f, line) && line == "1") {
+            if (fs::exists(searchPath)) {
+                std::string dictPath;
+                fs::path targetDict = "string_hash_dictionary.txt";
+                fs::path p1 = fs::path(searchPath) / targetDict;
+                if (fs::exists(p1)) dictPath = p1.string();
+                if (dictPath.empty() && fs::exists(targetDict)) dictPath = targetDict.string();
+                if (!dictPath.empty()) LoadDictionary(dictPath);
+
+                ScanDirectory();
+                std::sort(foundPacks.begin(), foundPacks.end());
             }
         }
         f.close();

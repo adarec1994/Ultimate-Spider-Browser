@@ -133,7 +133,10 @@ void RenderUI(SpiderManTool& tool) {
             IGFD::FileDialog::Instance()->OpenDialog("ChooseDirDlgKey", "Choose Directory", nullptr, config);
         }
 
-        if (IGFD::FileDialog::Instance()->Display("ChooseDirDlgKey")) {
+        ImGui::EndChild();
+        ImGui::End();
+
+        if (IGFD::FileDialog::Instance()->Display("ChooseDirDlgKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
             if (IGFD::FileDialog::Instance()->IsOk()) {
                 tool.searchPath = IGFD::FileDialog::Instance()->GetCurrentPath();
                 tool.SaveConfig();
@@ -150,8 +153,6 @@ void RenderUI(SpiderManTool& tool) {
             }
             IGFD::FileDialog::Instance()->Close();
         }
-        ImGui::EndChild();
-        ImGui::End();
         return;
     }
 

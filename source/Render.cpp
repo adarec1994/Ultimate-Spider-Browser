@@ -273,15 +273,8 @@ void SpiderManTool::InitModelPreview() {
         "    else if (diff > 0.0) toon = 0.5;\n"
         "    else toon = 0.3;\n"
         "    vec3 baseColor;\n"
-        "    float alpha = 1.0;\n"
         "    if (hasTexture) {\n"
         "        vec4 texColor = texture(diffTexture, TexCoord);\n"
-        "        if (isTranslucent) {\n"
-        "            if (texColor.a < 0.01) discard;\n"
-        "            alpha = texColor.a;\n"
-        "        } else {\n"
-        "            if (texColor.a < 0.1) discard;\n"
-        "        }\n"
         "        baseColor = texColor.rgb;\n"
         "    } else {\n"
         "        baseColor = vec3(0.8, 0.8, 0.8);\n"
@@ -289,7 +282,7 @@ void SpiderManTool::InitModelPreview() {
         "    vec3 ambient = 0.2 * baseColor;\n"
         "    vec3 diffuse = toon * baseColor;\n"
         "    vec3 result = ambient + diffuse;\n"
-        "    FragColor = vec4(result, alpha);\n"
+        "    FragColor = vec4(result, 1.0);\n"
         "}\n";
 
     unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
@@ -441,8 +434,6 @@ void SpiderManTool::RenderModelPreview() {
     glDepthMask(GL_TRUE);
 
     for (const auto& m : previewMeshes) {
-        if (m.isTranslucent) continue;
-
         if (m.indexCount > 0) {
             if (m.textureId != 0) {
                 glActiveTexture(GL_TEXTURE0);
@@ -458,32 +449,6 @@ void SpiderManTool::RenderModelPreview() {
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
         }
     }
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
-
-    for (const auto& m : previewMeshes) {
-        if (!m.isTranslucent) continue;
-
-        if (m.indexCount > 0) {
-            if (m.textureId != 0) {
-                glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, m.textureId);
-                glUniform1i(glGetUniformLocation(modelProgram, "diffTexture"), 0);
-                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 1);
-            } else {
-                glUniform1i(glGetUniformLocation(modelProgram, "hasTexture"), 0);
-            }
-            glUniform1i(glGetUniformLocation(modelProgram, "isTranslucent"), 1);
-
-            glBindVertexArray(m.vao);
-            glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
-        }
-    }
-
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, msFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, modelFbo);
