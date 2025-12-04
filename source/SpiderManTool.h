@@ -96,6 +96,12 @@ struct WorldPCMItem {
     uint32_t size;
 };
 
+// Instance transform for world placement
+struct WorldInstanceTransform {
+    float matrix[16];  // 4x4 row-major transform matrix
+    bool hasTransform = false;
+};
+
 struct GlobalSearchResult {
     int packIndex;
     std::string packName;
@@ -123,6 +129,9 @@ public:
     int worldLoadProgress = 0;
     int worldLoadTotal = 0;
     std::vector<WorldPCMItem> worldPcmQueue;
+
+    // Instance transforms for world objects (keyed by "packPath:offset:index")
+    std::map<std::string, WorldInstanceTransform> worldInstanceTransforms;
 
     std::string searchPath = ".";
     std::vector<fs::path> foundPacks;
@@ -236,6 +245,7 @@ public:
     bool IsWorldInteriorPack(const std::string& name);
 
     void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0);
+    void AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0, const float* transform = nullptr);
     void LoadBackgroundMeshes();
     void LoadAllWorldGeometries();
     void LoadWorldGeometryStep(int index);

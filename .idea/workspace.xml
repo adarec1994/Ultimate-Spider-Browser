@@ -67,7 +67,6 @@
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Model.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Render.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/World.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/World.cpp" afterDir="false" />
     </list>
@@ -364,6 +363,8 @@
       <workItem from="1764759954993" duration="388000" />
       <workItem from="1764767769718" duration="5388000" />
       <workItem from="1764810158686" duration="4451000" />
+      <workItem from="1764825799202" duration="4108000" />
+      <workItem from="1764844338095" duration="3638000" />
     </task>
     <servers />
   </component>

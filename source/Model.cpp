@@ -370,6 +370,281 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
     }
 }
 
+// Helper to transform a vertex position by a 4x4 row-major matrix
+static void TransformVertex(float& x, float& y, float& z, const float* m) {
+    float ox = x, oy = y, oz = z;
+    x = m[0]*ox + m[4]*oy + m[8]*oz + m[12];
+    y = m[1]*ox + m[5]*oy + m[9]*oz + m[13];
+    z = m[2]*ox + m[6]*oy + m[10]*oz + m[14];
+}
+
+// Helper to transform a normal by a 4x4 matrix (ignore translation)
+static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
+    float ox = nx, oy = ny, oz = nz;
+    nx = m[0]*ox + m[4]*oy + m[8]*oz;
+    ny = m[1]*ox + m[5]*oy + m[9]*oz;
+    nz = m[2]*ox + m[6]*oy + m[10]*oz;
+    // Renormalize
+    float len = sqrt(nx*nx + ny*ny + nz*nz);
+    if (len > 0.0001f) { nx /= len; ny /= len; nz /= len; }
+}
+
+void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const float* transform) {
+    ParseMaterialEntries(pcmData);
+
+    BinaryReader br(pcmData);
+    if (8 + 4 > pcmData.size()) return;
+    br.Seek(8);
+    uint32_t num = br.Read<uint32_t>();
+    uint32_t ofs = br.Read<uint32_t>();
+
+    if (num > 1000) return;
+    if (ofs >= pcmData.size()) return;
+
+    br.Seek(ofs);
+    struct Info { uint16_t u1, type; uint32_t offset, u2; };
+    std::vector<Info> infos;
+    for(uint32_t i=0; i<num; i++) {
+        Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
+    }
+
+    struct Vertex { float x,y,z; float nx,ny,nz; float u,v; };
+
+    for(auto& inf : infos) {
+        if (inf.type != 512) continue;
+        if (inf.offset + 16 > pcmData.size()) continue;
+
+        br.Seek(inf.offset); br.Skip(8);
+        uint32_t numSm = br.Read<uint32_t>(); uint32_t infSmOfs = br.Read<uint32_t>();
+        if (numSm > 256 || infSmOfs >= pcmData.size()) continue;
+
+        br.Seek(infSmOfs);
+        std::vector<uint32_t> smOffsets;
+        for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
+
+        for(uint32_t smOfs : smOffsets) {
+            if (smOfs + 64 > pcmData.size()) continue;
+
+            br.Seek(smOfs);
+            uint32_t meshNameRef = br.Read<uint32_t>();
+
+            std::string meshName;
+            if (meshNameRef != 0 && meshNameRef + 32 <= pcmData.size()) {
+                size_t strStart = meshNameRef + 4;
+                size_t end = strStart;
+                while (end < strStart + 28 && end < pcmData.size() && pcmData[end] != 0) end++;
+                meshName = std::string((char*)&pcmData[strStart], end - strStart);
+            }
+
+            MaterialDef mat = ResolveMaterialByMeshOffset(meshNameRef);
+            unsigned int tex = 0;
+
+            if (!mat.textureName.empty()) {
+                if (textureResolver) {
+                    std::string texNameLower = StrToLower(mat.textureName);
+                    uint32_t hash1 = CalculateCRC32(texNameLower + ".dds");
+                    tex = textureResolver(hash1);
+                    if (tex == 0) {
+                        uint32_t hash2 = CalculateCRC32(texNameLower);
+                        tex = textureResolver(hash2);
+                    }
+                } else {
+                    tex = LoadTextureByName(mat.textureName);
+                }
+            }
+
+            if (tex == 0 && !modelName.empty()) {
+                std::string cleanName = modelName;
+                size_t lastDot = cleanName.find_last_of(".");
+                if(lastDot != std::string::npos) cleanName = cleanName.substr(0, lastDot);
+                cleanName = StrToLower(cleanName);
+
+                if (textureResolver) {
+                    uint32_t diffHash = CalculateCRC32(cleanName + "_d.dds");
+                    tex = textureResolver(diffHash);
+                } else {
+                    tex = LoadTextureByName(cleanName + "_d");
+                    if (tex == 0) tex = LoadTextureByName(cleanName);
+                }
+            }
+
+            if (tex == 0 && !mat.meshName.empty()) {
+                if (textureResolver) {
+                    std::string meshNameLower = StrToLower(mat.meshName);
+                    uint32_t hash4 = CalculateCRC32(meshNameLower + ".dds");
+                    tex = textureResolver(hash4);
+                } else {
+                    tex = LoadTextureByName(mat.meshName);
+                }
+            }
+
+            br.Seek(smOfs + 40);
+            uint32_t itype = br.Read<uint32_t>(); uint32_t inum = br.Read<uint32_t>(); uint32_t iofs = br.Read<uint32_t>();
+            br.Skip(4); uint32_t vnum = br.Read<uint32_t>(); uint32_t vofs = br.Read<uint32_t>();
+            br.Skip(8); uint32_t stride = br.Read<uint32_t>();
+
+            if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
+
+            br.Seek(vofs);
+            std::vector<Vertex> vertices;
+            bool valid = true;
+
+            float bboxMin[3] = {1e30f, 1e30f, 1e30f};
+            float bboxMax[3] = {-1e30f, -1e30f, -1e30f};
+
+            for(uint32_t v=0; v<vnum; v++) {
+                size_t startV = br.Tell();
+                if (startV + stride > pcmData.size()) { valid = false; break; }
+                Vertex vert;
+                vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
+                vert.nx = 0; vert.ny = 0; vert.nz = 0;
+                vert.u = 0; vert.v = 0;
+
+                if (stride == 64) {
+                    if (startV + 24 <= pcmData.size()) {
+                        br.Seek(startV + 12);
+                        vert.nx = br.Read<float>(); vert.ny = br.Read<float>(); vert.nz = br.Read<float>();
+                    }
+                    if (startV + 32 <= pcmData.size()) {
+                        br.Seek(startV + 24);
+                        vert.u = br.Read<float>(); vert.v = br.Read<float>();
+                    }
+                } else if (stride == 24) {
+                    if (startV + 20 <= pcmData.size()) {
+                        br.Seek(startV + 12);
+                        vert.u = br.Read<float>(); vert.v = br.Read<float>();
+                    }
+                }
+
+                // Apply transform if provided
+                if (transform) {
+                    TransformVertex(vert.x, vert.y, vert.z, transform);
+                    if (stride == 64) {
+                        TransformNormal(vert.nx, vert.ny, vert.nz, transform);
+                    }
+                }
+
+                // Update bounding box after transform
+                if (vert.x < bboxMin[0]) bboxMin[0] = vert.x;
+                if (vert.y < bboxMin[1]) bboxMin[1] = vert.y;
+                if (vert.z < bboxMin[2]) bboxMin[2] = vert.z;
+                if (vert.x > bboxMax[0]) bboxMax[0] = vert.x;
+                if (vert.y > bboxMax[1]) bboxMax[1] = vert.y;
+                if (vert.z > bboxMax[2]) bboxMax[2] = vert.z;
+
+                vertices.push_back(vert);
+                br.Seek(startV + stride);
+            }
+            if (!valid) continue;
+
+            br.Seek(iofs);
+            std::vector<uint16_t> indices;
+            if (iofs + inum * 2 > pcmData.size()) continue;
+            for(uint32_t i=0; i<inum; i++) indices.push_back(br.Read<uint16_t>());
+            if (vertices.empty() || indices.empty()) continue;
+
+            // Compute normals if not present
+            if (stride != 64 && !vertices.empty() && !indices.empty()) {
+                for (auto& v : vertices) { v.nx = 0; v.ny = 0; v.nz = 0; }
+
+                if (itype == 4) {
+                    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+                        uint16_t i0 = indices[i], i1 = indices[i+1], i2 = indices[i+2];
+                        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) continue;
+                        float e1[3] = { vertices[i1].x - vertices[i0].x, vertices[i1].y - vertices[i0].y, vertices[i1].z - vertices[i0].z };
+                        float e2[3] = { vertices[i2].x - vertices[i0].x, vertices[i2].y - vertices[i0].y, vertices[i2].z - vertices[i0].z };
+                        float n[3]; Cross(e1, e2, n);
+                        vertices[i0].nx += n[0]; vertices[i0].ny += n[1]; vertices[i0].nz += n[2];
+                        vertices[i1].nx += n[0]; vertices[i1].ny += n[1]; vertices[i1].nz += n[2];
+                        vertices[i2].nx += n[0]; vertices[i2].ny += n[1]; vertices[i2].nz += n[2];
+                    }
+                } else {
+                    for (size_t i = 0; i + 2 < indices.size(); i++) {
+                        uint16_t i0 = indices[i], i1 = indices[i+1], i2 = indices[i+2];
+                        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) continue;
+                        float e1[3] = { vertices[i1].x - vertices[i0].x, vertices[i1].y - vertices[i0].y, vertices[i1].z - vertices[i0].z };
+                        float e2[3] = { vertices[i2].x - vertices[i0].x, vertices[i2].y - vertices[i0].y, vertices[i2].z - vertices[i0].z };
+                        float n[3]; Cross(e1, e2, n);
+                        if (i % 2 == 1) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
+                        vertices[i0].nx += n[0]; vertices[i0].ny += n[1]; vertices[i0].nz += n[2];
+                        vertices[i1].nx += n[0]; vertices[i1].ny += n[1]; vertices[i1].nz += n[2];
+                        vertices[i2].nx += n[0]; vertices[i2].ny += n[1]; vertices[i2].nz += n[2];
+                    }
+                }
+
+                for (auto& v : vertices) {
+                    float len = sqrt(v.nx*v.nx + v.ny*v.ny + v.nz*v.nz);
+                    if (len > 0.0001f) { v.nx /= len; v.ny /= len; v.nz /= len; }
+                    else { v.ny = 1.0f; }
+                }
+            }
+
+            RenderMesh mesh;
+            mesh.indexCount = (int)indices.size();
+            mesh.mode = (itype == 4) ? GL_TRIANGLES : GL_TRIANGLE_STRIP;
+            mesh.textureId = tex;
+            mesh.isTranslucent = mat.isTranslucent;
+
+            std::string texNameLower = StrToLower(mat.textureName);
+            mesh.isFakeShadow = (texNameLower.find("fake_shadow") != std::string::npos);
+
+            std::string meshNameLower = StrToLower(meshName.empty() ? modelName : meshName);
+            mesh.isColorVolume = IsColorVolumeMesh(meshNameLower);
+            mesh.isHidden = ShouldHideMesh(meshNameLower);
+
+            for (int i = 0; i < 3; i++) {
+                mesh.bboxMin[i] = bboxMin[i];
+                mesh.bboxMax[i] = bboxMax[i];
+            }
+
+            mesh.sourcePack = sourcePack;
+            mesh.sourceOffset = sourceOffset;
+            mesh.sourceSize = (uint32_t)pcmData.size();
+            mesh.meshName = meshName.empty() ? modelName : meshName;
+
+            mesh.skipPicking = (meshNameLower.find("sky") != std::string::npos) ||
+                               (meshNameLower.find("ocean") != std::string::npos) ||
+                               (meshNameLower.find("colvol") != std::string::npos) ||
+                               (meshNameLower.find("shadow") != std::string::npos) ||
+                               mesh.isColorVolume;
+
+            if (!mesh.skipPicking) {
+                mesh.positions.reserve(vertices.size() * 3);
+                mesh.normals.reserve(vertices.size() * 3);
+                mesh.uvs.reserve(vertices.size() * 2);
+                for (const auto& v : vertices) {
+                    mesh.positions.push_back(v.x);
+                    mesh.positions.push_back(v.y);
+                    mesh.positions.push_back(v.z);
+                    mesh.normals.push_back(v.nx);
+                    mesh.normals.push_back(v.ny);
+                    mesh.normals.push_back(v.nz);
+                    mesh.uvs.push_back(v.u);
+                    mesh.uvs.push_back(v.v);
+                }
+                mesh.indices = indices;
+            }
+
+            mesh.textureName = mat.textureName;
+            if (!mat.textureName.empty()) {
+                mesh.textureHash = CalculateCRC32(StrToLower(mat.textureName) + ".dds");
+            }
+
+            glGenVertexArrays(1, &mesh.vao); glGenBuffers(1, &mesh.vbo); glGenBuffers(1, &mesh.ebo);
+            glBindVertexArray(mesh.vao);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo); glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_STATIC_DRAW);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0); glEnableVertexAttribArray(0);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6*sizeof(float))); glEnableVertexAttribArray(2);
+            glBindVertexArray(0);
+            previewMeshes.push_back(mesh);
+        }
+    }
+}
+
+
 void SpiderManTool::LoadBackgroundMeshes() {
     // Load oceanmesh.pcm and sky_day.pcm as background meshes for every preview
     // These are loaded from the global pack files using the texture index

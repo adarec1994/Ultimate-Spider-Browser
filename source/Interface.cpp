@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string>
 #include <cctype>
+#include <cstdio> // For snprintf
 
 std::string ToLower(const std::string& str) {
     std::string lower = str;
@@ -26,7 +27,18 @@ bool IsWorldInteriorPack(const std::string& stemName) {
     return false;
 }
 
+// Helper to read strings from the PCM string table structure (offset + 4)
+static std::string ReadPcmString(const std::vector<uint8_t>& data, uint32_t offset) {
+    if (offset == 0 || offset + 32 > data.size()) return "";
+    size_t strStart = offset + 4;
+    size_t end = strStart;
+    while (end < strStart + 64 && end < data.size() && data[end] != 0) end++;
+    return std::string((char*)&data[strStart], end - strStart);
+}
+
 void RenderUI(SpiderManTool& tool) {
+    static int s_WorldHexScrollTo = -1;
+
     // Handle indexing loading state
     if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
         const int PACKS_PER_FRAME = 10;  // Increased from 5 for faster indexing
@@ -579,6 +591,82 @@ void RenderUI(SpiderManTool& tool) {
 
         ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
         if (ImGui::Begin(title.c_str(), &tool.showWorldMeshHexEditor)) {
+
+            // Calculate offsets for highlighting
+            uint32_t nameOffset = 0, nameLen = 0;
+            uint32_t texOffset = 0, texLen = 0;
+
+            if (tool.selectedMeshPcmData.size() > 32) {
+                BinaryReader br(tool.selectedMeshPcmData);
+                br.Seek(8);
+                uint32_t numEntries = br.Read<uint32_t>();
+                uint32_t entryTableOfs = br.Read<uint32_t>();
+
+                if (numEntries < 1000 && entryTableOfs < tool.selectedMeshPcmData.size()) {
+                    br.Seek(entryTableOfs);
+                    struct E { uint16_t type, tag; uint32_t dataOfs, nameOfs; };
+                    std::vector<E> entries;
+                    for(uint32_t i=0; i<numEntries; i++) {
+                        E e; e.type = br.Read<uint16_t>(); e.tag = br.Read<uint16_t>();
+                        e.dataOfs = br.Read<uint32_t>(); e.nameOfs = br.Read<uint32_t>();
+                        entries.push_back(e);
+                    }
+
+                    uint32_t targetMeshNameRef = 0;
+
+                    // Find Mesh Name Offset
+                    for(const auto& e : entries) {
+                        if (e.tag == 512) { // Mesh
+                            br.Seek(e.dataOfs + 8);
+                            uint32_t numSm = br.Read<uint32_t>();
+                            uint32_t smOfs = br.Read<uint32_t>();
+                            if (smOfs < tool.selectedMeshPcmData.size()) {
+                                br.Seek(smOfs);
+                                std::vector<uint32_t> smOffsets;
+                                for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
+
+                                for(uint32_t smo : smOffsets) {
+                                    if (smo < tool.selectedMeshPcmData.size()) {
+                                        br.Seek(smo);
+                                        uint32_t nameRef = br.Read<uint32_t>();
+                                        if (nameRef != 0) {
+                                            std::string s = ReadPcmString(tool.selectedMeshPcmData, nameRef);
+                                            if (s == m.meshName) {
+                                                targetMeshNameRef = nameRef;
+                                                nameOffset = nameRef + 4;
+                                                nameLen = (uint32_t)s.length();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (targetMeshNameRef != 0) break;
+                    }
+
+                    // Find Texture Name Offset (via Material)
+                    if (targetMeshNameRef != 0) {
+                        for(const auto& e : entries) {
+                            if (e.tag == 256) { // Material
+                                br.Seek(e.dataOfs);
+                                uint32_t matMeshNameRef = br.Read<uint32_t>();
+                                if (matMeshNameRef == targetMeshNameRef) {
+                                    br.Seek(e.dataOfs + 0x60);
+                                    uint32_t texRef = br.Read<uint32_t>();
+                                    if (texRef != 0) {
+                                        std::string s = ReadPcmString(tool.selectedMeshPcmData, texRef);
+                                        texOffset = texRef + 4;
+                                        texLen = (uint32_t)s.length();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             ImGui::Columns(2, "WorldHexCols");
             ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 300);
 
@@ -586,8 +674,30 @@ void RenderUI(SpiderManTool& tool) {
             tool.worldMeshHexEditor.MaxBytes = tool.selectedMeshPcmData.size();
 
             ImGui::BeginChild("WorldHexPanel", ImVec2(0,0), false);
+
+            // Handle auto-scroll
+            if (s_WorldHexScrollTo != -1) {
+                // Assuming 16 bytes per row and standard text height
+                // Use GetTextLineHeightWithSpacing() as hex editors typically use standard line height with spacing
+                float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+                int row = s_WorldHexScrollTo / 16;
+
+                // Add a small buffer (e.g. scroll to 2 rows above to give context)
+                if (row > 2) row -= 2;
+
+                float scrollY = (float)row * lineHeight;
+
+                // Use SetNextWindowScroll to target the child window created by BeginHexEditor
+                ImGui::SetNextWindowScroll(ImVec2(0.0f, scrollY));
+                s_WorldHexScrollTo = -1;
+            }
+
+            // Apply red color to selection
+            ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(0.9f, 0.2f, 0.2f, 0.5f));
             ImGui::BeginHexEditor("##WorldHex", &tool.worldMeshHexEditor);
             ImGui::EndHexEditor();
+            ImGui::PopStyleColor();
+
             ImGui::EndChild();
 
             ImGui::NextColumn();
@@ -597,8 +707,49 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::Separator();
 
             ImGui::Text("Index: %d / %d", tool.selectedMeshIndex, (int)tool.previewMeshes.size());
+
+            ImGui::Text("Name: ");
+            ImGui::SameLine();
             if (!m.meshName.empty()) {
-                ImGui::Text("Name: %s", m.meshName.c_str());
+                std::string label = m.meshName;
+                if (nameOffset != 0) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), " (0x%X)", nameOffset);
+                    label += buf;
+                } else {
+                    label += " (Not Found)";
+                }
+                if (ImGui::Selectable(label.c_str(), false)) {
+                     if (nameOffset != 0) {
+                         tool.worldMeshHexEditor.SelectStartByte = nameOffset;
+                         tool.worldMeshHexEditor.SelectEndByte = nameOffset + nameLen;
+                         s_WorldHexScrollTo = nameOffset;
+                     }
+                }
+            } else {
+                ImGui::TextDisabled("(none)");
+            }
+
+            ImGui::Text("Texture: ");
+            ImGui::SameLine();
+            if (!m.textureName.empty()) {
+                std::string label = m.textureName;
+                if (texOffset != 0) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), " (0x%X)", texOffset);
+                    label += buf;
+                } else {
+                    label += " (Not Found)";
+                }
+                if (ImGui::Selectable(label.c_str(), false)) {
+                     if (texOffset != 0) {
+                         tool.worldMeshHexEditor.SelectStartByte = texOffset;
+                         tool.worldMeshHexEditor.SelectEndByte = texOffset + texLen;
+                         s_WorldHexScrollTo = texOffset;
+                     }
+                }
+            } else {
+                ImGui::TextDisabled("(none)");
             }
 
             ImGui::Spacing();
