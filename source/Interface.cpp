@@ -210,11 +210,21 @@ void RenderUI(SpiderManTool& tool) {
             tool.HandleMeshPicking(localX, localY, winSize.x, winSize.y);
         }
 
+        // Handle Delete key to hide selected mesh in world mode
+        if (tool.isWorldMode && tool.selectedMeshIndex >= 0 && tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+                tool.previewMeshes[tool.selectedMeshIndex].isHidden = true;
+                tool.Log("Hidden mesh: " + tool.previewMeshes[tool.selectedMeshIndex].meshName);
+                tool.selectedMeshIndex = -1;
+                tool.showWorldMeshHexEditor = false;
+            }
+        }
+
         tool.UpdateWorldCamera(isViewportActive);
 
         ImGui::SetCursorPos(ImVec2(20, 20));
         if (tool.isWorldMode) {
-            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up | LMB to Select Mesh");
+            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up | LMB to Select | DEL to Hide");
             if (tool.selectedMeshIndex >= 0 && tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
                 const auto& m = tool.previewMeshes[tool.selectedMeshIndex];
                 ImGui::SetCursorPos(ImVec2(20, 45));
@@ -563,14 +573,12 @@ void RenderUI(SpiderManTool& tool) {
         }
     }
 
-    // World mesh hex editor (for selected mesh in world view)
     if (tool.showWorldMeshHexEditor && tool.selectedMeshIndex >= 0 && !tool.selectedMeshPcmData.empty()) {
         const auto& m = tool.previewMeshes[tool.selectedMeshIndex];
         std::string title = "World Mesh Hex View: " + (m.meshName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)) : m.meshName);
 
         ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
         if (ImGui::Begin(title.c_str(), &tool.showWorldMeshHexEditor)) {
-            // Sidebar with mesh info
             ImGui::Columns(2, "WorldHexCols");
             ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 300);
 

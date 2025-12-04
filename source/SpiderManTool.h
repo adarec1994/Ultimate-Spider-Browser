@@ -36,6 +36,8 @@ struct RenderMesh {
     unsigned int textureId;
     bool isTranslucent = false;
     bool isFakeShadow = false;
+    bool isColorVolume = false;  // For "col vol", "color volume", "cv_*" meshes
+    bool isHidden = false;       // User can hide meshes with Delete key
     bool skipPicking = false;  // Don't include in ray picking (for sky, ocean, etc)
 
     // Bounding box for ray picking (fast rejection)

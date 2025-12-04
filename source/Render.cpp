@@ -265,6 +265,7 @@ void SpiderManTool::InitModelPreview() {
         "uniform bool hasTexture;\n"
         "uniform bool isTranslucent;\n"
         "uniform bool isFakeShadow;\n"
+        "uniform bool isColorVolume;\n"
         "uniform bool isHighlighted;\n"
         "uniform vec3 viewPos;\n"
         "void main() {\n"
@@ -278,7 +279,7 @@ void SpiderManTool::InitModelPreview() {
         "    else toon = 0.3;\n"
         "    vec3 baseColor;\n"
         "    float alpha = 1.0;\n"
-        "    if (isFakeShadow) {\n"
+        "    if (isFakeShadow || isColorVolume) {\n"
         "        baseColor = vec3(0.0, 0.0, 0.0);\n"
         "        alpha = 0.3;\n"
         "    } else if (hasTexture) {\n"
@@ -287,7 +288,7 @@ void SpiderManTool::InitModelPreview() {
         "    } else {\n"
         "        baseColor = vec3(0.8, 0.8, 0.8);\n"
         "    }\n"
-        "    if (isTranslucent && !isFakeShadow) {\n"
+        "    if (isTranslucent && !isFakeShadow && !isColorVolume) {\n"
         "        alpha = 0.5;\n"
         "    }\n"
         "    if (isHighlighted) {\n"
@@ -418,7 +419,7 @@ void SpiderManTool::RenderModelPreview() {
     glUseProgram(modelProgram);
 
     float fov = 1.0f;
-    float aspect = (float)width / (float)height;  // Use framebuffer aspect (3840/2160)
+    float aspect = (float)width / (float)height;
     float znear = 0.1f;
     float zfar = 20000.0f;
 
@@ -444,38 +445,30 @@ void SpiderManTool::RenderModelPreview() {
     glUniformMatrix4fv(glGetUniformLocation(modelProgram, "model"), 1, GL_FALSE, model);
     glUniform3f(glGetUniformLocation(modelProgram, "viewPos"), camPos[0], camPos[1], camPos[2]);
 
-    // Cache uniform locations for performance
     GLint locDiffTexture = glGetUniformLocation(modelProgram, "diffTexture");
     GLint locHasTexture = glGetUniformLocation(modelProgram, "hasTexture");
     GLint locIsTranslucent = glGetUniformLocation(modelProgram, "isTranslucent");
     GLint locIsFakeShadow = glGetUniformLocation(modelProgram, "isFakeShadow");
+    GLint locIsColorVolume = glGetUniformLocation(modelProgram, "isColorVolume");
     GLint locIsHighlighted = glGetUniformLocation(modelProgram, "isHighlighted");
 
-    // Build frustum planes for culling (simplified - just check if bbox center is roughly in front)
     auto isInFrustum = [&](const float bboxMin[3], const float bboxMax[3]) -> bool {
-        // Calculate bbox center
         float cx = (bboxMin[0] + bboxMax[0]) * 0.5f;
         float cy = (bboxMin[1] + bboxMax[1]) * 0.5f;
         float cz = (bboxMin[2] + bboxMax[2]) * 0.5f;
 
-        // Calculate bbox radius (half diagonal)
         float rx = (bboxMax[0] - bboxMin[0]) * 0.5f;
         float ry = (bboxMax[1] - bboxMin[1]) * 0.5f;
         float rz = (bboxMax[2] - bboxMin[2]) * 0.5f;
         float radius = sqrt(rx*rx + ry*ry + rz*rz);
 
-        // Vector from camera to bbox center
         float dx = cx - camPos[0];
         float dy = cy - camPos[1];
         float dz = cz - camPos[2];
 
-        // Distance along view direction
         float dist = dx * camFront[0] + dy * camFront[1] + dz * camFront[2];
 
-        // Cull if behind camera (with radius margin)
         if (dist < -radius) return false;
-
-        // Cull if too far
         if (dist > 15000.0f + radius) return false;
 
         return true;
@@ -484,11 +477,11 @@ void SpiderManTool::RenderModelPreview() {
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
 
-    // First pass: render opaque meshes
+    // First pass: opaque meshes (not translucent, fake shadow, or color volume)
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
-        if (m.indexCount > 0 && !m.isTranslucent && !m.isFakeShadow) {
-            // Frustum culling
+        if (m.isHidden) continue;  // Skip hidden meshes
+        if (m.indexCount > 0 && !m.isTranslucent && !m.isFakeShadow && !m.isColorVolume) {
             if (!isInFrustum(m.bboxMin, m.bboxMax)) continue;
 
             if (m.textureId != 0) {
@@ -501,6 +494,7 @@ void SpiderManTool::RenderModelPreview() {
             }
             glUniform1i(locIsTranslucent, 0);
             glUniform1i(locIsFakeShadow, 0);
+            glUniform1i(locIsColorVolume, 0);
             glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
 
             glBindVertexArray(m.vao);
@@ -508,18 +502,18 @@ void SpiderManTool::RenderModelPreview() {
         }
     }
 
-    // Second pass: render translucent meshes with blending
+    // Second pass: translucent meshes with blending (including color volumes)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
 
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
-        if (m.indexCount > 0 && (m.isTranslucent || m.isFakeShadow)) {
-            // Frustum culling
+        if (m.isHidden) continue;  // Skip hidden meshes
+        if (m.indexCount > 0 && (m.isTranslucent || m.isFakeShadow || m.isColorVolume)) {
             if (!isInFrustum(m.bboxMin, m.bboxMax)) continue;
 
-            if (m.textureId != 0 && !m.isFakeShadow) {
+            if (m.textureId != 0 && !m.isFakeShadow && !m.isColorVolume) {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, m.textureId);
                 glUniform1i(locDiffTexture, 0);
@@ -529,6 +523,7 @@ void SpiderManTool::RenderModelPreview() {
             }
             glUniform1i(locIsTranslucent, m.isTranslucent ? 1 : 0);
             glUniform1i(locIsFakeShadow, m.isFakeShadow ? 1 : 0);
+            glUniform1i(locIsColorVolume, m.isColorVolume ? 1 : 0);
             glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
 
             glBindVertexArray(m.vao);
@@ -635,7 +630,6 @@ bool SpiderManTool::RayIntersectAABB(const float rayOrigin[3], const float rayDi
     return tMin >= 0;
 }
 
-// Möller–Trumbore ray-triangle intersection
 static bool RayIntersectTriangle(const float rayOrigin[3], const float rayDir[3],
                                   const float v0[3], const float v1[3], const float v2[3],
                                   float& t) {
@@ -667,27 +661,21 @@ static bool RayIntersectTriangle(const float rayOrigin[3], const float rayDir[3]
 }
 
 int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWidth, float vpHeight) {
-    // Convert screen position to NDC (-1 to 1)
     float ndcX = (2.0f * screenX / vpWidth) - 1.0f;
     float ndcY = 1.0f - (2.0f * screenY / vpHeight);
 
-    // Use same FOV and aspect as rendering
     const float fbAspect = 3840.0f / 2160.0f;
-    float fov = 1.0f;  // radians
+    float fov = 1.0f;
     float tanHalfFov = tan(fov / 2.0f);
 
-    // Calculate right vector from camera
     float right[3];
     Cross(camFront, camUp, right);
     Normalize(right);
 
-    // Calculate proper up vector (orthogonal to front and right)
     float up[3];
     Cross(right, camFront, up);
     Normalize(up);
 
-    // Ray direction in world space
-    // Scale NDC by tan(fov/2) and aspect ratio
     float rayDir[3] = {
         camFront[0] + right[0] * ndcX * tanHalfFov * fbAspect + up[0] * ndcY * tanHalfFov,
         camFront[1] + right[1] * ndcX * tanHalfFov * fbAspect + up[1] * ndcY * tanHalfFov,
@@ -697,25 +685,19 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
 
     float rayOrigin[3] = { camPos[0], camPos[1], camPos[2] };
 
-    // Test all meshes with triangle intersection
     int closestMesh = -1;
     float closestT = 1e30f;
 
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
 
-        // Skip meshes marked for no picking (sky, ocean, collision volumes)
         if (m.skipPicking) continue;
+        if (m.isFakeShadow || m.isColorVolume) continue;
 
-        // Skip invisible meshes
-        if (m.isFakeShadow) continue;
-
-        // Quick AABB rejection test first
         float bboxT;
         if (!RayIntersectAABB(rayOrigin, rayDir, m.bboxMin, m.bboxMax, bboxT)) continue;
         if (bboxT >= closestT) continue;
 
-        // Test actual triangles
         if (m.positions.empty() || m.indices.empty()) continue;
 
         if (m.mode == GL_TRIANGLES) {
@@ -741,7 +723,6 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
                 }
             }
         } else {
-            // Triangle strip
             for (size_t j = 0; j + 2 < m.indices.size(); j++) {
                 uint16_t i0 = m.indices[j];
                 uint16_t i1 = m.indices[j + 1];

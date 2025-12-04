@@ -122,6 +122,10 @@ void SpiderManTool::LoadAllWorldGeometries() {
     // Now queue world pack PCMs
     for (const auto& path : foundPacks) {
         std::string stem = StrToLower(path.stem().string());
+
+        // Skip JH.pcpack (Johnny Storm / Human Torch related)
+        if (stem == "jh") continue;
+
         bool isRelevant = IsWorldPack(stem) || IsWorldInteriorPack(stem);
         if (!isRelevant) continue;
 
