@@ -279,17 +279,20 @@ void SpiderManTool::InitModelPreview() {
         "    else toon = 0.3;\n"
         "    vec3 baseColor;\n"
         "    float alpha = 1.0;\n"
+        "    float texAlpha = 1.0;\n"
         "    if (isFakeShadow || isColorVolume) {\n"
         "        baseColor = vec3(0.0, 0.0, 0.0);\n"
         "        alpha = 0.3;\n"
         "    } else if (hasTexture) {\n"
         "        vec4 texColor = texture(diffTexture, TexCoord);\n"
         "        baseColor = texColor.rgb;\n"
+        "        texAlpha = texColor.a;\n"
         "    } else {\n"
         "        baseColor = vec3(0.8, 0.8, 0.8);\n"
         "    }\n"
         "    if (isTranslucent && !isFakeShadow && !isColorVolume) {\n"
-        "        alpha = 0.5;\n"
+        "        alpha = texAlpha;\n"
+        "        if (alpha < 0.1) discard;\n"
         "    }\n"
         "    if (isHighlighted) {\n"
         "        baseColor = mix(baseColor, vec3(0.2, 1.0, 0.3), 0.6);\n"
@@ -414,7 +417,7 @@ void SpiderManTool::RenderModelPreview() {
     }
 
     glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);  // Disable backface culling globally - all meshes are double-sided
 
     glUseProgram(modelProgram);
 
@@ -476,6 +479,7 @@ void SpiderManTool::RenderModelPreview() {
 
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
+    glDisable(GL_CULL_FACE);  // No backface culling - render both sides of all geometry
 
     // First pass: opaque meshes (not translucent, fake shadow, or color volume)
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
@@ -503,9 +507,11 @@ void SpiderManTool::RenderModelPreview() {
     }
 
     // Second pass: translucent meshes with blending (including color volumes)
+    // Uses texture alpha channel for alpha-tested materials (fences, foliage, etc.)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);  // No backface culling for translucent meshes either
 
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
