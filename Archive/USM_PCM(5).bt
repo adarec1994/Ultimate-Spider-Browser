@@ -1,0 +1,416 @@
+LittleEndian();
+
+typedef struct {
+    char magic[4];
+    uint version;
+    uint num_entries;
+    uint entries_offset;
+    uchar padding[16];
+} PCM_HEADER;
+
+typedef struct {
+    uint16 size;
+    uint16 tag;
+    uint32 data_offset;
+    uint32 name_offset;
+} ASSET_ENTRY <read=ReadAssetEntry>;
+
+string ReadAssetEntry(ASSET_ENTRY &e) {
+    string s;
+    local string tagStr;
+    if (e.tag == 256) tagStr = "Material";
+    else if (e.tag == 512) tagStr = "Model";
+    else SPrintf(tagStr, "%d", e.tag);
+    SPrintf(s, "[%s] data:0x%X size:%d", tagStr, e.data_offset, e.size);
+    return s;
+}
+
+typedef struct {
+    uint mesh_name_offset;
+    uint shader_name_offset;
+    uint zero1[2];
+    uint shader_type;
+    uint zero2;
+    uint diffuse_name_offset;
+    uint zero3;
+    uint spheremap_name_offset;
+    uint zero4;
+    float color_r;
+    float color_g;
+    float color_b;
+    float color_a;
+    uint zero5;
+    uint zero6;
+    uint zero7;
+    float unk1;
+    float unk2;
+    uint zero8;
+} MATERIAL_CHARACTER_80 <read=ReadMatChar80>;
+
+string ReadMatChar80(MATERIAL_CHARACTER_80 &m) {
+    local string s;
+    local string shader = ReadString(m.shader_name_offset + 4);
+    local string tex = ReadString(m.spheremap_name_offset + 4);
+    SPrintf(s, "%s | %s", shader, tex);
+    return s;
+}
+
+typedef struct {
+    uint mesh_name_offset;
+    uint shader_name_offset;
+    uint zero1[2];
+    uint shader_type;
+    uint zero2;
+    uint diffuse_name_offset;
+    uint zero3;
+    uint spheremap_name_offset;
+    uint zero4;
+    float color_r;
+    float color_g;
+    float color_b;
+    float color_a;
+    uint zero5;
+    float unk1;
+    float unk2;
+    float unk3;
+    float unk4;
+    uint zero6;
+    float specular_intensity;
+    float specular_power;
+} MATERIAL_CHARACTER_88 <read=ReadMatChar88>;
+
+string ReadMatChar88(MATERIAL_CHARACTER_88 &m) {
+    local string s;
+    local string shader = ReadString(m.shader_name_offset + 4);
+    local string tex = ReadString(m.spheremap_name_offset + 4);
+    SPrintf(s, "%s | %s", shader, tex);
+    return s;
+}
+
+typedef struct {
+    uint mesh_name_offset;
+    uint shader_name_offset;
+    uint zero1[2];
+    uint shader_type;
+    uint zero2;
+    uint render_order;
+    float ambient_r;
+    float ambient_g;
+    float ambient_b;
+    float ambient_a;
+    float diffuse_r;
+    float diffuse_g;
+    float diffuse_b;
+    float diffuse_a;
+    float specular_r;
+    float specular_g;
+    float specular_b;
+    float specular_a;
+    float emissive_r;
+    float emissive_g;
+    float emissive_b;
+    float emissive_a;
+    uint zero3;
+    uint texture_name_offset;
+    uint zero4[7];
+} MATERIAL_STREET_128 <read=ReadMatStreet128>;
+
+string ReadMatStreet128(MATERIAL_STREET_128 &m) {
+    local string s;
+    local string shader = ReadString(m.shader_name_offset + 4);
+    local string tex = ReadString(m.texture_name_offset + 4);
+    SPrintf(s, "%s | %s", shader, tex);
+    return s;
+}
+
+typedef struct {
+    uint mesh_name_offset;
+    uint shader_name_offset;
+    uint zero1[2];
+    uint shader_type;
+    uint zero2;
+    uint render_order;
+    float ambient_r;
+    float ambient_g;
+    float ambient_b;
+    float ambient_a;
+    float diffuse_r;
+    float diffuse_g;
+    float diffuse_b;
+    float diffuse_a;
+    float specular_r;
+    float specular_g;
+    float specular_b;
+    float specular_a;
+    float emissive_r;
+    float emissive_g;
+    float emissive_b;
+    float emissive_a;
+    uint zero3;
+    uint texture_name_offset;
+    uint zero4[8];
+} MATERIAL_WORLD_132 <read=ReadMatWorld132>;
+
+string ReadMatWorld132(MATERIAL_WORLD_132 &m) {
+    local string s;
+    local string shader = ReadString(m.shader_name_offset + 4);
+    local string tex = ReadString(m.texture_name_offset + 4);
+    SPrintf(s, "%s | %s", shader, tex);
+    return s;
+}
+
+typedef struct {
+    uint mesh_name_offset;
+    uint shader_name_offset;
+    uint zero1[2];
+    uint shader_type;
+    uint zero2[5];
+    float color1_r;
+    float color1_g;
+    float color1_b;
+    float color1_a;
+    float color2_r;
+    float color2_g;
+    float color2_b;
+    float color2_a;
+    float unk1;
+    uint zero3[3];
+    float unk2;
+    float unk3;
+    uint texture_name_offset;
+    uint zero4[3];
+    float unk4;
+    uint zero5[3];
+    float unk5;
+    uint zero6;
+} MATERIAL_TRANSLUCENT_136 <read=ReadMatTrans136>;
+
+string ReadMatTrans136(MATERIAL_TRANSLUCENT_136 &m) {
+    local string s;
+    local string shader = ReadString(m.shader_name_offset + 4);
+    local string tex = ReadString(m.texture_name_offset + 4);
+    SPrintf(s, "%s | %s", shader, tex);
+    return s;
+}
+
+typedef struct {
+    uint name_offset;
+    uint zero1;
+    uint num_submeshes;
+    uint submesh_info_offset;
+    uint num_bones;
+    uint bones_offset;
+    uint unk;
+    uint unk_offset;
+    float bounds[4];
+} MODEL_HEADER <read=ReadModelHeader>;
+
+string ReadModelHeader(MODEL_HEADER &m) {
+    string s;
+    SPrintf(s, "submeshes:%d bones:%d", m.num_submeshes, m.num_bones);
+    return s;
+}
+
+typedef struct {
+    uint zero;
+    uint submesh_offset;
+} SUBMESH_REF;
+
+typedef struct {
+    uint name_offset;
+    uint zero1;
+    uint bone_map_count;
+    uint bone_map_offset;
+    float bounds[4];
+    uint unk_uint;
+    uint zero2;
+    uint index_type;
+    uint index_count;
+    uint index_offset;
+    uint zero3;
+    uint vertex_count;
+    uint vertex_offset;
+    uint unk1;
+    uint unk2;
+    uint stride;
+    uint unk3[5];
+} SUBMESH_INFO <read=ReadSubmeshInfo>;
+
+string ReadSubmeshInfo(SUBMESH_INFO &s) {
+    string str;
+    SPrintf(str, "verts:%d idx:%d stride:%d", s.vertex_count, s.index_count, s.stride);
+    return str;
+}
+
+typedef struct {
+    float x[4];
+    float y[4];
+    float z[4];
+    float w[4];
+} MATRIX4X4;
+
+typedef struct {
+    float position[3];
+    float uv[2];
+    float unk;
+} VERTEX_24;
+
+typedef struct {
+    float position[3];
+    float normal[3];
+    float unk[2];
+    float bone_indices[4];
+    float bone_weights[4];
+} VERTEX_64;
+
+typedef struct {
+    uint hash;
+    char name[28];
+} STRING_ENTRY <read=ReadStringEntry>;
+
+string ReadStringEntry(STRING_ENTRY &e) {
+    return e.name;
+}
+
+PCM_HEADER header;
+
+ASSET_ENTRY asset_entries[header.num_entries];
+
+local int i, j;
+local uint64 pos;
+local uint shader_type;
+
+for (i = 0; i < header.num_entries; i++) {
+    FSeek(asset_entries[i].data_offset);
+    
+    if (asset_entries[i].tag == 256) {
+        shader_type = ReadUInt(asset_entries[i].data_offset + 0x10);
+        
+        if (shader_type == 2) {
+            if (asset_entries[i].size == 80) {
+                MATERIAL_CHARACTER_80 material;
+            } else if (asset_entries[i].size == 88) {
+                MATERIAL_CHARACTER_88 material;
+            } else {
+                uchar material_unk[asset_entries[i].size];
+            }
+        }
+        else if (shader_type == 7) {
+            MATERIAL_WORLD_132 material;
+        }
+        else if (shader_type == 8) {
+            MATERIAL_STREET_128 material;
+        }
+        else if (shader_type == 11) {
+            MATERIAL_TRANSLUCENT_136 material;
+        }
+        else {
+            uchar material_unk[asset_entries[i].size];
+        }
+    }
+    else if (asset_entries[i].tag == 512) {
+        MODEL_HEADER model_header;
+        
+        pos = FTell();
+        if (model_header.submesh_info_offset > pos) {
+            uchar model_header_unk[model_header.submesh_info_offset - pos];
+        }
+        
+        SUBMESH_REF submesh_refs[model_header.num_submeshes];
+        
+        SUBMESH_INFO submesh_infos[model_header.num_submeshes];
+        
+        pos = FTell();
+        local uint next_offset = 0xFFFFFFFF;
+        
+        if (model_header.num_bones > 0 && model_header.bones_offset > 0 && model_header.bones_offset < next_offset) {
+            next_offset = model_header.bones_offset;
+        }
+        for (j = 0; j < model_header.num_submeshes; j++) {
+            if (submesh_infos[j].bone_map_count > 0 && submesh_infos[j].bone_map_offset > 0 && submesh_infos[j].bone_map_offset < next_offset) {
+                next_offset = submesh_infos[j].bone_map_offset;
+            }
+            if (submesh_infos[j].index_offset > 0 && submesh_infos[j].index_offset < next_offset) {
+                next_offset = submesh_infos[j].index_offset;
+            }
+        }
+        
+        if (next_offset != 0xFFFFFFFF && next_offset > pos) {
+            uchar submesh_unk[next_offset - pos];
+        }
+        
+        if (model_header.num_bones > 0 && model_header.bones_offset > 0) {
+            FSeek(model_header.bones_offset);
+            MATRIX4X4 bones[model_header.num_bones];
+        }
+        
+        for (j = 0; j < model_header.num_submeshes; j++) {
+            if (submesh_infos[j].bone_map_count > 0 && submesh_infos[j].bone_map_offset > 0) {
+                FSeek(submesh_infos[j].bone_map_offset);
+                uint16 bone_map[submesh_infos[j].bone_map_count];
+            }
+        }
+        
+        for (j = 0; j < model_header.num_submeshes; j++) {
+            if (submesh_infos[j].index_count > 0 && submesh_infos[j].index_offset > 0) {
+                FSeek(submesh_infos[j].index_offset);
+                uint16 indices[submesh_infos[j].index_count];
+            }
+        }
+    }
+}
+
+local uint string_table_start = 0xFFFFFFFF;
+for (i = 0; i < header.num_entries; i++) {
+    if (asset_entries[i].name_offset > 0 && asset_entries[i].name_offset < string_table_start) {
+        string_table_start = asset_entries[i].name_offset;
+    }
+}
+
+if (string_table_start != 0xFFFFFFFF) {
+    FSeek(string_table_start);
+    
+    local uint string_count = 0;
+    local uint test_pos = string_table_start;
+    while (test_pos + 32 <= FileSize()) {
+        local uint test_hash = ReadUInt(test_pos);
+        local uchar test_char = ReadUByte(test_pos + 4);
+        if (test_char < 0x20 || test_char > 0x7E) break;
+        string_count++;
+        test_pos += 32;
+    }
+    
+    if (string_count > 0) {
+        STRING_ENTRY string_table[string_count];
+    }
+}
+
+for (i = 0; i < header.num_entries; i++) {
+    if (asset_entries[i].tag == 512) {
+        FSeek(asset_entries[i].data_offset + 8);
+        local uint num_sm = ReadUInt();
+        local uint sm_info_ofs = ReadUInt();
+        
+        for (j = 0; j < num_sm; j++) {
+            FSeek(sm_info_ofs + j * 8 + 4);
+            local uint sm_ofs = ReadUInt();
+            
+            FSeek(sm_ofs + 56);
+            local uint vert_count = ReadUInt();
+            local uint vert_ofs = ReadUInt();
+            FSeek(sm_ofs + 72);
+            local uint stride = ReadUInt();
+            
+            if (vert_count > 0 && vert_ofs > 0) {
+                FSeek(vert_ofs);
+                if (stride == 24) {
+                    VERTEX_24 vertices[vert_count];
+                } else if (stride == 64) {
+                    VERTEX_64 vertices[vert_count];
+                } else {
+                    uchar vertex_data[vert_count * stride];
+                }
+            }
+        }
+    }
+}

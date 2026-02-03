@@ -1,0 +1,257 @@
+RequiresVersion(14, 0);
+LittleEndian();
+
+local int COLOR_HEADER   = 0xA0FFA0;
+local int COLOR_ENTRY    = 0xA0A0FF;
+local int COLOR_MATERIAL = 0xFFA0A0;
+local int COLOR_MESH     = 0xFFFF80;
+local int COLOR_SUBMESH  = 0x80FFFF;
+local int COLOR_VERTEX   = 0xFFC080;
+local int COLOR_INDEX    = 0xC080FF;
+local int COLOR_STRING   = 0x80FF80;
+local int COLOR_SKELETON = 0xFF80FF;
+
+struct PCMHeader;
+struct EntryTableEntry;
+struct StringTableEntry;
+struct MaterialData;
+struct MeshData;
+struct SubMeshInfo;
+struct SubMeshData;
+struct SkeletonData;
+
+typedef struct {
+    uint32 unknown;
+    char   name[28];
+} StringTableEntry <read=ReadStringTableEntry, bgcolor=COLOR_STRING>;
+
+string ReadStringTableEntry(StringTableEntry &s) {
+    return s.name;
+}
+
+typedef struct {
+    char   magic[4];
+    uint32 version;
+    uint32 numEntries;
+    uint32 entryTableOffset;
+} PCMHeader <bgcolor=COLOR_HEADER>;
+
+typedef struct {
+    uint16 type;
+    uint16 tag;
+    uint32 dataOffset;
+    uint32 nameOffset;
+} EntryTableEntry <read=ReadEntryTableEntry, bgcolor=COLOR_ENTRY>;
+
+string ReadEntryTableEntry(EntryTableEntry &e) {
+    string s;
+    switch (e.tag) {
+        case 256:  SPrintf(s, "Material @ 0x%X", e.dataOffset); break;
+        case 512:  SPrintf(s, "Mesh @ 0x%X", e.dataOffset); break;
+        case 768:  SPrintf(s, "Skeleton @ 0x%X", e.dataOffset); break;
+        default:   SPrintf(s, "Unknown(%d) @ 0x%X", e.tag, e.dataOffset); break;
+    }
+    return s;
+}
+
+typedef struct {
+    uint32 meshNameOffset;
+    uint32 alphaFlagOffset;
+    byte   unknown1[0x58];
+    uint32 textureNameOffset;
+    
+    local string meshName = "";
+    local string alphaFlag = "";
+    local string textureName = "";
+    
+    if (meshNameOffset > 0 && meshNameOffset + 32 <= FileSize()) {
+        meshName = ReadString(meshNameOffset + 4, 28);
+    }
+    if (alphaFlagOffset > 0 && alphaFlagOffset + 32 <= FileSize()) {
+        alphaFlag = ReadString(alphaFlagOffset + 4, 28);
+    }
+    if (textureNameOffset > 0 && textureNameOffset + 32 <= FileSize()) {
+        textureName = ReadString(textureNameOffset + 4, 28);
+    }
+} MaterialData <read=ReadMaterialData, bgcolor=COLOR_MATERIAL>;
+
+string ReadMaterialData(MaterialData &m) {
+    string s;
+    SPrintf(s, "Mesh: %s, Tex: %s", m.meshName, m.textureName);
+    return s;
+}
+
+typedef struct {
+    uint32 unknown;
+    uint32 submeshDataOffset;
+} SubMeshInfo <read=ReadSubMeshInfo, bgcolor=COLOR_SUBMESH>;
+
+string ReadSubMeshInfo(SubMeshInfo &s) {
+    string str;
+    SPrintf(str, "SubMesh @ 0x%X", s.submeshDataOffset);
+    return str;
+}
+
+typedef struct {
+    uint32 meshNameRef;
+    byte   unknown1[36];
+    uint32 primitiveType;
+    uint32 indexCount;
+    uint32 indexOffset;
+    uint32 unknown2;
+    uint32 vertexCount;
+    uint32 vertexOffset;
+    uint32 unknown3[2];
+    uint32 stride;
+    
+    local string meshName = "";
+    if (meshNameRef > 0 && meshNameRef + 32 <= FileSize()) {
+        meshName = ReadString(meshNameRef + 4, 28);
+    }
+} SubMeshData <read=ReadSubMeshData, bgcolor=COLOR_SUBMESH, size=80>;
+
+string ReadSubMeshData(SubMeshData &s) {
+    string str;
+    SPrintf(str, "%s: %d verts (stride %d), %d indices", 
+            s.meshName != "" ? s.meshName : "unnamed",
+            s.vertexCount, s.stride, s.indexCount);
+    return str;
+}
+
+typedef struct {
+    byte   unknown1[8];
+    uint32 numSubMeshes;
+    uint32 subMeshInfoOffset;
+} MeshData <read=ReadMeshData, bgcolor=COLOR_MESH>;
+
+string ReadMeshData(MeshData &m) {
+    string s;
+    SPrintf(s, "%d submeshes @ 0x%X", m.numSubMeshes, m.subMeshInfoOffset);
+    return s;
+}
+
+typedef struct {
+    uint32 boneCount;
+} SkeletonData <read=ReadSkeletonData, bgcolor=COLOR_SKELETON>;
+
+string ReadSkeletonData(SkeletonData &s) {
+    string str;
+    SPrintf(str, "%d bones", s.boneCount);
+    return str;
+}
+
+typedef struct {
+    float position[3];
+    float normal[3];
+    float uv[2];
+    byte  extra[32];
+} Vertex64 <read=ReadVertex64, bgcolor=COLOR_VERTEX>;
+
+string ReadVertex64(Vertex64 &v) {
+    string s;
+    SPrintf(s, "Pos(%.2f, %.2f, %.2f) UV(%.3f, %.3f)", 
+            v.position[0], v.position[1], v.position[2],
+            v.uv[0], v.uv[1]);
+    return s;
+}
+
+typedef struct {
+    float position[3];
+    float uv[2];
+    byte  extra[4];
+} Vertex24 <read=ReadVertex24, bgcolor=COLOR_VERTEX>;
+
+string ReadVertex24(Vertex24 &v) {
+    string s;
+    SPrintf(s, "Pos(%.2f, %.2f, %.2f) UV(%.3f, %.3f)", 
+            v.position[0], v.position[1], v.position[2],
+            v.uv[0], v.uv[1]);
+    return s;
+}
+
+typedef struct (int stride) {
+    float position[3];
+    if (stride > 12) {
+        byte  data[stride - 12];
+    }
+} VertexGeneric <bgcolor=COLOR_VERTEX>;
+
+typedef uint16 Index <bgcolor=COLOR_INDEX>;
+
+if (ReadString(0, 4) != "PCM ") {
+    Warning("Not a valid PCM file - missing 'PCM ' magic");
+    return;
+}
+
+PCMHeader header;
+
+if (header.numEntries > 1000) {
+    Warning("Suspicious entry count: %d", header.numEntries);
+    return;
+}
+if (header.entryTableOffset >= FileSize()) {
+    Warning("Entry table offset out of bounds");
+    return;
+}
+
+FSeek(header.entryTableOffset);
+EntryTableEntry entries[header.numEntries];
+
+local int i, j;
+local uint32 pos;
+
+for (i = 0; i < header.numEntries; i++) {
+    pos = entries[i].dataOffset;
+    
+    if (pos >= FileSize()) continue;
+    
+    FSeek(pos);
+    
+    switch (entries[i].tag) {
+        case 256:
+            MaterialData material;
+            break;
+            
+        case 512:
+            MeshData mesh;
+            
+            if (mesh.numSubMeshes > 0 && mesh.numSubMeshes <= 256 && 
+                mesh.subMeshInfoOffset < FileSize()) {
+                
+                FSeek(mesh.subMeshInfoOffset);
+                SubMeshInfo submeshInfos[mesh.numSubMeshes];
+                
+                for (j = 0; j < mesh.numSubMeshes; j++) {
+                    if (submeshInfos[j].submeshDataOffset + 80 <= FileSize()) {
+                        FSeek(submeshInfos[j].submeshDataOffset);
+                        SubMeshData submesh;
+                    }
+                }
+            }
+            break;
+            
+        case 768:
+            SkeletonData skeleton;
+            break;
+            
+        default:
+            byte unknownData[4] <bgcolor=0x808080>;
+            break;
+    }
+}
+
+Printf("PCM File Summary:\n");
+Printf("  Version: %d\n", header.version);
+Printf("  Entries: %d\n", header.numEntries);
+
+local int materialCount = 0, meshCount = 0, skeletonCount = 0;
+for (i = 0; i < header.numEntries; i++) {
+    switch (entries[i].tag) {
+        case 256: materialCount++; break;
+        case 512: meshCount++; break;
+        case 768: skeletonCount++; break;
+    }
+}
+Printf("  Materials: %d\n", materialCount);
+Printf("  Meshes: %d\n", meshCount);
+Printf("  Skeletons: %d\n", skeletonCount);
