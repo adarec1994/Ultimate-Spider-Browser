@@ -10,9 +10,9 @@
 namespace fs = std::filesystem;
 
 struct MaterialDef {
-    std::string meshName;      // +0x00: mesh name this material applies to
-    std::string alphaFlag;     // +0x04: "smsimple", "smtranslucent", etc.
-    std::string textureName;   // +0x60: actual texture name
+    std::string meshName;
+    std::string alphaFlag;
+    std::string textureName;
     bool isTranslucent = false;
 };
 
@@ -36,25 +36,25 @@ struct RenderMesh {
     unsigned int textureId;
     bool isTranslucent = false;
     bool isFakeShadow = false;
-    bool isColorVolume = false;  // For "col vol", "color volume", "cv_*" meshes
-    bool isHidden = false;       // User can hide meshes with Delete key
-    bool skipPicking = false;  // Don't include in ray picking (for sky, ocean, etc)
+    bool isColorVolume = false;
+    bool isHidden = false;
+    bool skipPicking = false;
 
-    // Bounding box for ray picking (fast rejection)
+
     float bboxMin[3] = {0, 0, 0};
     float bboxMax[3] = {0, 0, 0};
 
-    // Vertex data for triangle picking and export
-    std::vector<float> positions;  // x,y,z triplets
-    std::vector<float> normals;    // nx,ny,nz triplets
-    std::vector<float> uvs;        // u,v pairs
+
+    std::vector<float> positions;
+    std::vector<float> normals;
+    std::vector<float> uvs;
     std::vector<uint16_t> indices;
 
-    // Texture info for export
+
     std::string textureName;
     uint32_t textureHash = 0;
 
-    // Source data for hex view
+
     std::string sourcePack;
     uint32_t sourceOffset = 0;
     uint32_t sourceSize = 0;
@@ -65,6 +65,104 @@ struct PCMSkeletonInfo {
     uint32_t count = 0;
     uint32_t offset = 0;
 };
+
+
+struct PCMBoneInfo {
+    int index;
+    float posX, posY, posZ;
+    int parentIndex;
+    std::string inferredRole;
+};
+
+
+struct PCMLodInfo {
+    std::string name;
+    uint32_t nameOffset;
+    uint32_t submeshCount;
+    uint32_t boneCount;
+    uint32_t bonesOffset;
+    float lodDistance;
+    uint32_t nextLodOffset;
+
+
+    float boundsMin[3];
+    float boundsMax[3];
+};
+
+
+struct PCMSubmeshInfo {
+    std::string name;
+    uint32_t nameOffset;
+
+
+    uint32_t vertexCount;
+    uint32_t vertexOffset;
+    uint32_t indexCount;
+    uint32_t indexOffset;
+    uint32_t stride;
+    uint32_t primitiveType;
+
+
+    bool hasNormals;
+    bool hasUV;
+    bool hasBones;
+
+
+    float boundingRadius;
+    uint32_t vertexBufferSize;
+
+
+    uint32_t boneMapOffset;
+    uint32_t boneMapCount;
+
+
+    std::string materialMeshName;
+    std::string materialAlphaFlag;
+    std::string materialTexture;
+    bool isTranslucent;
+
+
+    std::string shaderType;
+    uint32_t shaderSize;
+};
+
+
+struct PCMMaterialInfo {
+    std::string name;
+    uint32_t nameOffset;
+    std::string meshName;
+    std::string alphaFlag;
+    std::string textureName;
+    uint32_t shaderSize;
+    bool isTranslucent;
+};
+
+
+struct PCMFileInfo {
+
+    uint32_t fileSize;
+    uint32_t numEntries;
+    uint32_t entryTableOffset;
+    uint32_t stringTableOffset;
+
+
+    uint32_t materialCount;
+    uint32_t lodCount;
+    uint32_t totalSubmeshes;
+    uint32_t totalVertices;
+    uint32_t totalIndices;
+
+
+    std::vector<PCMMaterialInfo> materials;
+    std::vector<PCMLodInfo> lods;
+    std::vector<PCMSubmeshInfo> submeshes;
+    std::vector<PCMBoneInfo> bones;
+
+
+    uint32_t boneCount;
+    uint32_t bonesOffset;
+};
+
 
 struct PCMMeshInfo {
     std::string name;
@@ -77,10 +175,10 @@ struct PCMMeshInfo {
     bool hasUV;
     bool hasBones;
 
-    // Material info (linked from material entry)
-    std::string materialMeshName;  // From material +0x00
-    std::string materialAlphaFlag; // From material +0x04
-    std::string materialTexture;   // From material +0x60
+
+    std::string materialMeshName;
+    std::string materialAlphaFlag;
+    std::string materialTexture;
     bool isTranslucent;
 };
 
@@ -112,13 +210,13 @@ public:
     enum AppState { STATE_SPLASH, STATE_BROWSER, STATE_LOADING, STATE_LOADING_WORLD };
     AppState currentState = STATE_SPLASH;
 
-    // Loading progress state (for indexing)
+
     bool isIndexing = false;
     int indexingProgress = 0;
     int indexingTotal = 0;
     std::string indexingCurrentPack;
 
-    // World loading progress state
+
     bool isLoadingWorld = false;
     int worldLoadProgress = 0;
     int worldLoadTotal = 0;
@@ -161,7 +259,11 @@ public:
     PCMSkeletonInfo currentPcmSkeleton;
     int currentPcmIndex = -1;
 
-    // Material map keyed by mesh_name offset for linking
+
+    PCMFileInfo currentPcmDetails;
+    bool showPcmDetailsPanel = false;
+
+
     std::map<uint32_t, MaterialDef> materialMap;
 
     unsigned int modelFbo = 0;
@@ -182,13 +284,13 @@ public:
     void BuildGlobalTextureIndex();
     void BuildGlobalTextureIndexStep(int packIndex);
 
-    // Mesh selection for world view
+
     int selectedMeshIndex = -1;
     std::vector<uint8_t> selectedMeshPcmData;
     bool showWorldMeshHexEditor = false;
     ImGuiHexEditorState worldMeshHexEditor;
 
-    // Ray picking
+
     bool RayIntersectAABB(const float rayOrigin[3], const float rayDir[3],
                           const float bboxMin[3], const float bboxMax[3], float& tMin);
     int PickMeshAtScreenPos(float screenX, float screenY, float viewportWidth, float viewportHeight);
@@ -228,6 +330,7 @@ public:
 
     void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
     void AnalyzePCM(int index);
+    void AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData);
 
     void ParseMaterialEntries(const std::vector<uint8_t>& pcmData);
     MaterialDef ResolveMaterialByMeshOffset(uint32_t meshNameOffset);
@@ -241,7 +344,7 @@ public:
     void LoadAllWorldGeometries();
     void LoadWorldGeometryStep(int index);
 
-    // Global file search across all packs
+
     std::vector<GlobalSearchResult> globalSearchResults;
     int selectedGlobalSearchIndex = -1;
     bool isGlobalSearchMode = false;

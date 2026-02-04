@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <string>
 #include <cctype>
-#include <cstdio> // For snprintf
+#include <cstdio>
 
 std::string ToLower(const std::string& str) {
     std::string lower = str;
@@ -27,7 +27,7 @@ bool IsWorldInteriorPack(const std::string& stemName) {
     return false;
 }
 
-// Helper to read strings from the PCM string table structure (offset + 4)
+
 static std::string ReadPcmString(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset == 0 || offset + 32 > data.size()) return "";
     size_t strStart = offset + 4;
@@ -39,9 +39,9 @@ static std::string ReadPcmString(const std::vector<uint8_t>& data, uint32_t offs
 void RenderUI(SpiderManTool& tool) {
     static int s_WorldHexScrollTo = -1;
 
-    // Handle indexing loading state
+
     if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
-        const int PACKS_PER_FRAME = 10;  // Increased from 5 for faster indexing
+        const int PACKS_PER_FRAME = 10;
         for (int i = 0; i < PACKS_PER_FRAME && tool.indexingProgress < tool.indexingTotal; i++) {
             tool.BuildGlobalTextureIndexStep(tool.indexingProgress);
             tool.indexingProgress++;
@@ -85,9 +85,9 @@ void RenderUI(SpiderManTool& tool) {
         return;
     }
 
-    // Handle world loading state
+
     if (tool.currentState == SpiderManTool::STATE_LOADING_WORLD && tool.isLoadingWorld) {
-        const int MODELS_PER_FRAME = 20;  // Load more per frame for faster loading
+        const int MODELS_PER_FRAME = 20;
         for (int i = 0; i < MODELS_PER_FRAME && tool.worldLoadProgress < tool.worldLoadTotal; i++) {
             tool.LoadWorldGeometryStep(tool.worldLoadProgress);
             tool.worldLoadProgress++;
@@ -214,7 +214,7 @@ void RenderUI(SpiderManTool& tool) {
         bool uiHovered = ImGui::GetIO().WantCaptureMouse;
         bool isViewportActive = !uiHovered;
 
-        // Handle mesh picking in world mode on left click (when not holding right mouse)
+
         if (tool.isWorldMode && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
             ImVec2 mousePos = ImGui::GetMousePos();
             float localX = mousePos.x - winPos.x;
@@ -222,7 +222,7 @@ void RenderUI(SpiderManTool& tool) {
             tool.HandleMeshPicking(localX, localY, winSize.x, winSize.y);
         }
 
-        // Handle Delete key to hide selected mesh in world mode
+
         if (tool.isWorldMode && tool.selectedMeshIndex >= 0 && tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
             if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
                 tool.previewMeshes[tool.selectedMeshIndex].isHidden = true;
@@ -315,14 +315,14 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::Checkbox("Search all packs", &searchAllPacks);
             ImGui::InputTextWithHint("##SearchFiles", "Search files...", fileSearchBuffer, sizeof(fileSearchBuffer));
 
-            // Trigger search when typing (with debounce via static timer)
+
             static float searchTimer = 0.0f;
             static std::string pendingSearch = "";
             std::string currentSearch = fileSearchBuffer;
 
             if (currentSearch != pendingSearch) {
                 pendingSearch = currentSearch;
-                searchTimer = 0.3f; // 300ms debounce
+                searchTimer = 0.3f;
             }
 
             if (searchTimer > 0.0f) {
@@ -335,7 +335,7 @@ void RenderUI(SpiderManTool& tool) {
             std::string fileSearchLower = ToLower(fileSearchBuffer);
             bool useFileFilter = !fileSearchLower.empty();
 
-            // If not in global search mode or checkbox unchecked, reset
+
             if (!searchAllPacks && tool.isGlobalSearchMode) {
                 tool.isGlobalSearchMode = false;
                 tool.globalSearchResults.clear();
@@ -343,7 +343,7 @@ void RenderUI(SpiderManTool& tool) {
 
             ImGui::BeginChild("FileList", ImVec2(0, 0), true);
 
-            // Show global search results if active
+
             if (searchAllPacks && tool.isGlobalSearchMode && !tool.globalSearchResults.empty()) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Found %d results across all packs", (int)tool.globalSearchResults.size());
                 ImGui::Separator();
@@ -514,69 +514,260 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::NextColumn();
                     ImGui::BeginChild("SidePanel", ImVec2(0,0), false);
 
-                    ImGui::Text("Global Skeleton");
-                    ImGui::Separator();
-                    ImGui::Text("Bone Count: %u", tool.currentPcmSkeleton.count);
-                    if (tool.currentPcmSkeleton.count > 0) {
-                        ImGui::Text("Bone Offset: %u (0x%X)", tool.currentPcmSkeleton.offset, tool.currentPcmSkeleton.offset);
-                    } else {
-                        ImGui::TextDisabled("No skeleton data");
-                    }
 
-                    ImGui::Spacing();
-                    ImGui::Text("Mesh Info");
-                    ImGui::Separator();
+                    if (ImGui::BeginTabBar("PCMDetailsTabs")) {
 
-                    for(size_t i=0; i<tool.currentPcmInfos.size(); i++) {
-                        const auto& info = tool.currentPcmInfos[i];
-                        std::string headerLabel = "Mesh " + std::to_string(i);
-                        if (!info.name.empty()) headerLabel += ": " + info.name;
+                        if (ImGui::BeginTabItem("Overview")) {
+                            const auto& d = tool.currentPcmDetails;
 
-                        if (ImGui::CollapsingHeader(headerLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                            ImGui::Text("PCM File Analysis");
+                            ImGui::Separator();
 
-                            // Material Info Section
-                            ImGui::Text("Material:");
-                            ImGui::Indent();
 
-                            if (!info.materialMeshName.empty()) {
-                                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.4f, 1.0f), "Mesh: %s", info.materialMeshName.c_str());
-                            } else {
-                                ImGui::TextDisabled("Mesh: (none)");
-                            }
-
-                            if (!info.materialAlphaFlag.empty()) {
-                                ImVec4 color = info.isTranslucent ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
-                                ImGui::TextColored(color, "Alpha: %s", info.materialAlphaFlag.c_str());
-                            } else {
-                                ImGui::TextDisabled("Alpha: (none)");
-                            }
-
-                            if (!info.materialTexture.empty()) {
-                                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Texture: %s", info.materialTexture.c_str());
-                            } else {
-                                ImGui::TextDisabled("Texture: (none)");
-                            }
-
-                            ImGui::Unindent();
-                            ImGui::Spacing();
-
-                            // Geometry Info
-                            ImGui::Text("Vertices:   %u", info.vCount);
-                            ImGui::Text("V Offset:   0x%X", info.vOffset);
-                            ImGui::Text("Faces:      %u", info.iCount);
-                            ImGui::Text("F Offset:   0x%X", info.iOffset);
-                            ImGui::Text("Stride:     %u", info.stride);
-                            ImGui::Text("Prim Type:  %u", info.primitiveType);
+                            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "File Info");
+                            ImGui::Text("  Size: %u bytes (0x%X)", d.fileSize, d.fileSize);
+                            ImGui::Text("  Entries: %u", d.numEntries);
+                            ImGui::Text("  Entry Table: 0x%X", d.entryTableOffset);
 
                             ImGui::Spacing();
-                            ImGui::Text("Attributes:");
-                            if (info.hasUV) ImGui::BulletText("UVs Present");
-                            else ImGui::TextDisabled("No UVs");
+                            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Contents");
+                            ImGui::Text("  Materials: %u", d.materialCount);
+                            ImGui::Text("  LODs: %u", d.lodCount);
+                            ImGui::Text("  Submeshes: %u", d.totalSubmeshes);
+                            ImGui::Text("  Total Vertices: %u", d.totalVertices);
+                            ImGui::Text("  Total Indices: %u", d.totalIndices);
 
-                            if (info.hasBones) ImGui::BulletText("Bone Weights");
-                            else ImGui::TextDisabled("No Weights");
+                            ImGui::Spacing();
+                            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Skeleton");
+                            if (d.boneCount > 0) {
+                                ImGui::Text("  Bones: %u", d.boneCount);
+                                ImGui::Text("  Offset: 0x%X", d.bonesOffset);
+                                ImGui::TextDisabled("  (Linear parenting - hierarchy not in file)");
+                            } else {
+                                ImGui::TextDisabled("  No skeleton");
+                            }
+
+                            ImGui::EndTabItem();
                         }
+
+
+                        if (ImGui::BeginTabItem("LODs")) {
+                            const auto& d = tool.currentPcmDetails;
+
+                            for (size_t i = 0; i < d.lods.size(); i++) {
+                                const auto& lod = d.lods[i];
+                                std::string label = "LOD " + std::to_string(i);
+                                if (!lod.name.empty()) label += ": " + lod.name;
+
+                                if (ImGui::CollapsingHeader(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                                    ImGui::Indent();
+                                    ImGui::Text("Submeshes: %u", lod.submeshCount);
+                                    ImGui::Text("Bones: %u", lod.boneCount);
+                                    if (lod.bonesOffset > 0) {
+                                        ImGui::Text("Bones Offset: 0x%X", lod.bonesOffset);
+                                    }
+                                    if (lod.lodDistance > 0.0f) {
+                                        ImGui::Text("LOD Distance: %.2f", lod.lodDistance);
+                                    }
+                                    if (lod.nextLodOffset > 0) {
+                                        ImGui::Text("Next LOD: 0x%X", lod.nextLodOffset);
+                                    } else {
+                                        ImGui::TextDisabled("Last LOD");
+                                    }
+                                    ImGui::Unindent();
+                                }
+                            }
+
+                            ImGui::EndTabItem();
+                        }
+
+
+                        if (ImGui::BeginTabItem("Materials")) {
+                            const auto& d = tool.currentPcmDetails;
+
+                            for (size_t i = 0; i < d.materials.size(); i++) {
+                                const auto& mat = d.materials[i];
+                                std::string label = "Material " + std::to_string(i);
+                                if (!mat.name.empty()) label += ": " + mat.name;
+
+                                if (ImGui::CollapsingHeader(label.c_str())) {
+                                    ImGui::Indent();
+
+
+                                    std::string shaderType;
+                                    ImVec4 shaderColor = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+                                    switch (mat.shaderSize) {
+                                        case 80: shaderType = "CHARACTER (80)"; shaderColor = ImVec4(1.0f, 0.8f, 0.4f, 1.0f); break;
+                                        case 88: shaderType = "CHARACTER_EXT (88)"; shaderColor = ImVec4(1.0f, 0.9f, 0.5f, 1.0f); break;
+                                        case 128: shaderType = "STREET (128)"; shaderColor = ImVec4(0.6f, 0.8f, 1.0f, 1.0f); break;
+                                        case 132: shaderType = "WORLD (132)"; shaderColor = ImVec4(0.4f, 1.0f, 0.6f, 1.0f); break;
+                                        case 136: shaderType = "TRANSLUCENT (136)"; shaderColor = ImVec4(0.8f, 0.6f, 1.0f, 1.0f); break;
+                                        default: shaderType = "UNKNOWN (" + std::to_string(mat.shaderSize) + ")"; break;
+                                    }
+                                    ImGui::TextColored(shaderColor, "Shader: %s", shaderType.c_str());
+
+                                    if (!mat.meshName.empty()) {
+                                        ImGui::Text("Mesh: %s", mat.meshName.c_str());
+                                    }
+                                    if (!mat.alphaFlag.empty()) {
+                                        ImVec4 color = mat.isTranslucent ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+                                        ImGui::TextColored(color, "Alpha: %s", mat.alphaFlag.c_str());
+                                    }
+                                    if (!mat.textureName.empty()) {
+                                        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Texture: %s", mat.textureName.c_str());
+                                    }
+
+                                    ImGui::Unindent();
+                                }
+                            }
+
+                            ImGui::EndTabItem();
+                        }
+
+
+                        if (ImGui::BeginTabItem("Submeshes")) {
+                            const auto& d = tool.currentPcmDetails;
+
+                            for (size_t i = 0; i < d.submeshes.size(); i++) {
+                                const auto& sm = d.submeshes[i];
+                                std::string label = "Submesh " + std::to_string(i);
+                                if (!sm.name.empty()) label += ": " + sm.name;
+
+                                if (ImGui::CollapsingHeader(label.c_str())) {
+                                    ImGui::Indent();
+
+
+                                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Geometry");
+                                    ImGui::Text("  Vertices: %u @ 0x%X", sm.vertexCount, sm.vertexOffset);
+                                    ImGui::Text("  Indices: %u @ 0x%X", sm.indexCount, sm.indexOffset);
+                                    ImGui::Text("  Stride: %u bytes", sm.stride);
+                                    ImGui::Text("  Primitive: %s", sm.primitiveType == 4 ? "TRIANGLELIST" :
+                                                                    sm.primitiveType == 5 ? "TRIANGLESTRIP" : "UNKNOWN");
+                                    ImGui::Text("  VBuffer Size: %u bytes", sm.vertexBufferSize);
+                                    if (sm.boundingRadius > 0) {
+                                        ImGui::Text("  Bounding Radius: %.3f", sm.boundingRadius);
+                                    }
+
+
+                                    ImGui::Spacing();
+                                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Vertex Format");
+                                    ImGui::BulletText("Position (float3)");
+                                    if (sm.hasNormals) ImGui::BulletText("Normal (float3)");
+                                    if (sm.hasUV) ImGui::BulletText("UV (float2)");
+                                    if (sm.hasBones) {
+                                        ImGui::BulletText("Bone Indices");
+                                        ImGui::BulletText("Bone Weights");
+                                    }
+
+
+                                    if (sm.boneMapCount > 0) {
+                                        ImGui::Spacing();
+                                        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Bone Mapping");
+                                        ImGui::Text("  Map Offset: 0x%X", sm.boneMapOffset);
+                                        ImGui::Text("  Map Count: %u", sm.boneMapCount);
+                                    }
+
+
+                                    if (!sm.materialTexture.empty() || !sm.shaderType.empty()) {
+                                        ImGui::Spacing();
+                                        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Material");
+                                        if (!sm.shaderType.empty()) {
+                                            ImGui::Text("  Shader: %s (%u)", sm.shaderType.c_str(), sm.shaderSize);
+                                        }
+                                        if (!sm.materialTexture.empty()) {
+                                            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "  Texture: %s", sm.materialTexture.c_str());
+                                        }
+                                        if (sm.isTranslucent) {
+                                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "  Translucent");
+                                        }
+                                    }
+
+                                    ImGui::Unindent();
+                                }
+                            }
+
+                            ImGui::EndTabItem();
+                        }
+
+
+                        if (ImGui::BeginTabItem("Bones")) {
+                            const auto& d = tool.currentPcmDetails;
+
+                            if (d.bones.empty()) {
+                                ImGui::TextDisabled("No skeleton data");
+                            } else {
+                                ImGui::Text("Bone Count: %zu", d.bones.size());
+                                ImGui::TextDisabled("Note: Parent indices use linear fallback");
+                                ImGui::TextDisabled("(Hierarchy not stored in PCM)");
+                                ImGui::Separator();
+
+
+                                if (ImGui::BeginTable("BoneTable", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 300))) {
+                                    ImGui::TableSetupColumn("Idx", ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                                    ImGui::TableSetupColumn("Position", ImGuiTableColumnFlags_WidthStretch);
+                                    ImGui::TableSetupColumn("Parent", ImGuiTableColumnFlags_WidthFixed, 45.0f);
+                                    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthStretch);
+                                    ImGui::TableHeadersRow();
+
+                                    for (const auto& bone : d.bones) {
+                                        ImGui::TableNextRow();
+                                        ImGui::TableSetColumnIndex(0);
+                                        ImGui::Text("%d", bone.index);
+                                        ImGui::TableSetColumnIndex(1);
+                                        ImGui::Text("%.2f, %.2f, %.2f", bone.posX, bone.posY, bone.posZ);
+                                        ImGui::TableSetColumnIndex(2);
+                                        if (bone.parentIndex >= 0) {
+                                            ImGui::Text("%d", bone.parentIndex);
+                                        } else {
+                                            ImGui::TextDisabled("-1");
+                                        }
+                                        ImGui::TableSetColumnIndex(3);
+                                        if (!bone.inferredRole.empty()) {
+                                            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.4f, 1.0f), "%s", bone.inferredRole.c_str());
+                                        }
+                                    }
+
+                                    ImGui::EndTable();
+                                }
+                            }
+
+                            ImGui::EndTabItem();
+                        }
+
+
+                        if (ImGui::BeginTabItem("Legacy")) {
+                            ImGui::Text("Skeleton (Legacy)");
+                            ImGui::Separator();
+                            ImGui::Text("Bone Count: %u", tool.currentPcmSkeleton.count);
+                            if (tool.currentPcmSkeleton.count > 0) {
+                                ImGui::Text("Bone Offset: %u (0x%X)", tool.currentPcmSkeleton.offset, tool.currentPcmSkeleton.offset);
+                            }
+
+                            ImGui::Spacing();
+                            ImGui::Text("Mesh Info (Legacy)");
+                            ImGui::Separator();
+
+                            for(size_t i=0; i<tool.currentPcmInfos.size(); i++) {
+                                const auto& info = tool.currentPcmInfos[i];
+                                std::string headerLabel = "Mesh " + std::to_string(i);
+                                if (!info.name.empty()) headerLabel += ": " + info.name;
+
+                                if (ImGui::CollapsingHeader(headerLabel.c_str())) {
+                                    ImGui::Text("Vertices:   %u @ 0x%X", info.vCount, info.vOffset);
+                                    ImGui::Text("Faces:      %u @ 0x%X", info.iCount, info.iOffset);
+                                    ImGui::Text("Stride:     %u", info.stride);
+                                    ImGui::Text("Prim Type:  %u", info.primitiveType);
+                                    if (info.hasUV) ImGui::BulletText("Has UVs");
+                                    if (info.hasBones) ImGui::BulletText("Has Bones");
+                                }
+                            }
+
+                            ImGui::EndTabItem();
+                        }
+
+                        ImGui::EndTabBar();
                     }
+
                     ImGui::EndChild();
                     ImGui::Columns(1);
                 }
@@ -592,7 +783,7 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
         if (ImGui::Begin(title.c_str(), &tool.showWorldMeshHexEditor)) {
 
-            // Calculate offsets for highlighting
+
             uint32_t nameOffset = 0, nameLen = 0;
             uint32_t texOffset = 0, texLen = 0;
 
@@ -614,9 +805,9 @@ void RenderUI(SpiderManTool& tool) {
 
                     uint32_t targetMeshNameRef = 0;
 
-                    // Find Mesh Name Offset
+
                     for(const auto& e : entries) {
-                        if (e.tag == 512) { // Mesh
+                        if (e.tag == 512) {
                             br.Seek(e.dataOfs + 8);
                             uint32_t numSm = br.Read<uint32_t>();
                             uint32_t smOfs = br.Read<uint32_t>();
@@ -645,10 +836,10 @@ void RenderUI(SpiderManTool& tool) {
                         if (targetMeshNameRef != 0) break;
                     }
 
-                    // Find Texture Name Offset (via Material)
+
                     if (targetMeshNameRef != 0) {
                         for(const auto& e : entries) {
-                            if (e.tag == 256) { // Material
+                            if (e.tag == 256) {
                                 br.Seek(e.dataOfs);
                                 uint32_t matMeshNameRef = br.Read<uint32_t>();
                                 if (matMeshNameRef == targetMeshNameRef) {
@@ -675,24 +866,24 @@ void RenderUI(SpiderManTool& tool) {
 
             ImGui::BeginChild("WorldHexPanel", ImVec2(0,0), false);
 
-            // Handle auto-scroll
+
             if (s_WorldHexScrollTo != -1) {
-                // Assuming 16 bytes per row and standard text height
-                // Use GetTextLineHeightWithSpacing() as hex editors typically use standard line height with spacing
+
+
                 float lineHeight = ImGui::GetTextLineHeightWithSpacing();
                 int row = s_WorldHexScrollTo / 16;
 
-                // Add a small buffer (e.g. scroll to 2 rows above to give context)
+
                 if (row > 2) row -= 2;
 
                 float scrollY = (float)row * lineHeight;
 
-                // Use SetNextWindowScroll to target the child window created by BeginHexEditor
+
                 ImGui::SetNextWindowScroll(ImVec2(0.0f, scrollY));
                 s_WorldHexScrollTo = -1;
             }
 
-            // Apply red color to selection
+
             ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(0.9f, 0.2f, 0.2f, 0.5f));
             ImGui::BeginHexEditor("##WorldHex", &tool.worldMeshHexEditor);
             ImGui::EndHexEditor();

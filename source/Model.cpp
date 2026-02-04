@@ -2,6 +2,7 @@
 #include <glad/glad.h>
 #include <sstream>
 #include <fstream>
+#include <cmath>
 
 static std::string ReadStringTableEntry(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset == 0 || offset + 32 > data.size()) return "";
@@ -24,12 +25,12 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
     if (numEntries > 1000 || entryTableOfs >= pcmData.size()) return;
 
     br.Seek(entryTableOfs);
-    struct EntryInfo { uint16_t type; uint16_t tag; uint32_t dataOffset; uint32_t nameOffset; };
+    struct EntryInfo { uint16_t size; uint16_t tag; uint32_t dataOffset; uint32_t nameOffset; };
     std::vector<EntryInfo> entries;
 
     for (uint32_t i = 0; i < numEntries; i++) {
         EntryInfo e;
-        e.type = br.Read<uint16_t>();
+        e.size = br.Read<uint16_t>();
         e.tag = br.Read<uint16_t>();
         e.dataOffset = br.Read<uint32_t>();
         e.nameOffset = br.Read<uint32_t>();
@@ -38,15 +39,23 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
 
     for (auto& e : entries) {
         if (e.tag != 256) continue;
-        if (e.dataOffset + 0x64 > pcmData.size()) continue;
+        if (e.dataOffset + e.size > pcmData.size()) continue;
 
         br.Seek(e.dataOffset);
 
         uint32_t meshNameOfs = br.Read<uint32_t>();
         uint32_t alphaFlagOfs = br.Read<uint32_t>();
 
-        br.Seek(e.dataOffset + 0x60);
-        uint32_t textureNameOfs = br.Read<uint32_t>();
+        uint32_t textureNameOfs = 0;
+
+        if (e.size == 80 || e.size == 88) {
+            br.Seek(e.dataOffset + 0x20);
+            textureNameOfs = br.Read<uint32_t>();
+        }
+        else {
+            br.Seek(e.dataOffset + 0x60);
+            textureNameOfs = br.Read<uint32_t>();
+        }
 
         MaterialDef mat;
         mat.meshName = ReadStringTableEntry(pcmData, meshNameOfs);
@@ -68,11 +77,11 @@ MaterialDef SpiderManTool::ResolveMaterialByMeshOffset(uint32_t meshNameOffset) 
     return MaterialDef();
 }
 
-// Helper function to check if a mesh name indicates a color volume
+
 static bool IsColorVolumeMesh(const std::string& meshName) {
     std::string lower = StrToLower(meshName);
 
-    // Check for various color volume naming patterns
+
     if (lower.find("col vol") != std::string::npos) return true;
     if (lower.find("col_vol") != std::string::npos) return true;
     if (lower.find("colvol") != std::string::npos) return true;
@@ -81,12 +90,12 @@ static bool IsColorVolumeMesh(const std::string& meshName) {
     if (lower.find("colorvolume") != std::string::npos) return true;
     if (lower.find("colorvol") != std::string::npos) return true;
     if (lower.find("cv_alley") != std::string::npos) return true;
-    if (lower.find("cv_") != std::string::npos) return true;  // cv_ prefix pattern
+    if (lower.find("cv_") != std::string::npos) return true;
 
     return false;
 }
 
-// Helper function to check if a mesh should be completely hidden (not rendered at all)
+
 static bool ShouldHideMesh(const std::string& meshName) {
     std::string lower = StrToLower(meshName);
 
@@ -116,8 +125,12 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
 
     struct Vertex { float x,y,z; float nx,ny,nz; float u,v; };
 
+    bool loadedFirstLod = false;
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
+        if (loadedFirstLod) break;
+        loadedFirstLod = true;
+
         if (inf.offset + 16 > pcmData.size()) continue;
 
         br.Seek(inf.offset); br.Skip(8);
@@ -125,16 +138,20 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         if (numSm > 256 || infSmOfs >= pcmData.size()) continue;
 
         br.Seek(infSmOfs);
-        std::vector<uint32_t> smOffsets;
-        for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
+        std::vector<std::pair<uint32_t, uint32_t>> smRefs;
+        for(uint32_t s=0; s<numSm; s++) {
+            uint32_t matRef = br.Read<uint32_t>();
+            uint32_t smOfs = br.Read<uint32_t>();
+            smRefs.push_back({matRef, smOfs});
+        }
 
-        for(uint32_t smOfs : smOffsets) {
-            if (smOfs + 64 > pcmData.size()) continue;
+        for(auto& [matRef, smOfs] : smRefs) {
+            if (smOfs + 96 > pcmData.size()) continue;
 
             br.Seek(smOfs);
             uint32_t meshNameRef = br.Read<uint32_t>();
+            uint32_t ptrShaderRef = br.Read<uint32_t>();
 
-            // Read mesh name for display
             std::string meshName;
             if (meshNameRef != 0 && meshNameRef + 32 <= pcmData.size()) {
                 size_t strStart = meshNameRef + 4;
@@ -196,7 +213,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             std::vector<Vertex> vertices;
             bool valid = true;
 
-            // Initialize bounding box
+
             float bboxMin[3] = {1e30f, 1e30f, 1e30f};
             float bboxMax[3] = {-1e30f, -1e30f, -1e30f};
 
@@ -208,7 +225,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 vert.nx = 0; vert.ny = 0; vert.nz = 0;
                 vert.u = 0; vert.v = 0;
 
-                // Update bounding box
+
                 if (vert.x < bboxMin[0]) bboxMin[0] = vert.x;
                 if (vert.y < bboxMin[1]) bboxMin[1] = vert.y;
                 if (vert.z < bboxMin[2]) bboxMin[2] = vert.z;
@@ -223,12 +240,12 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                     }
                     if (startV + 32 <= pcmData.size()) {
                         br.Seek(startV + 24);
-                        vert.u = br.Read<float>(); vert.v = br.Read<float>();  // Don't flip V
+                        vert.u = br.Read<float>(); vert.v = br.Read<float>();
                     }
                 } else if (stride == 24) {
                     if (startV + 20 <= pcmData.size()) {
                         br.Seek(startV + 12);
-                        vert.u = br.Read<float>(); vert.v = br.Read<float>();  // Don't flip V
+                        vert.u = br.Read<float>(); vert.v = br.Read<float>();
                     }
                 }
                 vertices.push_back(vert);
@@ -242,16 +259,16 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             for(uint32_t i=0; i<inum; i++) indices.push_back(br.Read<uint16_t>());
             if (vertices.empty() || indices.empty()) continue;
 
-            // Compute normals if not present (stride != 64)
+
             if (stride != 64 && !vertices.empty() && !indices.empty()) {
-                // Initialize all normals to zero
+
                 for (auto& v : vertices) {
                     v.nx = 0; v.ny = 0; v.nz = 0;
                 }
 
-                // Accumulate face normals
+
                 if (itype == 4) {
-                    // Triangle list
+
                     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
                         uint16_t i0 = indices[i], i1 = indices[i+1], i2 = indices[i+2];
                         if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) continue;
@@ -266,7 +283,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                         vertices[i2].nx += n[0]; vertices[i2].ny += n[1]; vertices[i2].nz += n[2];
                     }
                 } else {
-                    // Triangle strip
+
                     for (size_t i = 0; i + 2 < indices.size(); i++) {
                         uint16_t i0 = indices[i], i1 = indices[i+1], i2 = indices[i+2];
                         if (i0 == i1 || i1 == i2 || i0 == i2) continue;
@@ -277,7 +294,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                         float n[3];
                         Cross(e1, e2, n);
 
-                        // Flip for odd triangles
+
                         if (i % 2 == 1) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
 
                         vertices[i0].nx += n[0]; vertices[i0].ny += n[1]; vertices[i0].nz += n[2];
@@ -286,13 +303,13 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                     }
                 }
 
-                // Normalize
+
                 for (auto& v : vertices) {
                     float len = sqrt(v.nx*v.nx + v.ny*v.ny + v.nz*v.nz);
                     if (len > 0.0001f) {
                         v.nx /= len; v.ny /= len; v.nz /= len;
                     } else {
-                        v.ny = 1.0f; // Default up
+                        v.ny = 1.0f;
                     }
                 }
             }
@@ -303,37 +320,37 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             mesh.textureId = tex;
             mesh.isTranslucent = mat.isTranslucent;
 
-            // Check for fake_shadow texture
+
             std::string texNameLower = StrToLower(mat.textureName);
             mesh.isFakeShadow = (texNameLower.find("fake_shadow") != std::string::npos);
 
-            // Check for color volume meshes
+
             std::string meshNameLower = StrToLower(meshName.empty() ? modelName : meshName);
             mesh.isColorVolume = IsColorVolumeMesh(meshNameLower);
 
-            // Check if mesh should be hidden (gen_white, etc)
+
             mesh.isHidden = ShouldHideMesh(meshNameLower);
 
-            // Store bounding box
+
             for (int i = 0; i < 3; i++) {
                 mesh.bboxMin[i] = bboxMin[i];
                 mesh.bboxMax[i] = bboxMax[i];
             }
 
-            // Store source info for hex editor
+
             mesh.sourcePack = sourcePack;
             mesh.sourceOffset = sourceOffset;
             mesh.sourceSize = (uint32_t)pcmData.size();
             mesh.meshName = meshName.empty() ? modelName : meshName;
 
-            // Check if this mesh should be skipped for picking (sky, ocean, collision volumes, color volumes)
+
             mesh.skipPicking = (meshNameLower.find("sky") != std::string::npos) ||
                                (meshNameLower.find("ocean") != std::string::npos) ||
                                (meshNameLower.find("colvol") != std::string::npos) ||
                                (meshNameLower.find("shadow") != std::string::npos) ||
                                mesh.isColorVolume;
 
-            // Only store vertex data for picking/export if not skipped
+
             if (!mesh.skipPicking) {
                 mesh.positions.reserve(vertices.size() * 3);
                 mesh.normals.reserve(vertices.size() * 3);
@@ -351,7 +368,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 mesh.indices = indices;
             }
 
-            // Store texture info for export
+
             mesh.textureName = mat.textureName;
             if (!mat.textureName.empty()) {
                 mesh.textureHash = CalculateCRC32(StrToLower(mat.textureName) + ".dds");
@@ -370,7 +387,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
     }
 }
 
-// Helper to transform a vertex position by a 4x4 row-major matrix
+
 static void TransformVertex(float& x, float& y, float& z, const float* m) {
     float ox = x, oy = y, oz = z;
     x = m[0]*ox + m[4]*oy + m[8]*oz + m[12];
@@ -378,13 +395,13 @@ static void TransformVertex(float& x, float& y, float& z, const float* m) {
     z = m[2]*ox + m[6]*oy + m[10]*oz + m[14];
 }
 
-// Helper to transform a normal by a 4x4 matrix (ignore translation)
+
 static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
     float ox = nx, oy = ny, oz = nz;
     nx = m[0]*ox + m[4]*oy + m[8]*oz;
     ny = m[1]*ox + m[5]*oy + m[9]*oz;
     nz = m[2]*ox + m[6]*oy + m[10]*oz;
-    // Renormalize
+
     float len = sqrt(nx*nx + ny*ny + nz*nz);
     if (len > 0.0001f) { nx /= len; ny /= len; nz /= len; }
 }
@@ -410,8 +427,12 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
 
     struct Vertex { float x,y,z; float nx,ny,nz; float u,v; };
 
+    bool loadedFirstLod = false;
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
+        if (loadedFirstLod) break;
+        loadedFirstLod = true;
+
         if (inf.offset + 16 > pcmData.size()) continue;
 
         br.Seek(inf.offset); br.Skip(8);
@@ -419,14 +440,19 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
         if (numSm > 256 || infSmOfs >= pcmData.size()) continue;
 
         br.Seek(infSmOfs);
-        std::vector<uint32_t> smOffsets;
-        for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
+        std::vector<std::pair<uint32_t, uint32_t>> smRefs;
+        for(uint32_t s=0; s<numSm; s++) {
+            uint32_t matRef = br.Read<uint32_t>();
+            uint32_t smOfs = br.Read<uint32_t>();
+            smRefs.push_back({matRef, smOfs});
+        }
 
-        for(uint32_t smOfs : smOffsets) {
-            if (smOfs + 64 > pcmData.size()) continue;
+        for(auto& [matRef, smOfs] : smRefs) {
+            if (smOfs + 96 > pcmData.size()) continue;
 
             br.Seek(smOfs);
             uint32_t meshNameRef = br.Read<uint32_t>();
+            uint32_t ptrShaderRef = br.Read<uint32_t>();
 
             std::string meshName;
             if (meshNameRef != 0 && meshNameRef + 32 <= pcmData.size()) {
@@ -516,7 +542,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                     }
                 }
 
-                // Apply transform if provided
+
                 if (transform) {
                     TransformVertex(vert.x, vert.y, vert.z, transform);
                     if (stride == 64) {
@@ -524,7 +550,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                     }
                 }
 
-                // Update bounding box after transform
+
                 if (vert.x < bboxMin[0]) bboxMin[0] = vert.x;
                 if (vert.y < bboxMin[1]) bboxMin[1] = vert.y;
                 if (vert.z < bboxMin[2]) bboxMin[2] = vert.z;
@@ -543,7 +569,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             for(uint32_t i=0; i<inum; i++) indices.push_back(br.Read<uint16_t>());
             if (vertices.empty() || indices.empty()) continue;
 
-            // Compute normals if not present
+
             if (stride != 64 && !vertices.empty() && !indices.empty()) {
                 for (auto& v : vertices) { v.nx = 0; v.ny = 0; v.nz = 0; }
 
@@ -646,8 +672,8 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
 
 
 void SpiderManTool::LoadBackgroundMeshes() {
-    // Load oceanmesh.pcm and sky_day.pcm as background meshes for every preview
-    // These are loaded from the global pack files using the texture index
+
+
 
     std::vector<std::pair<std::string, std::string>> backgroundModels = {
         {"oceanmesh", "city_arena"},
@@ -655,7 +681,7 @@ void SpiderManTool::LoadBackgroundMeshes() {
     };
 
     for (const auto& [modelName, packName] : backgroundModels) {
-        // Find the pack file
+
         std::string packPath;
         for (const auto& path : foundPacks) {
             std::string stem = StrToLower(path.stem().string());
@@ -667,7 +693,7 @@ void SpiderManTool::LoadBackgroundMeshes() {
 
         if (packPath.empty()) continue;
 
-        // Open and parse the pack to find the PCM
+
         std::ifstream file(packPath, std::ios::binary | std::ios::ate);
         if (!file.is_open()) continue;
 
@@ -687,7 +713,7 @@ void SpiderManTool::LoadBackgroundMeshes() {
             continue;
         }
 
-        // Find entry table start
+
         size_t start = 0;
         const uint32_t magic = 0xE3E3E3E3;
         size_t headerReadSize = std::min((size_t)200000, fileSize);
@@ -738,7 +764,7 @@ void SpiderManTool::LoadBackgroundMeshes() {
                 uint32_t sig = 0;
                 file.read((char*)&sig, 4);
 
-                if (file.good() && sig == 0x204D4350) { // PCM
+                if (file.good() && sig == 0x204D4350) {
                     std::string entryName = "";
                     if (dictionary.count(hash)) entryName = StrToLower(dictionary[hash]);
                     if (entryName == modelName) {
@@ -879,7 +905,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
 
-    // Collect all submeshes and their data
+
     struct SubmeshData {
         std::string name;
         std::string textureName;
@@ -897,8 +923,12 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         return ReadStringTableEntry(pcmData, offset);
     };
 
+    bool loadedFirstLod = false;
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
+        if (loadedFirstLod) break;
+        loadedFirstLod = true;
+
         if (inf.offset + 20 > pcmData.size()) continue;
 
         br.Seek(inf.offset);
@@ -909,21 +939,22 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         if (numSm > 256 || infoSmOfs >= pcmData.size()) continue;
 
         br.Seek(infoSmOfs);
-        std::vector<uint32_t> smOffsets;
+        std::vector<std::pair<uint32_t, uint32_t>> smRefs;
         for(uint32_t s=0; s<numSm; s++) {
-            br.Skip(4);
-            smOffsets.push_back(br.Read<uint32_t>());
+            uint32_t matRef = br.Read<uint32_t>();
+            uint32_t smOfs = br.Read<uint32_t>();
+            smRefs.push_back({matRef, smOfs});
         }
 
-        for(uint32_t smOfs : smOffsets) {
-            if (smOfs + 80 > pcmData.size()) continue;
+        for(auto& [matRef, smOfs] : smRefs) {
+            if (smOfs + 96 > pcmData.size()) continue;
 
             br.Seek(smOfs);
             uint32_t meshNameRef = br.Read<uint32_t>();
 
             MaterialDef mat = ResolveMaterialByMeshOffset(meshNameRef);
 
-            br.Seek(smOfs + 40);
+            br.Seek(smOfs + 0x28);
             uint32_t itype = br.Read<uint32_t>();
             uint32_t inum = br.Read<uint32_t>();
             uint32_t iofs = br.Read<uint32_t>();
@@ -966,10 +997,10 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 if (stride == 64) {
                     br.Seek(startV + 12);
                     nx = br.Read<float>(); ny = br.Read<float>(); nz = br.Read<float>();
-                    u = br.Read<float>(); v2 = br.Read<float>();  // Don't flip V for export
+                    u = br.Read<float>(); v2 = br.Read<float>();
                 } else if (stride == 24) {
                     br.Seek(startV + 12);
-                    u = br.Read<float>(); v2 = br.Read<float>();  // Don't flip V for export
+                    u = br.Read<float>(); v2 = br.Read<float>();
                 }
 
                 sm.norm.push_back(nx); sm.norm.push_back(ny); sm.norm.push_back(nz);
@@ -1047,6 +1078,11 @@ void SpiderManTool::AnalyzePCM(int index) {
     currentPcmIndex = index;
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+
+
+    AnalyzePCMDetailed(pcmData);
+
+
     BinaryReader br(pcmData);
 
     if (pcmData.size() < 16) return;
@@ -1135,6 +1171,295 @@ void SpiderManTool::AnalyzePCM(int index) {
     }
 }
 
+
+void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
+    currentPcmDetails = PCMFileInfo();
+
+    if (pcmData.size() < 32) return;
+
+    BinaryReader br(pcmData);
+
+
+
+
+
+
+
+
+
+
+    br.Seek(8);
+    currentPcmDetails.numEntries = br.Read<uint32_t>();
+    currentPcmDetails.entryTableOffset = br.Read<uint32_t>();
+    currentPcmDetails.fileSize = (uint32_t)pcmData.size();
+
+    if (currentPcmDetails.numEntries > 1000 || currentPcmDetails.entryTableOffset >= pcmData.size()) return;
+
+
+
+
+
+
+
+
+    struct AssetEntry {
+        uint16_t size;
+        uint16_t tag;
+        uint32_t dataOffset;
+        uint32_t nameOffset;
+    };
+
+    std::vector<AssetEntry> entries;
+    br.Seek(currentPcmDetails.entryTableOffset);
+
+    for (uint32_t i = 0; i < currentPcmDetails.numEntries; i++) {
+        AssetEntry e;
+        e.size = br.Read<uint16_t>();
+        e.tag = br.Read<uint16_t>();
+        e.dataOffset = br.Read<uint32_t>();
+        e.nameOffset = br.Read<uint32_t>();
+        entries.push_back(e);
+    }
+
+    auto readString = [&](uint32_t offset) -> std::string {
+        if (offset == 0 || offset + 32 > pcmData.size()) return "";
+        size_t strStart = offset + 4;
+        size_t end = strStart;
+        while (end < strStart + 60 && end < pcmData.size() && pcmData[end] != 0) end++;
+        return std::string((char*)&pcmData[strStart], end - strStart);
+    };
+
+
+    for (const auto& e : entries) {
+        if (e.tag != 256) continue;
+        if (e.dataOffset + 0x64 > pcmData.size()) continue;
+
+        PCMMaterialInfo mat;
+        mat.nameOffset = e.nameOffset;
+        mat.name = readString(e.nameOffset);
+        mat.shaderSize = e.size;
+
+        br.Seek(e.dataOffset);
+        uint32_t meshNameOfs = br.Read<uint32_t>();
+        uint32_t alphaFlagOfs = br.Read<uint32_t>();
+
+        br.Seek(e.dataOffset + 0x60);
+        uint32_t textureNameOfs = br.Read<uint32_t>();
+
+        mat.meshName = readString(meshNameOfs);
+        mat.alphaFlag = readString(alphaFlagOfs);
+        mat.textureName = readString(textureNameOfs);
+        mat.isTranslucent = (mat.alphaFlag.find("translucent") != std::string::npos) ||
+                            (mat.alphaFlag.find("glass") != std::string::npos);
+
+        currentPcmDetails.materials.push_back(mat);
+    }
+    currentPcmDetails.materialCount = (uint32_t)currentPcmDetails.materials.size();
+
+
+    for (const auto& e : entries) {
+        if (e.tag != 512) continue;
+        if (e.dataOffset + 48 > pcmData.size()) continue;
+
+        PCMLodInfo lod;
+        lod.nameOffset = e.nameOffset;
+        lod.name = readString(e.nameOffset);
+
+
+
+
+
+
+
+
+
+
+
+
+
+        br.Seek(e.dataOffset);
+        br.Skip(8);
+        lod.submeshCount = br.Read<uint32_t>();
+        uint32_t submeshRefsOfs = br.Read<uint32_t>();
+        lod.boneCount = br.Read<uint32_t>();
+        lod.bonesOffset = br.Read<uint32_t>();
+        br.Skip(4);
+        lod.nextLodOffset = br.Read<uint32_t>();
+
+
+
+        br.Seek(e.dataOffset + 0x20);
+        lod.boundsMin[0] = br.Read<float>();
+        lod.boundsMin[1] = br.Read<float>();
+        lod.boundsMin[2] = br.Read<float>();
+        br.Skip(4);
+
+
+        lod.lodDistance = 0.0f;
+        if (lod.nextLodOffset > 0 && lod.nextLodOffset + 8 <= pcmData.size()) {
+            br.Seek(lod.nextLodOffset + 4);
+            lod.lodDistance = br.Read<float>();
+        }
+
+        currentPcmDetails.lods.push_back(lod);
+        currentPcmDetails.boneCount = lod.boneCount;
+        currentPcmDetails.bonesOffset = lod.bonesOffset;
+
+
+        if (lod.submeshCount > 256 || submeshRefsOfs >= pcmData.size()) continue;
+
+
+
+
+
+        br.Seek(submeshRefsOfs);
+        std::vector<std::pair<uint32_t, uint32_t>> submeshRefs;
+        for (uint32_t s = 0; s < lod.submeshCount; s++) {
+            uint32_t matNameOfs = br.Read<uint32_t>();
+            uint32_t smInfoOfs = br.Read<uint32_t>();
+            submeshRefs.push_back({matNameOfs, smInfoOfs});
+        }
+
+        for (const auto& [matNameOfs, smInfoOfs] : submeshRefs) {
+            if (smInfoOfs + 96 > pcmData.size()) continue;
+
+            PCMSubmeshInfo sm;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            br.Seek(smInfoOfs);
+            sm.nameOffset = br.Read<uint32_t>();
+            sm.name = readString(sm.nameOffset);
+
+            uint32_t ptrShaderRef = br.Read<uint32_t>();
+
+            br.Seek(smInfoOfs + 0x0C);
+            sm.boneMapOffset = br.Read<uint32_t>();
+            sm.boneMapCount = br.Read<uint32_t>();
+
+            br.Seek(smInfoOfs + 0x20);
+            sm.boundingRadius = br.Read<float>();
+
+            br.Seek(smInfoOfs + 0x28);
+            sm.primitiveType = br.Read<uint32_t>();
+            sm.indexCount = br.Read<uint32_t>();
+            sm.indexOffset = br.Read<uint32_t>();
+            br.Skip(4);
+            sm.vertexCount = br.Read<uint32_t>();
+            sm.vertexOffset = br.Read<uint32_t>();
+            sm.vertexBufferSize = br.Read<uint32_t>();
+            br.Skip(4);
+            sm.stride = br.Read<uint32_t>();
+
+
+            sm.hasNormals = (sm.stride >= 24);
+            sm.hasUV = (sm.stride >= 32);
+            sm.hasBones = (sm.stride >= 44);
+
+
+            for (const auto& mat : currentPcmDetails.materials) {
+                uint32_t matMeshOfs = 0;
+
+                for (const auto& me : entries) {
+                    if (me.tag == 256 && readString(me.nameOffset) == mat.name) {
+                        br.Seek(me.dataOffset);
+                        matMeshOfs = br.Read<uint32_t>();
+                        break;
+                    }
+                }
+                if (matMeshOfs == sm.nameOffset) {
+                    sm.materialMeshName = mat.meshName;
+                    sm.materialAlphaFlag = mat.alphaFlag;
+                    sm.materialTexture = mat.textureName;
+                    sm.isTranslucent = mat.isTranslucent;
+                    sm.shaderSize = mat.shaderSize;
+
+
+                    switch (mat.shaderSize) {
+                        case 80: sm.shaderType = "CHARACTER"; break;
+                        case 88: sm.shaderType = "CHARACTER_EXT"; break;
+                        case 128: sm.shaderType = "STREET"; break;
+                        case 132: sm.shaderType = "WORLD"; break;
+                        case 136: sm.shaderType = "TRANSLUCENT"; break;
+                        default: sm.shaderType = "UNKNOWN_" + std::to_string(mat.shaderSize); break;
+                    }
+                    break;
+                }
+            }
+
+            currentPcmDetails.submeshes.push_back(sm);
+            currentPcmDetails.totalVertices += sm.vertexCount;
+            currentPcmDetails.totalIndices += sm.indexCount;
+        }
+    }
+
+    currentPcmDetails.lodCount = (uint32_t)currentPcmDetails.lods.size();
+    currentPcmDetails.totalSubmeshes = (uint32_t)currentPcmDetails.submeshes.size();
+
+
+    if (currentPcmDetails.boneCount > 0 && currentPcmDetails.bonesOffset > 0 &&
+        currentPcmDetails.bonesOffset + currentPcmDetails.boneCount * 64 <= pcmData.size()) {
+
+        for (uint32_t i = 0; i < currentPcmDetails.boneCount; i++) {
+            PCMBoneInfo bone;
+            bone.index = (int)i;
+
+
+
+            uint32_t boneOfs = currentPcmDetails.bonesOffset + i * 64;
+            br.Seek(boneOfs + 48);
+            bone.posX = br.Read<float>();
+            bone.posY = br.Read<float>();
+            bone.posZ = br.Read<float>();
+
+
+            bone.parentIndex = (i > 0) ? (int)(i - 1) : -1;
+
+
+            if (i == 0) {
+                bone.inferredRole = "Root";
+            } else if (fabs(bone.posX) < 0.2f && bone.posY > 0 && bone.posY < 1.5f) {
+                bone.inferredRole = "Spine";
+            } else if (bone.posX < -0.5f && bone.posY > 0.5f) {
+                bone.inferredRole = "Left Arm/Hand";
+            } else if (bone.posX > 0.5f && bone.posY > 0.5f) {
+                bone.inferredRole = "Right Arm/Hand";
+            } else if (bone.posX < -0.1f && bone.posY < 0.2f) {
+                bone.inferredRole = "Left Leg";
+            } else if (bone.posX > 0.1f && bone.posY < 0.2f) {
+                bone.inferredRole = "Right Leg";
+            } else if (bone.posY > 1.2f) {
+                bone.inferredRole = "Head/Neck";
+            } else {
+                bone.inferredRole = "";
+            }
+
+            currentPcmDetails.bones.push_back(bone);
+        }
+    }
+
+
+    showPcmDetailsPanel = true;
+}
+
 void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
     if (selectedMeshIndex < 0 || selectedMeshIndex >= (int)previewMeshes.size()) {
         Log("No mesh selected");
@@ -1143,16 +1468,16 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
 
     const auto& mesh = previewMeshes[selectedMeshIndex];
 
-    // Create output directory
+
     fs::path outDir = fs::current_path() / "extracted" / "world_meshes";
     fs::create_directories(outDir);
 
-    // Generate a base name from the mesh
+
     std::string baseName = mesh.meshName;
     if (baseName.empty()) {
         baseName = "mesh_" + std::to_string(selectedMeshIndex);
     }
-    // Clean up the name
+
     for (char& c : baseName) {
         if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
             c = '_';
@@ -1160,13 +1485,13 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
     }
 
     if (asGlb) {
-        // Export as GLB with embedded texture if available
+
         if (mesh.positions.empty() || mesh.indices.empty()) {
             Log("Selected mesh has no geometry data for export");
             return;
         }
 
-        // Convert triangle strip to triangle list if needed
+
         std::vector<uint16_t> triangleIndices;
         if (mesh.mode == GL_TRIANGLE_STRIP) {
             for (size_t i = 0; i + 2 < mesh.indices.size(); i++) {
@@ -1193,7 +1518,7 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             return;
         }
 
-        // Calculate bounds
+
         float minP[3] = {1e30f, 1e30f, 1e30f};
         float maxP[3] = {-1e30f, -1e30f, -1e30f};
         int vertexCount = (int)mesh.positions.size() / 3;
@@ -1209,13 +1534,13 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             if (z > maxP[2]) maxP[2] = z;
         }
 
-        // Try to get texture data
+
         std::vector<uint8_t> textureData;
         bool hasTexture = false;
 
         if (!mesh.textureName.empty()) {
             std::string texNameLower = StrToLower(mesh.textureName);
-            // Try without .dds extension first
+
             if (globalTextureNameIndex.count(texNameLower)) {
                 auto& loc = globalTextureNameIndex[texNameLower];
                 std::ifstream texFile(loc.packPath, std::ios::binary);
@@ -1228,7 +1553,7 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
                     Log("Found texture: " + mesh.textureName);
                 }
             }
-            // Try with hash
+
             if (!hasTexture && mesh.textureHash != 0 && globalTextureIndex.count(mesh.textureHash)) {
                 auto& loc = globalTextureIndex[mesh.textureHash];
                 std::ifstream texFile(loc.packPath, std::ios::binary);
@@ -1243,7 +1568,7 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             }
         }
 
-        // Build GLB manually with texture support
+
         std::vector<uint8_t> binBuffer;
         auto alignBuffer = [&binBuffer]() {
             while (binBuffer.size() % 4 != 0) binBuffer.push_back(0);
@@ -1255,27 +1580,27 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             return offset;
         };
 
-        // Add position data
+
         alignBuffer();
         int posOffset = addToBuffer(mesh.positions.data(), mesh.positions.size() * sizeof(float));
         int posLength = (int)(mesh.positions.size() * sizeof(float));
 
-        // Add normal data
+
         alignBuffer();
         int normOffset = addToBuffer(mesh.normals.data(), mesh.normals.size() * sizeof(float));
         int normLength = (int)(mesh.normals.size() * sizeof(float));
 
-        // Add UV data
+
         alignBuffer();
         int uvOffset = addToBuffer(mesh.uvs.data(), mesh.uvs.size() * sizeof(float));
         int uvLength = (int)(mesh.uvs.size() * sizeof(float));
 
-        // Add index data
+
         alignBuffer();
         int indOffset = addToBuffer(triangleIndices.data(), triangleIndices.size() * sizeof(uint16_t));
         int indLength = (int)(triangleIndices.size() * sizeof(uint16_t));
 
-        // Add texture data if available
+
         int texOffset = 0, texLength = 0;
         if (hasTexture && !textureData.empty()) {
             alignBuffer();
@@ -1285,39 +1610,39 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
 
         alignBuffer();
 
-        // Build JSON
+
         std::stringstream json;
         json << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"USM\"},";
 
-        // Buffer views
+
         json << "\"bufferViews\":[";
-        json << "{\"buffer\":0,\"byteOffset\":" << posOffset << ",\"byteLength\":" << posLength << ",\"target\":34962},";  // 0: positions
-        json << "{\"buffer\":0,\"byteOffset\":" << normOffset << ",\"byteLength\":" << normLength << ",\"target\":34962},"; // 1: normals
-        json << "{\"buffer\":0,\"byteOffset\":" << uvOffset << ",\"byteLength\":" << uvLength << ",\"target\":34962},";     // 2: UVs
-        json << "{\"buffer\":0,\"byteOffset\":" << indOffset << ",\"byteLength\":" << indLength << ",\"target\":34963}";    // 3: indices
+        json << "{\"buffer\":0,\"byteOffset\":" << posOffset << ",\"byteLength\":" << posLength << ",\"target\":34962},";
+        json << "{\"buffer\":0,\"byteOffset\":" << normOffset << ",\"byteLength\":" << normLength << ",\"target\":34962},";
+        json << "{\"buffer\":0,\"byteOffset\":" << uvOffset << ",\"byteLength\":" << uvLength << ",\"target\":34962},";
+        json << "{\"buffer\":0,\"byteOffset\":" << indOffset << ",\"byteLength\":" << indLength << ",\"target\":34963}";
         if (hasTexture) {
-            json << ",{\"buffer\":0,\"byteOffset\":" << texOffset << ",\"byteLength\":" << texLength << "}";  // 4: texture
+            json << ",{\"buffer\":0,\"byteOffset\":" << texOffset << ",\"byteLength\":" << texLength << "}";
         }
         json << "],";
 
-        // Accessors
+
         json << "\"accessors\":[";
         json << "{\"bufferView\":0,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC3\","
              << "\"min\":[" << minP[0] << "," << minP[1] << "," << minP[2] << "],"
-             << "\"max\":[" << maxP[0] << "," << maxP[1] << "," << maxP[2] << "]},";  // 0: position
-        json << "{\"bufferView\":1,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC3\"},";  // 1: normal
-        json << "{\"bufferView\":2,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC2\"},";  // 2: UV
-        json << "{\"bufferView\":3,\"componentType\":5123,\"count\":" << triangleIndices.size() << ",\"type\":\"SCALAR\"}"; // 3: indices
+             << "\"max\":[" << maxP[0] << "," << maxP[1] << "," << maxP[2] << "]},";
+        json << "{\"bufferView\":1,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC3\"},";
+        json << "{\"bufferView\":2,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC2\"},";
+        json << "{\"bufferView\":3,\"componentType\":5123,\"count\":" << triangleIndices.size() << ",\"type\":\"SCALAR\"}";
         json << "],";
 
-        // Images, samplers, textures (if we have a texture)
+
         if (hasTexture) {
             json << "\"images\":[{\"bufferView\":4,\"mimeType\":\"image/vnd-ms.dds\"}],";
             json << "\"samplers\":[{\"magFilter\":9729,\"minFilter\":9729,\"wrapS\":10497,\"wrapT\":10497}],";
             json << "\"textures\":[{\"sampler\":0,\"source\":0}],";
         }
 
-        // Materials
+
         json << "\"materials\":[{\"name\":\"" << baseName << "\",\"doubleSided\":true,";
         if (hasTexture) {
             json << "\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicFactor\":0,\"roughnessFactor\":1},";
@@ -1326,28 +1651,28 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         }
         json << "\"alphaMode\":\"" << (mesh.isTranslucent ? "BLEND" : "OPAQUE") << "\"}],";
 
-        // Meshes
+
         json << "\"meshes\":[{\"name\":\"" << baseName << "\",\"primitives\":[{"
              << "\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},"
              << "\"indices\":3,\"material\":0}]}],";
 
-        // Nodes
+
         json << "\"nodes\":[{\"name\":\"" << baseName << "\",\"mesh\":0}],";
 
-        // Scene
+
         json << "\"scenes\":[{\"nodes\":[0]}],\"scene\":0,";
 
-        // Buffer
+
         json << "\"buffers\":[{\"byteLength\":" << binBuffer.size() << "}]}";
 
         std::string jsonStr = json.str();
         while (jsonStr.size() % 4 != 0) jsonStr += " ";
 
-        // Write GLB file
+
         fs::path glbPath = outDir / (baseName + ".glb");
         std::ofstream out(glbPath, std::ios::binary);
 
-        uint32_t magic = 0x46546C67;  // glTF
+        uint32_t magic = 0x46546C67;
         uint32_t version = 2;
         uint32_t totalLen = 12 + 8 + (uint32_t)jsonStr.size() + 8 + (uint32_t)binBuffer.size();
 
@@ -1355,16 +1680,16 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         out.write((char*)&version, 4);
         out.write((char*)&totalLen, 4);
 
-        // JSON chunk
+
         uint32_t jsonLen = (uint32_t)jsonStr.size();
-        uint32_t jsonType = 0x4E4F534A;  // JSON
+        uint32_t jsonType = 0x4E4F534A;
         out.write((char*)&jsonLen, 4);
         out.write((char*)&jsonType, 4);
         out.write(jsonStr.c_str(), jsonLen);
 
-        // Binary chunk
+
         uint32_t binLen = (uint32_t)binBuffer.size();
-        uint32_t binType = 0x004E4942;  // BIN
+        uint32_t binType = 0x004E4942;
         out.write((char*)&binLen, 4);
         out.write((char*)&binType, 4);
         out.write((char*)binBuffer.data(), binLen);
@@ -1372,7 +1697,7 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         out.close();
 
         if (hasTexture) {
-            // Also export the DDS separately for easier use
+
             fs::path ddsPath = outDir / (baseName + ".dds");
             std::ofstream ddsOut(ddsPath, std::ios::binary);
             ddsOut.write((char*)textureData.data(), textureData.size());
@@ -1382,7 +1707,7 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             ShowNotification("Exported GLB to:\n" + glbPath.string() + "\n(no texture found)");
         }
     } else {
-        // For PCM export, we still need the source data
+
         if (mesh.sourcePack.empty() || mesh.sourceSize == 0) {
             Log("No source PCM data for selected mesh");
             return;
