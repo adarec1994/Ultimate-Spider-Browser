@@ -569,9 +569,30 @@ void SpiderManTool::LoadPreview(int index) {
         std::string fileStem = StrToLower(fs::path(e.name).stem().string());
 
         if (IsWorldPack(packStem) && fileStem.find(packStem) == 0) {
-             LoadAllWorldGeometries();
+            isWorldMode = true;
+            selectedMeshIndex = -1;
+            selectedMeshPcmData.clear();
+            showWorldMeshHexEditor = false;
+
+            camPos[0] = 0.0f; camPos[1] = 200.0f; camPos[2] = -600.0f;
+            camFront[0] = 0.0f; camFront[1] = -0.3f; camFront[2] = -1.0f;
+            camUp[0] = 0.0f; camUp[1] = 1.0f; camUp[2] = 0.0f;
+            camYaw = -90.0f;
+            camPitch = -15.0f;
+            camSpeed = 500.0f;
+
+            float transformMatrix[16] = {0};
+            transformMatrix[0] = -1.0f;
+            transformMatrix[5] = 1.0f;
+            transformMatrix[10] = 1.0f;
+            transformMatrix[15] = 1.0f;
+
+            std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
+            AddMeshFromDataWithTransform(pcmData, e.name, nullptr, loadedPCPackPath, e.offset, transformMatrix);
+
+            LoadSkybox();
         } else {
-             LoadModelToGL(index);
+            LoadModelToGL(index);
         }
 
         isModelLoaded = true;

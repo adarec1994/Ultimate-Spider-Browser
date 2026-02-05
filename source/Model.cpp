@@ -46,6 +46,9 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         uint32_t meshNameOfs = br.Read<uint32_t>();
         uint32_t alphaFlagOfs = br.Read<uint32_t>();
 
+        br.Seek(e.dataOffset + 0x10);
+        uint32_t shaderType = br.Read<uint32_t>();
+
         uint32_t textureNameOfs = 0;
 
         if (e.size == 80 || e.size == 88) {
@@ -61,8 +64,8 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         mat.meshName = ReadStringTableEntry(pcmData, meshNameOfs);
         mat.alphaFlag = ReadStringTableEntry(pcmData, alphaFlagOfs);
         mat.textureName = ReadStringTableEntry(pcmData, textureNameOfs);
-        mat.isTranslucent = (mat.alphaFlag.find("translucent") != std::string::npos) ||
-                            (mat.alphaFlag.find("glass") != std::string::npos);
+        mat.shaderType = shaderType;
+        mat.isTranslucent = (shaderType == 11);
 
         if (meshNameOfs != 0) {
             materialMap[meshNameOfs] = mat;
@@ -319,6 +322,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             mesh.mode = (itype == 4) ? GL_TRIANGLES : GL_TRIANGLE_STRIP;
             mesh.textureId = tex;
             mesh.isTranslucent = mat.isTranslucent;
+            mesh.shaderType = mat.shaderType;
 
 
             std::string texNameLower = StrToLower(mat.textureName);
@@ -430,7 +434,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
     bool loadedFirstLod = false;
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
-        if (loadedFirstLod) break;
+        if (!isWorldMode && loadedFirstLod) break;
         loadedFirstLod = true;
 
         if (inf.offset + 16 > pcmData.size()) continue;
@@ -611,6 +615,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             mesh.mode = (itype == 4) ? GL_TRIANGLES : GL_TRIANGLE_STRIP;
             mesh.textureId = tex;
             mesh.isTranslucent = mat.isTranslucent;
+            mesh.shaderType = mat.shaderType;
 
             std::string texNameLower = StrToLower(mat.textureName);
             mesh.isFakeShadow = (texNameLower.find("fake_shadow") != std::string::npos);

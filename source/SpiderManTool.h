@@ -13,6 +13,7 @@ struct MaterialDef {
     std::string meshName;
     std::string alphaFlag;
     std::string textureName;
+    uint32_t shaderType = 0;
     bool isTranslucent = false;
 };
 
@@ -39,6 +40,7 @@ struct RenderMesh {
     bool isColorVolume = false;
     bool isHidden = false;
     bool skipPicking = false;
+    uint32_t shaderType = 0;
 
 
     float bboxMin[3] = {0, 0, 0};
@@ -188,12 +190,6 @@ struct TextureLocation {
     uint32_t size;
 };
 
-struct WorldPCMItem {
-    std::string packPath;
-    uint32_t offset;
-    uint32_t size;
-};
-
 struct GlobalSearchResult {
     int packIndex;
     std::string packName;
@@ -207,7 +203,7 @@ struct GlobalSearchResult {
 
 class SpiderManTool {
 public:
-    enum AppState { STATE_SPLASH, STATE_BROWSER, STATE_LOADING, STATE_LOADING_WORLD };
+    enum AppState { STATE_SPLASH, STATE_BROWSER, STATE_LOADING };
     AppState currentState = STATE_SPLASH;
 
 
@@ -215,12 +211,6 @@ public:
     int indexingProgress = 0;
     int indexingTotal = 0;
     std::string indexingCurrentPack;
-
-
-    bool isLoadingWorld = false;
-    int worldLoadProgress = 0;
-    int worldLoadTotal = 0;
-    std::vector<WorldPCMItem> worldPcmQueue;
 
     std::string searchPath = ".";
     std::vector<fs::path> foundPacks;
@@ -341,8 +331,8 @@ public:
     void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0);
     void AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0, const float* transform = nullptr);
     void LoadBackgroundMeshes();
+    void LoadSkybox();
     void LoadAllWorldGeometries();
-    void LoadWorldGeometryStep(int index);
 
 
     std::vector<GlobalSearchResult> globalSearchResults;

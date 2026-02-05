@@ -86,51 +86,6 @@ void RenderUI(SpiderManTool& tool) {
     }
 
 
-    if (tool.currentState == SpiderManTool::STATE_LOADING_WORLD && tool.isLoadingWorld) {
-        const int MODELS_PER_FRAME = 20;
-        for (int i = 0; i < MODELS_PER_FRAME && tool.worldLoadProgress < tool.worldLoadTotal; i++) {
-            tool.LoadWorldGeometryStep(tool.worldLoadProgress);
-            tool.worldLoadProgress++;
-        }
-
-        if (tool.worldLoadProgress >= tool.worldLoadTotal) {
-            tool.isLoadingWorld = false;
-            tool.currentState = SpiderManTool::STATE_BROWSER;
-            tool.isModelLoaded = true;
-            tool.Log("World Context Loaded. Total meshes: " + std::to_string(tool.previewMeshes.size()));
-        }
-
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-        ImGui::Begin("LoadingWorldBackground", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
-
-        ImVec2 center = ImVec2(ImGui::GetWindowWidth() / 2.0f, ImGui::GetWindowHeight() / 2.0f);
-        float boxWidth = 400.0f;
-        float boxHeight = 100.0f;
-
-        ImGui::SetCursorPos(ImVec2(center.x - boxWidth / 2.0f, center.y - boxHeight / 2.0f));
-        ImGui::BeginChild("LoadingWorldContent", ImVec2(boxWidth, boxHeight), true, ImGuiWindowFlags_NoScrollbar);
-
-        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize("Loading World...").x) / 2.0f);
-        ImGui::Text("Loading World...");
-
-        ImGui::Spacing();
-
-        float progress = (tool.worldLoadTotal > 0) ? (float)tool.worldLoadProgress / (float)tool.worldLoadTotal : 0.0f;
-        ImGui::ProgressBar(progress, ImVec2(-1, 20), "");
-
-        ImGui::Spacing();
-
-        char progressText[128];
-        snprintf(progressText, sizeof(progressText), "%d / %d models", tool.worldLoadProgress, tool.worldLoadTotal);
-        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize(progressText).x) / 2.0f);
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", progressText);
-
-        ImGui::EndChild();
-        ImGui::End();
-        return;
-    }
-
     if (tool.currentState == SpiderManTool::STATE_SPLASH) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -148,7 +103,10 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::EndChild();
         ImGui::End();
 
-        if (IGFD::FileDialog::Instance()->Display("ChooseDirDlgKey", ImGuiWindowFlags_NoCollapse, ImVec2(600, 400))) {
+        if (IGFD::FileDialog::Instance()->IsOpened("ChooseDirDlgKey")) {
+            ImGui::SetNextWindowFocus();
+        }
+        if (IGFD::FileDialog::Instance()->Display("ChooseDirDlgKey", ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking, ImVec2(600, 400))) {
             if (IGFD::FileDialog::Instance()->IsOk()) {
                 tool.searchPath = IGFD::FileDialog::Instance()->GetCurrentPath();
                 tool.SaveConfig();
@@ -282,6 +240,16 @@ void RenderUI(SpiderManTool& tool) {
 
             ImGui::Separator();
             ImGui::Text("Found %zu Packs", tool.foundPacks.size());
+            ImGui::Separator();
+
+            if (ImGui::Selectable("Load World", false, ImGuiSelectableFlags_AllowDoubleClick)) {
+                if (ImGui::IsMouseDoubleClicked(0)) {
+                    tool.LoadAllWorldGeometries();
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Double-click to load all world areas");
+            }
             ImGui::Separator();
 
             ImGui::BeginChild("PackList", ImVec2(0, 200), true);
@@ -963,6 +931,14 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::Text("Rendering:");
             ImGui::Text("  Indices: %d", m.indexCount);
             ImGui::Text("  Texture ID: %u", m.textureId);
+            const char* shaderTypeName = "Unknown";
+            switch (m.shaderType) {
+                case 2: shaderTypeName = "Character"; break;
+                case 7: shaderTypeName = "World"; break;
+                case 8: shaderTypeName = "Street"; break;
+                case 11: shaderTypeName = "Translucent"; break;
+            }
+            ImGui::Text("  Shader: %s (%u)", shaderTypeName, m.shaderType);
             ImGui::Text("  Translucent: %s", m.isTranslucent ? "Yes" : "No");
 
             ImGui::Spacing();
@@ -971,12 +947,6 @@ void RenderUI(SpiderManTool& tool) {
             }
             if (ImGui::Button("Export GLB", ImVec2(-1, 0))) {
                 tool.ExportSelectedWorldMesh(true);
-            }
-            ImGui::Spacing();
-            if (ImGui::Button("Deselect", ImVec2(-1, 0))) {
-                tool.selectedMeshIndex = -1;
-                tool.showWorldMeshHexEditor = false;
-                tool.selectedMeshPcmData.clear();
             }
 
             ImGui::EndChild();

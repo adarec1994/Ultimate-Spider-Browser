@@ -54,7 +54,7 @@ void SpiderManTool::BuildGlobalTextureIndex() {
     globalTextureNameIndex.clear();
 
     if (foundPacks.empty()) {
-        currentState = STATE_BROWSER;
+        currentState = STATE_SPLASH;
         return;
     }
 
@@ -92,7 +92,7 @@ void SpiderManTool::BuildGlobalTextureIndexStep(int packIndex) {
         return;
     }
 
-    // Find entry table start
+
     size_t start = 0;
     const uint32_t magic = 0xE3E3E3E3;
     size_t headerReadSize = std::min((size_t)200000, fileSize);
@@ -122,8 +122,8 @@ void SpiderManTool::BuildGlobalTextureIndexStep(int packIndex) {
         return;
     }
 
-    // Parse entries
-    file.clear(); // Clear any EOF flags
+
+    file.clear();
     file.seekg(start);
 
     while (file.good()) {
@@ -140,39 +140,39 @@ void SpiderManTool::BuildGlobalTextureIndexStep(int packIndex) {
             size_t filePos = file.tellg();
             uint32_t absOffset = dataOffset + offset;
 
-            // Safety check - make sure we're not seeking past end of file
+
             if (absOffset + 4 > fileSize) {
                 file.seekg(filePos);
                 continue;
             }
 
-            // Check if it's a DDS file
+
             file.seekg(absOffset);
             uint32_t sig = 0;
             file.read((char*)&sig, 4);
 
-            if (file.good() && sig == 0x20534444) {  // "DDS "
+            if (file.good() && sig == 0x20534444) {
                 TextureLocation loc;
                 loc.packPath = packPath.string();
                 loc.offset = absOffset;
                 loc.size = size;
 
-                // Store by hash
+
                 globalTextureIndex[hash] = loc;
 
-                // Store by name if we have it in dictionary
+
                 if (dictionary.count(hash)) {
                     std::string name = StrToLower(dictionary[hash]);
                     globalTextureNameIndex[name] = loc;
 
-                    // Also store without .dds extension
+
                     if (name.size() > 4 && name.substr(name.size() - 4) == ".dds") {
                         globalTextureNameIndex[name.substr(0, name.size() - 4)] = loc;
                     }
                 }
             }
 
-            file.clear(); // Clear any error flags
+            file.clear();
             file.seekg(filePos);
         }
     }
@@ -201,14 +201,13 @@ void SpiderManTool::ScanDirectory() {
         Log("Found " + std::to_string(foundPacks.size()) + " .pcpack files.");
 
         if (!foundPacks.empty()) {
-            // Start the indexing process
             BuildGlobalTextureIndex();
         } else {
-            currentState = STATE_BROWSER;
+            currentState = STATE_SPLASH;
         }
     } catch (const std::exception& e) {
         Log(std::string("Error scanning: ") + e.what());
-        currentState = STATE_BROWSER;
+        currentState = STATE_SPLASH;
     }
 }
 
@@ -274,7 +273,7 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
             continue;
         }
 
-        // Find entry table start
+
         size_t start = 0;
         const uint32_t magic = 0xE3E3E3E3;
         size_t headerReadSize = std::min((size_t)200000, fileSize);
@@ -312,7 +311,7 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
             if (!file.good()) break;
             if (type >= 0x1000 || type == 0x0000) break;
 
-            // Get file name
+
             std::string fileName;
             if (dictionary.count(hash)) {
                 fileName = dictionary[hash];
@@ -322,7 +321,7 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
                 fileName = ss.str();
             }
 
-            // Check file type
+
             bool isPcm = false;
             bool isDds = false;
 
@@ -336,10 +335,10 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
                     file.read((char*)&sig, 4);
 
                     if (file.good()) {
-                        if (sig == 0x204D4350) { // "PCM "
+                        if (sig == 0x204D4350) {
                             isPcm = true;
                             fileName += ".pcm";
-                        } else if (sig == 0x20534444) { // "DDS "
+                        } else if (sig == 0x20534444) {
                             isDds = true;
                             fileName += ".dds";
                         } else {
@@ -352,7 +351,7 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
                 }
             }
 
-            // Check if matches query
+
             std::string fileNameLower = StrToLower(fileName);
             if (fileNameLower.find(queryLower) != std::string::npos) {
                 GlobalSearchResult result;
@@ -371,7 +370,7 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
         file.close();
     }
 
-    // Sort results by file name
+
     std::sort(globalSearchResults.begin(), globalSearchResults.end(),
         [](const GlobalSearchResult& a, const GlobalSearchResult& b) {
             return a.fileName < b.fileName;
@@ -384,14 +383,14 @@ void SpiderManTool::SelectGlobalSearchResult(int index) {
     const auto& result = globalSearchResults[index];
     selectedGlobalSearchIndex = index;
 
-    // Open the pack if not already open
+
     std::string packPath = foundPacks[result.packIndex].string();
     if (loadedPCPackPath != packPath) {
         OpenPCPack(packPath);
         selectedPackIndex = result.packIndex;
     }
 
-    // Find and select the file in the current entries
+
     for (int i = 0; i < (int)entries.size(); i++) {
         if (entries[i].hash == result.hash) {
             selectedFileIndex = i;
