@@ -60,6 +60,7 @@ int main(int, char**) {
     tool.LoadConfig();
 
     if (fs::exists("string_hash_dictionary.txt")) tool.LoadDictionary("string_hash_dictionary.txt");
+    if (tool.dictionary.empty() && fs::exists("string_hash_dictionary.bin")) tool.LoadBinaryDictionary("string_hash_dictionary.bin");
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();

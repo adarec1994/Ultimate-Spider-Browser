@@ -303,6 +303,7 @@ public:
     void LoadConfig();
     void ScanDirectory();
     void LoadDictionary(const std::string& path);
+    void LoadBinaryDictionary(const std::string& path);
     void OpenPCPack(const std::string& path);
     void ExtractPack(const std::string& packPath, bool convertAll = false);
 

@@ -35,11 +35,22 @@ void SpiderManTool::LoadConfig() {
         if (std::getline(f, line) && line == "1") {
             if (fs::exists(searchPath)) {
                 std::string dictPath;
+                // Try text dictionary first
                 fs::path targetDict = "string_hash_dictionary.txt";
                 fs::path p1 = fs::path(searchPath) / targetDict;
                 if (fs::exists(p1)) dictPath = p1.string();
                 if (dictPath.empty() && fs::exists(targetDict)) dictPath = targetDict.string();
                 if (!dictPath.empty()) LoadDictionary(dictPath);
+
+                // Also try binary dictionary if text one wasn't found or to supplement
+                if (dictionary.empty()) {
+                    fs::path binDict = "string_hash_dictionary.bin";
+                    fs::path bp1 = fs::path(searchPath) / binDict;
+                    std::string binDictPath;
+                    if (fs::exists(bp1)) binDictPath = bp1.string();
+                    if (binDictPath.empty() && fs::exists(binDict)) binDictPath = binDict.string();
+                    if (!binDictPath.empty()) LoadBinaryDictionary(binDictPath);
+                }
 
                 ScanDirectory();
                 std::sort(foundPacks.begin(), foundPacks.end());
@@ -226,6 +237,63 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
         try { dictionary[std::stoul(hashStr, nullptr, 16)] = name; } catch (...) {}
     }
     Log("Loaded dictionary.");
+}
+
+void SpiderManTool::LoadBinaryDictionary(const std::string& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return;
+
+    size_t fileSize = file.tellg();
+    if (fileSize < 16) return;
+
+    file.seekg(0);
+    std::vector<uint8_t> data(fileSize);
+    file.read((char*)data.data(), fileSize);
+    file.close();
+
+    // Verify "shd\0" magic
+    if (data[0] != 's' || data[1] != 'h' || data[2] != 'd' || data[3] != 0) {
+        Log("Binary dictionary: invalid magic");
+        return;
+    }
+
+    // Scan for entries: each record has marker 0x15BADBAD
+    // Record layout: [hash:4] [recsize:4] [strlen:4] [0x15BADBAD:4] [data:4] [string...]
+    const uint32_t MARKER = 0x15BADBAD;
+    int count = 0;
+
+    for (size_t pos = 0x10; pos + 4 < fileSize; pos++) {
+        uint32_t val;
+        memcpy(&val, &data[pos], 4);
+        if (val != MARKER) continue;
+
+        // Marker found at pos; hash is at pos-12, recsize at pos-8, strlen at pos-4
+        if (pos < 12) continue;
+
+        uint32_t hash, recSize, strLen;
+        memcpy(&hash, &data[pos - 12], 4);
+        memcpy(&recSize, &data[pos - 8], 4);
+        memcpy(&strLen, &data[pos - 4], 4);
+
+        if (strLen == 0 || strLen > 255) continue;
+
+        size_t strStart = pos + 8; // skip marker + 4 bytes data
+        if (strStart + strLen > fileSize) continue;
+
+        // Read null-terminated string
+        std::string name;
+        for (size_t i = strStart; i < strStart + strLen && i < fileSize; i++) {
+            if (data[i] == 0) break;
+            name += (char)data[i];
+        }
+
+        if (!name.empty()) {
+            dictionary[hash] = name;
+            count++;
+        }
+    }
+
+    Log("Loaded binary dictionary: " + std::to_string(count) + " entries.");
 }
 
 bool SpiderManTool::IsWorldPack(const std::string& name) {
