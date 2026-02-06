@@ -228,10 +228,14 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
     std::string line;
     std::getline(file, line); std::getline(file, line);
     while (std::getline(file, line)) {
+        // Strip Windows line endings
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         std::stringstream ss(line);
         std::string hashStr, name;
         ss >> hashStr;
         std::getline(ss, name);
+        // Strip Windows line endings from name too
+        if (!name.empty() && name.back() == '\r') name.pop_back();
         size_t first = name.find_first_not_of(" \t");
         if (first != std::string::npos) name = name.substr(first);
         try { dictionary[std::stoul(hashStr, nullptr, 16)] = name; } catch (...) {}

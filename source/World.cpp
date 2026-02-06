@@ -71,27 +71,46 @@ static std::string ExpandAbbreviations(const std::string& name) {
         size_t pos = result.find("cornerbar_clean");
         result.replace(pos, 15, "cornerbar");
     }
-    // Strip ent_ prefix: ent_con_barrier → con_barrier
-    if (result.find("ent_") == 0) {
-        result = result.substr(4);
-    }
-    // cos_XX_ prefix (zone leftover): cos_cg_cable → cable
-    if (result.size() > 7 && result.substr(0, 4) == "cos_" && result[6] == '_') {
-        result = result.substr(7);
+    // streetlampaa → streetlampa (typo - double 'a')
+    if (result.find("streetlampaa") != std::string::npos) {
+        size_t pos = result.find("streetlampaa");
+        result.replace(pos, 12, "streetlampa");
     }
     // Strip _n suffix (night variant): smokestacka_n → smokestacka
     if (result.size() > 2 && result.substr(result.size() - 2) == "_n") {
         result = result.substr(0, result.size() - 2);
     }
-    // Double letter typos: streetlampaa → streetlampa
-    if (result.find("streetlampaa") != std::string::npos) {
-        size_t pos = result.find("streetlampaa");
-        result.replace(pos, 12, "streetlampa");
+    // drum_cone instances - these are zone-specific (hi_cone, hj_cone)
+    // No universal mapping available
+    // con_barrier → barriera (construction barrier maps to barrier PCM)
+    if (result == "con_barrier" || result == "ent_con_barrier") {
+        result = "barriera";
     }
-    // stor_comk_5_5m → stor_comk_5_5 (strip trailing m from dimension)
-    if (result.find("stor_comk_5_5m") != std::string::npos) {
-        size_t pos = result.find("stor_comk_5_5m");
-        result.replace(pos, 14, "stor_comk_5_5");
+    // con_dmpstr → dumpstera (construction dumpster)
+    if (result == "con_dmpstr" || result == "ent_con_dmpstr" || result == "constr_dmpstr") {
+        result = "dumpstera";
+    }
+    // barrier_plstc → barriera (plastic barrier)
+    if (result == "barrier_plstc" || result == "ent_barrier_plstc") {
+        result = "barriera";
+    }
+    // warn_tape → skip (non-renderable marker)
+    if (result.find("warn_tape") != std::string::npos) {
+        result = "";
+    }
+    // rf_penthouse* → ref_penthouse* (rf_ is abbreviation for ref_)
+    if (result.find("rf_penthouse") != std::string::npos) {
+        size_t pos = result.find("rf_penthouse");
+        result.replace(pos, 12, "ref_penthouse");
+    }
+    // forklft → forklift (missing 'i')
+    if (result.find("forklft") != std::string::npos) {
+        size_t pos = result.find("forklft");
+        result.replace(pos, 7, "forklift");
+    }
+    // stor abbreviations: "storcome" → "stor_come", "storcomb" → "stor_comb"
+    if (result.find("stor") == 0 && result.size() > 4 && result[4] != '_') {
+        result.insert(4, "_");
     }
     return result;
 }
@@ -127,6 +146,12 @@ static bool IsNonRenderableName(const std::string& nameLower) {
     if (nameLower.find("elec_marker") != std::string::npos) return true;
     if (nameLower.find("fx_shoreline") != std::string::npos) return true;
     if (nameLower.find("fx_dcl_") != std::string::npos) return true;
+    if (nameLower.find("city_omni") != std::string::npos) return true;
+    if (nameLower.find("sml_omni") != std::string::npos) return true;
+    if (nameLower.find("small_omni") != std::string::npos) return true;
+    if (nameLower.find("tinyomni") != std::string::npos) return true;
+    if (nameLower.find("cyclemarker") != std::string::npos) return true;
+    if (nameLower.find("cslight") != std::string::npos) return true;
 
     // Start-of-string checks (check both full name AND zone-stripped name)
     auto startsCheck = [](const std::string& s) {
@@ -138,6 +163,15 @@ static bool IsNonRenderableName(const std::string& nameLower) {
         if (s.find("fspot") == 0) return true;
         // Car spawn points (zz_car01 etc.) are entity spawns, not PCM models
         if (s.size() >= 4 && s.find("car") == 0 && std::isdigit((unsigned char)s[3])) return true;
+        if (s.find("lightcast") == 0) return true;
+        if (s.find("litecast") == 0) return true;
+        if (s.find("shadow") == 0) return true;
+        if (s.find("glow") == 0) return true;
+        if (s.find("blink") == 0) return true;
+        if (s.find("bubbles") == 0) return true;
+        if (s.find("hang") == 0) return true;
+        if (s.find("platform") == 0) return true;
+        if (s.find("rubble") == 0) return true;
         return false;
     };
 
@@ -221,12 +255,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
     baseTransform[15] =  1.0f;
 
     Log("Loading all world geometries...");
-
-    // Debug tracking for skipped instances
-    static std::map<std::string, int> noTransformModels;
-    static std::map<std::string, int> unresolvedModels;
-    noTransformModels.clear();
-    unresolvedModels.clear();
 
     // ═════════════════════════════════════════════════════════════════════
     //  PASS 1 – Build global PCM model index from ALL packs
@@ -378,9 +406,9 @@ void SpiderManTool::LoadAllWorldGeometries() {
     Log("Zone geometry loaded: " + std::to_string(zoneGeoCount) + " meshes");
 
     // ═════════════════════════════════════════════════════════════════════
-    //  PASS 3 – Load instanced props from type 0x0A data
+    //  PASS 3 – Load instanced props from type 0x0A and type 0x04 data
     // ═════════════════════════════════════════════════════════════════════
-    Log("Scanning instance data (type 0x0A)...");
+    Log("Scanning instance data (type 0x0A + 0x04)...");
 
     // Cache PCM data to avoid re-reading the same model from disk
     std::map<uint32_t, std::vector<uint8_t>> pcmDataCache;
@@ -400,9 +428,16 @@ void SpiderManTool::LoadAllWorldGeometries() {
     int skippedNonRenderable = 0;
     int skippedNoTransform = 0;
 
+    // Block info: offset, size, tocHash, tocType
+    struct InstanceBlockInfo {
+        uint32_t offset;
+        uint32_t size;
+        uint32_t tocHash;   // For type 0x04, this IS the PCM model hash
+        uint8_t  tocType;   // 0x0A or 0x04
+    };
+
     for (const auto& path : foundPacks) {
         std::string stem = StrToLower(path.stem().string());
-        if (!IsWorldPack(stem)) continue;
 
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) continue;
@@ -424,11 +459,11 @@ void SpiderManTool::LoadAllWorldGeometries() {
         size_t tocStart = FindTocStart(tempHeader, headerReadSize);
         if (tocStart == 0) { file.close(); continue; }
 
-        // Collect ALL type 0x0A entries from the TOC
+        // Collect type 0x0A (instance placement) and type 0x04 (entity defs)
         file.clear();
         file.seekg(tocStart);
 
-        std::vector<std::pair<uint32_t, uint32_t>> instanceBlocks; // offset, size
+        std::vector<InstanceBlockInfo> instanceBlocks;
 
         while (file.good()) {
             uint32_t hash, type, offset, size;
@@ -439,21 +474,29 @@ void SpiderManTool::LoadAllWorldGeometries() {
             if (!file.good()) break;
             if (type >= 0x1000 || type == 0x0000) break;
 
-            if (type == 0x0A && size > 64) {
+            if (size > 64) {
                 uint32_t absOfs = packDataOffset + offset;
                 if (absOfs + size <= fileSize) {
-                    instanceBlocks.push_back({absOfs, size});
+                    if (type == 0x0A) {
+                        instanceBlocks.push_back({absOfs, size, hash, 0x0A});
+                    } else if (type == 0x04 && pcmIndex.count(hash)) {
+                        // Type 0x04: entity definition block – the TOC hash IS the PCM
+                        // model hash. Only collect if we have a matching PCM model.
+                        instanceBlocks.push_back({absOfs, size, hash, 0x04});
+                    }
                 }
             }
         }
 
-        // Process each type 0x0A block
-        for (const auto& [blockOffset, blockSize] : instanceBlocks) {
-            std::vector<uint8_t> blockData(blockSize);
+        // Process each instance block
+        for (const auto& blockInfo : instanceBlocks) {
+            std::vector<uint8_t> blockData(blockInfo.size);
             file.clear();
-            file.seekg(blockOffset);
-            file.read((char*)blockData.data(), blockSize);
+            file.seekg(blockInfo.offset);
+            file.read((char*)blockData.data(), blockInfo.size);
             if (!file.good()) continue;
+
+            const uint32_t blockSize = blockInfo.size;
 
             // Scan for all marker positions (aligned to 4 bytes)
             const uint32_t MARKER_ACE  = 0x7ACE5BAD;
@@ -476,6 +519,8 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
                 // Boundary: the previous 7ACE5BAD (or block start)
                 size_t prevAcePos = (aceIdx > 0) ? acePositions[aceIdx - 1] : 0;
+                // Boundary: the next 7ACE5BAD (or block end)
+                size_t nextAcePos = (aceIdx + 1 < acePositions.size()) ? acePositions[aceIdx + 1] : blockSize;
 
                 // Instance name hash is at 7ACE5BAD + 16
                 if (acePos + 20 > blockSize) continue;
@@ -502,6 +547,11 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
                 // ── Resolve instance hash → PCM model hash ──────────
                 uint32_t pcmHash = 0;
+
+                // For type 0x04 blocks, the TOC hash IS the PCM model hash
+                if (blockInfo.tocType == 0x04) {
+                    pcmHash = blockInfo.tocHash;
+                }
 
                 // 1) Direct match
                 if (pcmIndex.count(instanceHash)) {
@@ -651,97 +701,195 @@ void SpiderManTool::LoadAllWorldGeometries() {
                     }
                 }
 
+                // 12) Append variant suffix 'a': "trafficlight" → "trafficlighta"
+                if (pcmHash == 0 && !instanceName.empty()) {
+                    std::string noPrefix = StripZonePrefix(instanceName);
+                    std::string base = StripNumericSuffix(noPrefix);
+                    base = ExpandAbbreviations(base);
+                    if (!base.empty()) {
+                        pcmHash = TryResolveName(base + "a", pcmIndex, pcmNameToHash);
+                    }
+                }
+
+                // 13) Embedded zone prefix without underscore: "iitablea" → "tablea"
+                if (pcmHash == 0 && !instanceName.empty()) {
+                    std::string noPrefix = StripZonePrefix(instanceName);
+                    std::string base = StripNumericSuffix(noPrefix);
+                    if (base.size() > 2 && std::isalpha((unsigned char)base[0]) &&
+                        std::isalpha((unsigned char)base[1]) && std::islower((unsigned char)base[2])) {
+                        std::string inner = base.substr(2);
+                        pcmHash = TryResolveName(inner, pcmIndex, pcmNameToHash);
+                    }
+                }
+
+                // 14) "rf_" prefix models: "rf_skylightb" → "skylightb"
+                if (pcmHash == 0 && !instanceName.empty()) {
+                    std::string noPrefix = StripZonePrefix(instanceName);
+                    std::string base = StripNumericSuffix(noPrefix);
+                    if (base.size() > 3 && base.substr(0, 3) == "rf_") {
+                        std::string inner = base.substr(3);
+                        pcmHash = TryResolveName(inner, pcmIndex, pcmNameToHash);
+                    }
+                }
+
+                // 15) Prefix matching for parameterized names (e.g., stor_come → stor_come_07_10)
+                if (pcmHash == 0 && !instanceName.empty()) {
+                    std::string noPrefix = StripZonePrefix(instanceName);
+                    std::string base = StripNumericSuffix(noPrefix);
+                    base = ExpandAbbreviations(base);
+                    if (!base.empty() && base.size() >= 4) {
+                        for (const auto& [name, hash] : pcmNameToHash) {
+                            if (name.size() > base.size() && name.substr(0, base.size()) == base &&
+                                (name[base.size()] == '_' || std::isdigit((unsigned char)name[base.size()]))) {
+                                pcmHash = hash;
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 if (pcmHash == 0) {
-                    // Track all unresolved instances
-                    if (!instanceName.empty()) {
+                    static std::set<std::string> loggedBases;
+                    if (loggedBases.size() < 50 && !instanceName.empty()) {
                         std::string noPrefix = StripZonePrefix(instanceName);
                         std::string base = StripNumericSuffix(noPrefix);
                         std::string expanded = ExpandAbbreviations(base);
-                        unresolvedModels[expanded]++;
+                        if (!base.empty() && loggedBases.find(base) == loggedBases.end()) {
+                            loggedBases.insert(base);
+                            Log("UNRESOLVED: " + instanceName + " -> " + expanded);
+                        }
                     }
                     skippedNoModel++;
                     continue;
                 }
 
-                // ── Find Layout B transform ─────────────────────────
-                // Layout B: matrix(64) → 5BADF00D → ... → 7ACE5BAD → hash
-                //
-                // The key constraint: the 5BADF00D must be AFTER the previous
-                // 7ACE5BAD. Otherwise it belongs to a different record.
+                // Also filter by resolved model name (for type 0x04 where
+                // instanceName is _entid_xx but model might be non-renderable)
+                if (pcmHash != 0 && dictionary.count(pcmHash)) {
+                    std::string modelName = StrToLower(dictionary[pcmHash]);
+                    if (modelName == "nullo" || modelName == "marker" || modelName == "tool_marker" ||
+                        modelName == "oceanmesh" || modelName == "_gen_building" ||
+                        modelName == "checkercab_phys" || modelName == "tokens" ||
+                        modelName.find("_lod") != std::string::npos ||
+                        modelName.find("sky_") == 0 ||
+                        modelName.find("ped_") == 0 ||
+                        modelName.find("fx_") == 0 ||
+                        modelName.find("decal") != std::string::npos ||
+                        modelName.find("shadow") == 0) {
+                        skippedNonRenderable++;
+                        continue;
+                    }
+                }
+
+                // ── Find transform ────────────────────────────────
+                // Priority: 1) Self 5BADF00D (within current record)
+                //           2) Layout D (+192 matrix)
+                //           3) Layout A (+172 position)
+                //           4) Layout C (+144 matrix)
+                //           5) Prev 5BADF00D (between records, last resort)
                 float instanceMatrix[16];
                 bool hasTransform = false;
 
-                // Find all 5BADF00D markers between prevAcePos and acePos
-                auto badBegin = std::lower_bound(badPositions.begin(), badPositions.end(), prevAcePos);
-                auto badEnd   = std::lower_bound(badPositions.begin(), badPositions.end(), acePos);
+                // ── Layout B-self: 5BADF00D within current record ─────
+                // The correct 5BADF00D for this record appears AFTER its
+                // 7ACE5BAD marker (acePos → nextAcePos). The 4×4 matrix
+                // sits 64 bytes before the marker.
+                {
+                    auto selfBadBegin = std::lower_bound(badPositions.begin(), badPositions.end(), acePos);
+                    auto selfBadEnd   = std::lower_bound(badPositions.begin(), badPositions.end(), nextAcePos);
 
-                // Try each candidate (prefer the closest to acePos = last one)
-                for (auto badIt = badEnd; badIt != badBegin; ) {
-                    --badIt;
-                    size_t badPos = *badIt;
+                    for (auto badIt = selfBadEnd; badIt != selfBadBegin; ) {
+                        --badIt;
+                        size_t badPos = *badIt;
 
-                    // Must have room for 64-byte matrix before 5BADF00D
-                    if (badPos < 64) continue;
+                        // Matrix (64 bytes) must fit between acePos and badPos
+                        if (badPos < 64) continue;
+                        size_t matrixStart = badPos - 64;
+                        if (matrixStart <= acePos) continue;
 
-                    size_t matrixStart = badPos - 64;
-                    // Matrix must also be after prevAcePos (within this record's region)
-                    if (matrixStart < prevAcePos) continue;
+                        float candidate[16];
+                        memcpy(candidate, &blockData[matrixStart], 64);
 
-                    float candidate[16];
-                    memcpy(candidate, &blockData[matrixStart], 64);
+                        // Validate transform matrix
+                        if (std::fabs(candidate[15] - 1.0f) > 0.01f) continue;
+                        if (std::fabs(candidate[3]) > 0.01f ||
+                            std::fabs(candidate[7]) > 0.01f ||
+                            std::fabs(candidate[11]) > 0.01f) continue;
+                        if (std::fabs(candidate[12]) > 50000.0f ||
+                            std::fabs(candidate[13]) > 50000.0f ||
+                            std::fabs(candidate[14]) > 50000.0f) continue;
 
-                    // Validate transform matrix
-                    if (std::fabs(candidate[15] - 1.0f) > 0.01f) continue;
+                        // Reject identity transforms at origin (template defs)
+                        if (std::fabs(candidate[12]) < 0.01f &&
+                            std::fabs(candidate[13]) < 0.01f &&
+                            std::fabs(candidate[14]) < 0.01f) continue;
 
-                    // Check m[3], m[7], m[11] are ~0 (affine transform)
-                    if (std::fabs(candidate[3]) > 0.01f ||
-                        std::fabs(candidate[7]) > 0.01f ||
-                        std::fabs(candidate[11]) > 0.01f) continue;
+                        // Rotation rows should be roughly unit-length
+                        bool rowsOk = true;
+                        for (int r = 0; r < 3 && rowsOk; r++) {
+                            float len = 0;
+                            for (int c = 0; c < 3; c++)
+                                len += candidate[r * 4 + c] * candidate[r * 4 + c];
+                            len = std::sqrt(len);
+                            if (len < 0.1f || len > 10.0f) rowsOk = false;
+                        }
+                        if (!rowsOk) continue;
 
-                    // Translation should be in world range
-                    if (std::fabs(candidate[12]) > 50000.0f ||
-                        std::fabs(candidate[13]) > 50000.0f ||
-                        std::fabs(candidate[14]) > 50000.0f) continue;
-
-                    // Rotation part should have non-zero magnitude
-                    float rotMag = 0;
-                    for (int r = 0; r < 3; r++)
-                        for (int c = 0; c < 3; c++)
-                            rotMag += std::fabs(candidate[r * 4 + c]);
-                    if (rotMag < 0.01f) continue;
-
-                    // Rotation rows should be roughly unit-length (orthogonal matrix)
-                    bool rowsOk = true;
-                    for (int r = 0; r < 3 && rowsOk; r++) {
-                        float len = 0;
-                        for (int c = 0; c < 3; c++)
-                            len += candidate[r * 4 + c] * candidate[r * 4 + c];
-                        len = std::sqrt(len);
-                        // Allow some tolerance (scale + imprecision)
-                        if (len < 0.1f || len > 10.0f) rowsOk = false;
+                        memcpy(instanceMatrix, candidate, 64);
+                        hasTransform = true;
+                        break;
                     }
-                    if (!rowsOk) continue;
+                }
 
-                    memcpy(instanceMatrix, candidate, 64);
-                    hasTransform = true;
-                    break;
+                if (!hasTransform) {
+                    // ── Layout D: matrix at offset +192 from 7ACE5BAD ─────
+                    // Zone-specific props (divider_concrete, fencegate, trash,
+                    // drum_cone, boards, ramps, etc.) store a 4×4 matrix here.
+                    if (acePos + 192 + 64 <= blockSize) {
+                        float candidate[16];
+                        memcpy(candidate, &blockData[acePos + 192], 64);
+
+                        if (std::fabs(candidate[15] - 1.0f) < 0.01f &&
+                            std::fabs(candidate[3]) < 0.01f &&
+                            std::fabs(candidate[7]) < 0.01f &&
+                            std::fabs(candidate[11]) < 0.01f &&
+                            std::fabs(candidate[12]) < 50000.0f &&
+                            std::fabs(candidate[13]) < 50000.0f &&
+                            std::fabs(candidate[14]) < 50000.0f &&
+                            // Reject identity transforms at origin (template defs)
+                            (std::fabs(candidate[12]) > 0.01f ||
+                             std::fabs(candidate[13]) > 0.01f ||
+                             std::fabs(candidate[14]) > 0.01f)) {
+
+                            bool rowsOk = true;
+                            for (int r = 0; r < 3 && rowsOk; r++) {
+                                float len = 0;
+                                for (int c = 0; c < 3; c++)
+                                    len += candidate[r * 4 + c] * candidate[r * 4 + c];
+                                len = std::sqrt(len);
+                                if (len < 0.1f || len > 10.0f) rowsOk = false;
+                            }
+
+                            if (rowsOk) {
+                                memcpy(instanceMatrix, candidate, 64);
+                                hasTransform = true;
+                            }
+                        }
+                    }
                 }
 
                 if (!hasTransform) {
                     // ── Layout A: forward position scan ──────────────
-                    // Layout A: 7ACE5BAD → flags → hash → ... → position(3 floats at +172)
-                    // These are "simple" instances with position only (no rotation).
+                    // 7ACE5BAD → flags → hash → ... → position(3 floats at +172)
                     if (acePos + 184 <= blockSize) {
                         float px, py, pz;
                         memcpy(&px, &blockData[acePos + 172], 4);
                         memcpy(&py, &blockData[acePos + 176], 4);
                         memcpy(&pz, &blockData[acePos + 180], 4);
 
-                        // Validate: reasonable world coordinates, not all zeros
                         if (std::fabs(px) < 50000.0f && std::fabs(py) < 50000.0f &&
                             std::fabs(pz) < 50000.0f &&
                             (std::fabs(px) > 0.01f || std::fabs(py) > 0.01f || std::fabs(pz) > 0.01f)) {
-                            // Build identity rotation + translation matrix
                             memset(instanceMatrix, 0, 64);
                             instanceMatrix[0]  = 1.0f;
                             instanceMatrix[5]  = 1.0f;
@@ -756,9 +904,100 @@ void SpiderManTool::LoadAllWorldGeometries() {
                 }
 
                 if (!hasTransform) {
-                    // Track what models are being skipped due to no transform
-                    std::string modelName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "0x" + std::to_string(pcmHash);
-                    noTransformModels[modelName]++;
+                    // ── Layout C: matrix at offset +144 (fallback) ─────
+                    if (acePos + 144 + 64 <= blockSize) {
+                        float candidate[16];
+                        memcpy(candidate, &blockData[acePos + 144], 64);
+
+                        if (std::fabs(candidate[15] - 1.0f) < 0.01f &&
+                            std::fabs(candidate[3]) < 0.01f &&
+                            std::fabs(candidate[7]) < 0.01f &&
+                            std::fabs(candidate[11]) < 0.01f &&
+                            std::fabs(candidate[12]) < 50000.0f &&
+                            std::fabs(candidate[13]) < 50000.0f &&
+                            std::fabs(candidate[14]) < 50000.0f &&
+                            (std::fabs(candidate[12]) > 0.1f || std::fabs(candidate[13]) > 0.1f || std::fabs(candidate[14]) > 0.1f)) {
+
+                            bool rowsOk = true;
+                            for (int r = 0; r < 3 && rowsOk; r++) {
+                                float len = 0;
+                                for (int c = 0; c < 3; c++)
+                                    len += candidate[r * 4 + c] * candidate[r * 4 + c];
+                                len = std::sqrt(len);
+                                if (len < 0.5f || len > 2.0f) rowsOk = false;
+                            }
+
+                            if (rowsOk) {
+                                memcpy(instanceMatrix, candidate, 64);
+                                hasTransform = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!hasTransform) {
+                    // ── Layout B-prev: 5BADF00D before current record ─
+                    // Last resort — check between prevAcePos and acePos.
+                    // This can pick up markers from neighboring records so
+                    // it's only used when nothing else matched.
+                    auto badBegin = std::lower_bound(badPositions.begin(), badPositions.end(), prevAcePos);
+                    auto badEnd   = std::lower_bound(badPositions.begin(), badPositions.end(), acePos);
+
+                    for (auto badIt = badEnd; badIt != badBegin; ) {
+                        --badIt;
+                        size_t badPos = *badIt;
+                        if (badPos < 64) continue;
+                        size_t matrixStart = badPos - 64;
+                        if (matrixStart < prevAcePos) continue;
+
+                        float candidate[16];
+                        memcpy(candidate, &blockData[matrixStart], 64);
+
+                        if (std::fabs(candidate[15] - 1.0f) > 0.01f) continue;
+                        if (std::fabs(candidate[3]) > 0.01f ||
+                            std::fabs(candidate[7]) > 0.01f ||
+                            std::fabs(candidate[11]) > 0.01f) continue;
+                        if (std::fabs(candidate[12]) > 50000.0f ||
+                            std::fabs(candidate[13]) > 50000.0f ||
+                            std::fabs(candidate[14]) > 50000.0f) continue;
+
+                        // Reject identity transforms at origin
+                        if (std::fabs(candidate[12]) < 0.01f &&
+                            std::fabs(candidate[13]) < 0.01f &&
+                            std::fabs(candidate[14]) < 0.01f) continue;
+
+                        float rotMag = 0;
+                        for (int r = 0; r < 3; r++)
+                            for (int c = 0; c < 3; c++)
+                                rotMag += std::fabs(candidate[r * 4 + c]);
+                        if (rotMag < 0.01f) continue;
+
+                        bool rowsOk = true;
+                        for (int r = 0; r < 3 && rowsOk; r++) {
+                            float len = 0;
+                            for (int c = 0; c < 3; c++)
+                                len += candidate[r * 4 + c] * candidate[r * 4 + c];
+                            len = std::sqrt(len);
+                            if (len < 0.1f || len > 10.0f) rowsOk = false;
+                        }
+                        if (!rowsOk) continue;
+
+                        memcpy(instanceMatrix, candidate, 64);
+                        hasTransform = true;
+                        break;
+                    }
+                }
+
+                if (!hasTransform) {
+                    // Log first 30 unique no-transform models
+                    static std::set<std::string> loggedNoTransform;
+                    if (loggedNoTransform.size() < 30) {
+                        std::string modelName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "hash_" + std::to_string(pcmHash);
+                        if (loggedNoTransform.find(modelName) == loggedNoTransform.end()) {
+                            loggedNoTransform.insert(modelName);
+                            Log("NO-TRANSFORM: " + modelName + " (instance: " + instanceName + ")");
+                        }
+                    }
                     skippedNoTransform++;
                     continue;
                 }
@@ -805,22 +1044,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
         + std::to_string(skippedNoModel) + " unresolved, "
         + std::to_string(skippedNonRenderable) + " non-renderable, "
         + std::to_string(skippedNoTransform) + " no transform");
-
-    // Log top unresolved models
-    Log("=== TOP UNRESOLVED (by count) ===");
-    std::vector<std::pair<std::string, int>> unresolvedVec(unresolvedModels.begin(), unresolvedModels.end());
-    std::sort(unresolvedVec.begin(), unresolvedVec.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (size_t i = 0; i < std::min((size_t)20, unresolvedVec.size()); i++) {
-        Log("  " + unresolvedVec[i].first + ": " + std::to_string(unresolvedVec[i].second) + "x");
-    }
-
-    // Log top no-transform models
-    Log("=== TOP NO-TRANSFORM (by count) ===");
-    std::vector<std::pair<std::string, int>> noTransformVec(noTransformModels.begin(), noTransformModels.end());
-    std::sort(noTransformVec.begin(), noTransformVec.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (size_t i = 0; i < std::min((size_t)20, noTransformVec.size()); i++) {
-        Log("  " + noTransformVec[i].first + ": " + std::to_string(noTransformVec[i].second) + "x");
-    }
 
     pcmDataCache.clear();
 
