@@ -39,21 +39,61 @@ static std::string StripZonePrefix(const std::string& name) {
 //    The game uses shortened names in instance data that don't match the
 //    actual PCM model names.  This map covers all known cases.
 static std::string ExpandAbbreviations(const std::string& name) {
+    std::string result = name;
+
     // strtlampa → streetlampa,  strtlampb → streetlampb
-    if (name.find("strtlamp") != std::string::npos) {
-        std::string result = name;
+    if (result.find("strtlamp") != std::string::npos) {
         size_t pos = result.find("strtlamp");
         result.replace(pos, 8, "streetlamp");
-        return result;
     }
     // bilboard → billboard  (typo in some instance names)
-    if (name.find("bilboard") != std::string::npos) {
-        std::string result = name;
+    if (result.find("bilboard") != std::string::npos) {
         size_t pos = result.find("bilboard");
         result.replace(pos, 8, "billboard");
-        return result;
     }
-    return name;
+    // glsidewalk → sidewalk (doubled prefix artifact)
+    if (result.find("glsidewalk") != std::string::npos) {
+        size_t pos = result.find("glsidewalk");
+        result.replace(pos, 10, "sidewalk");
+    }
+    // sidewalkcorn → sidewalk_corner (abbreviated form)
+    if (result.find("sidewalkcorn") != std::string::npos) {
+        size_t pos = result.find("sidewalkcorn");
+        result.replace(pos, 12, "sidewalk_corner");
+    }
+    // sidewalkcorner → sidewalk_corner (missing underscore)
+    if (result.find("sidewalkcorner") != std::string::npos) {
+        size_t pos = result.find("sidewalkcorner");
+        result.replace(pos, 14, "sidewalk_corner");
+    }
+    // cornerbar_clean → cornerbar (strip _clean suffix)
+    if (result.find("cornerbar_clean") != std::string::npos) {
+        size_t pos = result.find("cornerbar_clean");
+        result.replace(pos, 15, "cornerbar");
+    }
+    // Strip ent_ prefix: ent_con_barrier → con_barrier
+    if (result.find("ent_") == 0) {
+        result = result.substr(4);
+    }
+    // cos_XX_ prefix (zone leftover): cos_cg_cable → cable
+    if (result.size() > 7 && result.substr(0, 4) == "cos_" && result[6] == '_') {
+        result = result.substr(7);
+    }
+    // Strip _n suffix (night variant): smokestacka_n → smokestacka
+    if (result.size() > 2 && result.substr(result.size() - 2) == "_n") {
+        result = result.substr(0, result.size() - 2);
+    }
+    // Double letter typos: streetlampaa → streetlampa
+    if (result.find("streetlampaa") != std::string::npos) {
+        size_t pos = result.find("streetlampaa");
+        result.replace(pos, 12, "streetlampa");
+    }
+    // stor_comk_5_5m → stor_comk_5_5 (strip trailing m from dimension)
+    if (result.find("stor_comk_5_5m") != std::string::npos) {
+        size_t pos = result.find("stor_comk_5_5m");
+        result.replace(pos, 14, "stor_comk_5_5");
+    }
+    return result;
 }
 
 // ── Helper: quick check if a 4×4 matrix looks valid (row3[3] ≈ 1.0) ──────
@@ -181,6 +221,12 @@ void SpiderManTool::LoadAllWorldGeometries() {
     baseTransform[15] =  1.0f;
 
     Log("Loading all world geometries...");
+
+    // Debug tracking for skipped instances
+    static std::map<std::string, int> noTransformModels;
+    static std::map<std::string, int> unresolvedModels;
+    noTransformModels.clear();
+    unresolvedModels.clear();
 
     // ═════════════════════════════════════════════════════════════════════
     //  PASS 1 – Build global PCM model index from ALL packs
@@ -586,7 +632,33 @@ void SpiderManTool::LoadAllWorldGeometries() {
                     }
                 }
 
+                // 11) sidewalk_corner without size → try both _4m and _5m variants
+                if (pcmHash == 0 && !instanceName.empty()) {
+                    std::string noPrefix = StripZonePrefix(instanceName);
+                    std::string base = StripNumericSuffix(noPrefix);
+                    base = ExpandAbbreviations(base);
+                    if (base == "sidewalk_corner" || base.find("sidewalk_corner") != std::string::npos) {
+                        // Strip any existing size suffix and try both variants
+                        std::string core = base;
+                        if (core.size() > 3 && core.substr(core.size() - 3) == "_4m")
+                            core = core.substr(0, core.size() - 3);
+                        else if (core.size() > 3 && core.substr(core.size() - 3) == "_5m")
+                            core = core.substr(0, core.size() - 3);
+                        // Try _5m first (more common), then _4m
+                        pcmHash = TryResolveName(core + "_5m", pcmIndex, pcmNameToHash);
+                        if (pcmHash == 0)
+                            pcmHash = TryResolveName(core + "_4m", pcmIndex, pcmNameToHash);
+                    }
+                }
+
                 if (pcmHash == 0) {
+                    // Track all unresolved instances
+                    if (!instanceName.empty()) {
+                        std::string noPrefix = StripZonePrefix(instanceName);
+                        std::string base = StripNumericSuffix(noPrefix);
+                        std::string expanded = ExpandAbbreviations(base);
+                        unresolvedModels[expanded]++;
+                    }
                     skippedNoModel++;
                     continue;
                 }
@@ -684,6 +756,9 @@ void SpiderManTool::LoadAllWorldGeometries() {
                 }
 
                 if (!hasTransform) {
+                    // Track what models are being skipped due to no transform
+                    std::string modelName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "0x" + std::to_string(pcmHash);
+                    noTransformModels[modelName]++;
                     skippedNoTransform++;
                     continue;
                 }
@@ -730,6 +805,22 @@ void SpiderManTool::LoadAllWorldGeometries() {
         + std::to_string(skippedNoModel) + " unresolved, "
         + std::to_string(skippedNonRenderable) + " non-renderable, "
         + std::to_string(skippedNoTransform) + " no transform");
+
+    // Log top unresolved models
+    Log("=== TOP UNRESOLVED (by count) ===");
+    std::vector<std::pair<std::string, int>> unresolvedVec(unresolvedModels.begin(), unresolvedModels.end());
+    std::sort(unresolvedVec.begin(), unresolvedVec.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (size_t i = 0; i < std::min((size_t)20, unresolvedVec.size()); i++) {
+        Log("  " + unresolvedVec[i].first + ": " + std::to_string(unresolvedVec[i].second) + "x");
+    }
+
+    // Log top no-transform models
+    Log("=== TOP NO-TRANSFORM (by count) ===");
+    std::vector<std::pair<std::string, int>> noTransformVec(noTransformModels.begin(), noTransformModels.end());
+    std::sort(noTransformVec.begin(), noTransformVec.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (size_t i = 0; i < std::min((size_t)20, noTransformVec.size()); i++) {
+        Log("  " + noTransformVec[i].first + ": " + std::to_string(noTransformVec[i].second) + "x");
+    }
 
     pcmDataCache.clear();
 
