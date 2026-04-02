@@ -69,6 +69,9 @@ int main(int, char**) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
+        // Update animation playback
+        tool.UpdateAnimationPlayback(ImGui::GetIO().DeltaTime);
+
         RenderUI(tool);
 
         ImGui::Render();

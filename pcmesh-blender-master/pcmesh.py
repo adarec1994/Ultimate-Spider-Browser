@@ -1,0 +1,1447 @@
+import io
+import os
+import struct
+import ctypes
+import mathutils
+
+from ctypes import *
+from enum import IntEnum
+
+class generic_mash_data_ptrs():
+
+    def __init__(self, arg0, arg1):
+        self.field_0 = arg0
+        self.field_4 = arg1
+
+    def rebase(self, i: int):
+        v8 = i - self.field_0.tell() % i
+        if v8 < i:
+            self.field_0.seek(v8, 1)
+
+    def get(self, t, num = 1):
+        array_t = (t * num)
+        newObj = array_t()
+
+        newObj = array_t.from_buffer_copy(self.field_0.read(sizeof(array_t)))
+        return newObj
+
+
+    def __repr__(self):
+        return f'generic_mash_data_ptrs(field_0 = {hex(self.field_0.tell())}, field_4 = {hex(self.field_4.tell())})'
+
+
+
+class generic_mash_header(Structure):
+    _fields_ = [("safety_key", c_int),
+                ("field_4", c_int),
+                ("field_8", c_int),
+                ("class_id", c_short),
+                ("field_E", c_short)
+                ]
+
+    def __repr__(self):
+        return f'generic_mash_header(safety_key = {hex(self.safety_key)}, field_4={self.field_4}, field_8={hex(self.field_8)})'
+
+    def generate_safety_key(self):
+        return (self.field_8 + 0x7BADBA5D - (self.field_4 & 0xFFFFFFF) + self.class_id + self.field_E) & 0xFFFFFFF | 0x70000000
+
+    def is_flagged(self, f: c_int):
+        return (f & self.field_4) != 0
+
+    def get_mash_data(self) -> c_char_p:
+        return cast(this, c_char_p) + self.field_8
+
+assert(sizeof(generic_mash_header) == 0x10)
+
+class resource_versions(Structure):
+    _fields_ = [("field_0", c_int),
+                ("field_4", c_int),
+                ("field_8", c_int),
+                ("field_C", c_int),
+                ("field_10", c_int)]
+
+assert(sizeof(resource_versions) == 0x14)
+
+class resource_pack_header(Structure):
+    _fields_ = [("field_0", resource_versions),
+                ("field_14", c_int),
+                ("directory_offset", c_int),
+                ("res_dir_mash_size", c_int),
+                ("field_20", c_int),
+                ("field_24", c_int),
+                ("field_28", c_int)
+                ]
+
+assert(sizeof(resource_pack_header) == 0x2C)
+
+
+
+class string_hash(Structure):
+    _fields_ = [("source_hash_code", c_int)]
+
+    def __init__(self):
+        self.source_hash_code = 0
+
+    def __eq__(self, a2):
+        return self.source_hash_code != a2.source_hash_code;
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __lt__(self, other):
+        return self.source_hash_code < other.source_hash_code
+
+    def __gt__(self, other):
+        return self.source_hash_code > other.source_hash_code
+
+    def to_string(self) -> str:
+        return "{:#X}".format(self.source_hash_code)
+
+    def __repr__(self):
+        hash_code = "0x%08X" % self.source_hash_code
+        return f'string_hash(name = {hash_code}'
+
+
+
+
+def tohex(val, nbits):
+  return hex((val + (1 << nbits)) % (1 << nbits))
+
+
+string_hash_dictionary = {}
+
+
+
+resource_key_type_ext = [".NONE", ".PCANIM", ".PCSKEL", ".ALS", ".ENT", ".ENTEXT", ".DDS", ".DDSMP", ".IFL", ".DESC", ".ENS", ".SPL", ".AB", ".QP", ".TRIG", ".PCSX", ".INST", ".FDF", ".PANEL", ".TXT", ".ICN",
+                            ".PCMESH", ".PCMORPH", ".PCMAT", ".COLL", ".PCPACK", ".PCSANIM", ".MSN", ".MARKER", ".HH", ".WAV", ".WBK",
+                            ".M2V", "M2V", ".PFX", ".CSV", ".CLE", ".LIT", ".GRD", ".GLS", ".LOD", ".SIN",
+                            ".GV", ".SV", ".TOKENS", ".DSG", ".PATH", ".PTRL", ".LANG", ".SLF", ".VISEME", ".PCMESHDEF", ".PCMORPHDEF", ".PCMATDEF", ".MUT", ".ASG", ".BAI", ".CUT", ".INTERACT", ".CSV", ".CSV", "._ENTID_", "._ANIMID_", "._REGIONID_", "._AI_GENERIC_ID_", "._RADIOMSG_", "._GOAL_", "._IFC_ATTRIBUTE_", "._SIGNAL_", "._PACKGROUP_",
+                        ]
+assert(resource_key_type_ext[25] == ".PCPACK")
+assert(resource_key_type_ext[48] == ".LANG")
+assert(resource_key_type_ext[49] == ".SLF")
+
+class resource_key(Structure):
+    _fields_ = [("m_hash", string_hash),
+                ("m_type", c_int)
+                ]
+
+    def is_set(self):
+        undefined = string_hash()
+        return self.m_hash != undefined
+
+    def get_type(self):
+        return self.m_type
+
+    def get_platform_ext(self) -> str:
+        return resource_key_type_ext[self.m_type]
+
+    def get_platform_string(self) -> str:
+        h = int(tohex(self.m_hash.source_hash_code, 32), 16)
+        name = string_hash_dictionary.get(h, tohex(self.m_hash.source_hash_code, 32))
+        ext = self.get_platform_ext()
+        return (name + ext)
+
+    def __repr__(self):
+        return f'resource_key(m_hash = {self.m_hash}, m_type = {self.m_type}) => {self.get_platform_string()}'
+
+
+
+
+class resource_location(Structure):
+    _fields_ = [("field_0", resource_key),
+                ("m_offset", c_int),
+                ("m_size", c_int)
+                ]
+
+    def __repr__(self):
+        return f'resource_location(field_0 = {self.field_0}, m_offset = {hex(self.m_offset)}, m_size = {hex(self.m_size)})'
+
+
+
+
+class tlresource_location(Structure):
+    _fields_ = [("name", string_hash),
+                ("type", c_char),
+                ("offset", c_int)
+                ]
+
+    def get_type(self) -> int:
+        return int.from_bytes(self.type, "little")
+
+    def __repr__(self):
+        return f'tlresource_location(name = {self.name}, type = {self.get_type()}, offset={hex(self.offset)})'
+
+
+
+class mashable_vector(Structure):
+    _fields_ = [("m_data", POINTER(c_int)),
+               ("m_size", c_short),
+               ("m_shared", c_bool),
+               ("field_7", c_bool)
+                ]
+
+    def __repr__(self):
+        return f'mashable_vector(m_size={self.m_size}, m_shared={self.m_shared}, ' \
+                f'm_shared={self.from_mash()})'
+
+    def from_mash(self) -> bool:
+        return self.field_7
+
+    def size(self):
+        return self.m_size
+
+    def empty(self) -> bool:
+        return self.size() == 0
+
+    def custom_un_mash(self, a4: generic_mash_data_ptrs) -> generic_mash_data_ptrs:
+        print("custom_un_mash")
+
+        a4.rebase(4)
+        a4.rebase(4)
+
+        array_data = a4.get(c_int, int(self.m_size))
+        self.m_data = cast(array_data, POINTER(c_int))
+
+        a4.rebase(4)
+
+        return a4
+
+    def un_mash(self, a4: generic_mash_data_ptrs) -> generic_mash_data_ptrs:
+        assert(self.from_mash())
+        return self.custom_un_mash(a4)
+
+class mashable_vector__resource_location(Structure):
+    _fields_ = [("m_data", POINTER(resource_location)),
+               ("m_size", c_short),
+               ("m_shared", c_bool),
+               ("field_7", c_bool)
+                ]
+
+    def __repr__(self):
+        return f'mashable_vector(m_size={self.m_size}, m_shared={self.m_shared}, ' \
+                f'm_shared={self.from_mash()})'
+
+    def from_mash(self) -> bool:
+        return self.field_7
+
+    def size(self):
+        return self.m_size
+
+    def empty(self) -> bool:
+        return self.size() == 0
+
+    def custom_un_mash(self, a4: generic_mash_data_ptrs) -> generic_mash_data_ptrs:
+        print("custom_un_mash<resource_location>")
+
+        a4.rebase(8)
+        a4.rebase(4)
+
+        offset = int(a4.field_0.tell())
+        print("0x%08X" % offset)
+
+        array_data = a4.get(resource_location, int(self.m_size))
+        self.m_data = cast(array_data, POINTER(resource_location))
+
+        a4.rebase(4)
+
+        return a4
+
+
+class mashable_vector__tlresource_location(Structure):
+    _fields_ = [("m_data", POINTER(tlresource_location)),
+               ("m_size", c_short),
+               ("m_shared", c_bool),
+               ("field_7", c_bool)
+                ]
+
+    def __repr__(self):
+        return f'mashable_vector(m_size={self.m_size}, m_shared={self.m_shared}, ' \
+                f'm_shared={self.from_mash()})'
+
+    def from_mash(self) -> bool:
+        return self.field_7
+
+    def size(self):
+        return self.m_size
+
+    def empty(self) -> bool:
+        return self.size() == 0
+
+    def custom_un_mash(self, a4: generic_mash_data_ptrs) -> generic_mash_data_ptrs:
+        print("custom_un_mash<tlresource_location>")
+
+        a4.rebase(8)
+        a4.rebase(4)
+
+        offset = int(a4.field_0.tell())
+        print("0x%08X" % offset)
+
+        array_data = a4.get(tlresource_location, int(self.m_size))
+        self.m_data = cast(array_data, POINTER(tlresource_location))
+
+        a4.rebase(4)
+        return a4
+
+    def un_mash(self, a4: generic_mash_data_ptrs) -> generic_mash_data_ptrs:
+        assert(self.from_mash())
+        return self.custom_un_mash(a4)
+
+
+
+TLRESOURCE_TYPE_NONE = 0
+TLRESOURCE_TYPE_TEXTURE = 1
+TLRESOURCE_TYPE_MESH_FILE = 2
+TLRESOURCE_TYPE_MESH = 3
+TLRESOURCE_TYPE_MORPH_FILE = 4
+TLRESOURCE_TYPE_MORPH = 5
+TLRESOURCE_TYPE_MATERIAL_FILE = 6
+TLRESOURCE_TYPE_MATERIAL = 7
+TLRESOURCE_TYPE_ANIM_FILE = 8
+TLRESOURCE_TYPE_ANIM = 9
+TLRESOURCE_TYPE_SCENE_ANIM = 10
+TLRESOURCE_TYPE_SKELETON = 11
+TLRESOURCE_TYPE_Z = 12
+
+
+RESOURCE_KEY_TYPE_NONE = 0
+RESOURCE_KEY_TYPE_MESH_FILE_STRUCT = 51
+RESOURCE_KEY_TYPE_MATERIAL_FILE_STRUCT = 53
+RESOURCE_KEY_TYPE_Z = 70
+
+class resource_directory(Structure):
+    _fields_ = [("parents", mashable_vector),
+                ("resource_locations", mashable_vector__resource_location),
+                ("texture_locations", mashable_vector__tlresource_location),
+                ("mesh_file_locations", mashable_vector__tlresource_location),
+                ("mesh_locations", mashable_vector__tlresource_location),
+                ("morph_file_locations", mashable_vector__tlresource_location),
+                ("morph_locations", mashable_vector__tlresource_location),
+                ("material_file_locations", mashable_vector__tlresource_location),
+                ("material_locations", mashable_vector__tlresource_location),
+                ("anim_file_locations", mashable_vector__tlresource_location),
+                ("anim_locations", mashable_vector__tlresource_location),
+                ("scene_anim_locations", mashable_vector__tlresource_location),
+                ("skeleton_locations", mashable_vector__tlresource_location),
+                ("field_68", mashable_vector),
+                ("field_70", mashable_vector),
+                ("pack_slot", c_int),
+                ("base", c_int),
+                ("field_80", c_int),
+                ("field_84", c_int),
+                ("field_88", c_int),
+                ("type_start_idxs", c_int * 70),
+                ("type_end_idxs", c_int * 70)
+                ]
+
+    def __repr__(self):
+        return f'resource_directory:\n\tparents = {self.parents},\n\tresource_locations = {self.resource_locations},\n\t' \
+               f'texture_locations = {self.texture_locations}, \n\t' \
+               f'mesh_file_locations = {self.mesh_file_locations},\n\tmesh_locations = {self.mesh_locations},\n\t' \
+               f'morph_file_locations = {self.morph_file_locations},\n\tmorph_locations = {self.morph_locations},\n\t' \
+               f'material_file_locations = {self.material_file_locations},\n\tmaterial_locations = {self.material_locations},\n\t' \
+               f'anim_file_locations = {self.anim_file_locations},\n\tanim_locations = {self.anim_locations},\n\t' \
+               f'scene_anim_locations = {self.scene_anim_locations},\n\tskeleton_locations = {self.skeleton_locations}\n )'
+
+
+    def constructor_common(self, a3: int, a5: int, a6: int, a7: int):
+        self.base = a3
+        self.field_80 = a5
+        self.field_84 = a6
+        self.field_88 = a7
+
+    def get_resource_location(self, i: int) -> resource_location:
+        #print("get_resource_location", i)
+
+        assert(i < self.resource_locations.size())
+
+        res = self.resource_locations.m_data[i]
+        return res
+
+    def get_mash_data(self, offset: int) -> int:
+        assert(self.base != 0)
+        return (offset + self.base);
+
+    def get_type_start_idxs(self, p_type: int):
+        assert(p_type > RESOURCE_KEY_TYPE_NONE and p_type < RESOURCE_KEY_TYPE_Z)
+
+        return self.type_start_idxs[p_type];
+
+    def get_resource(self, loc: resource_location):
+        assert(not self.resource_locations.empty())
+
+        v5 = self.get_mash_data(loc.m_offset)
+        return v5
+
+    def get_resource1(self, resource_id: resource_key):
+        assert(resource_id.is_set())
+
+        assert(resource_id.get_type() != RESOURCE_KEY_TYPE_NONE)
+
+        v7 = 0
+        mash_data_size: int = 0
+
+        is_found, found_dir, found_loc = self.find_resource(resource_id)
+        if is_found:
+            mash_data_size = found_loc.m_size
+            v7 = found_dir.get_resource(found_loc, a4)
+
+        return v7, mash_data_size
+
+    def tlresource_type_to_vector(self, a2: int):
+        match a2:
+            case 1:
+                return self.texture_locations;
+            case 2:
+                return self.mesh_file_locations;
+            case 3:
+                return self.mesh_locations;
+            case 4:
+                return self.morph_file_locations;
+            case 5:
+                return self.morph_locations;
+            case 6:
+                return self.material_file_locations;
+            case 7:
+                return self.material_locations;
+            case 8:
+                return self.anim_file_locations;
+            case 9:
+                return self.anim_locations;
+            case 10:
+                return self.scene_anim_locations;
+            case 11:
+                return self.skeleton_locations;
+            case 13:
+                return self.texture_locations;
+            case 14:
+                return self.texture_locations;
+            case 15:
+                return self.texture_locations;
+            case _:
+                assert(0 and "invalid tlresource type");
+
+    def get_resource_count(self, p_type: int):
+        assert(p_type > RESOURCE_KEY_TYPE_NONE and p_type < RESOURCE_KEY_TYPE_Z)
+        return self.type_end_idxs[p_type]
+
+    def get_tlresource_count(self, a1: int) -> int:
+        locations = self.tlresource_type_to_vector(a1);
+        return locations.size();
+
+    def un_mash_start(self, a4: generic_mash_data_ptrs) -> generic_mash_data_ptrs:
+        a4.rebase(8)
+
+        a4 = self.parents.un_mash(a4)
+
+        a4 = self.resource_locations.custom_un_mash(a4)
+
+        a4 = self.texture_locations.custom_un_mash(a4)
+
+        a4 = self.mesh_file_locations.custom_un_mash(a4)
+
+        a4 = self.mesh_locations.custom_un_mash(a4)
+
+        a4 = self.morph_file_locations.custom_un_mash(a4)
+
+        a4 = self.morph_locations.custom_un_mash(a4)
+
+        a4 = self.material_file_locations.custom_un_mash(a4)
+
+        a4 = self.material_locations.custom_un_mash(a4)
+
+        a4 = self.anim_file_locations.custom_un_mash(a4)
+
+        a4 = self.anim_locations.custom_un_mash(a4)
+
+        a4 = self.scene_anim_locations.custom_un_mash(a4)
+
+        a4 = self.skeleton_locations.custom_un_mash(a4)
+
+        def validate(vector, tlresource_type):
+            for i in range(vector.m_size):
+                tlres_loc = vector.m_data[i]
+
+                if tlresource_type == TLRESOURCE_TYPE_TEXTURE:
+                    print(tlres_loc)
+
+                assert(tlres_loc.get_type() == tlresource_type)
+
+        validate(self.texture_locations, TLRESOURCE_TYPE_TEXTURE)
+
+        validate(self.mesh_file_locations, TLRESOURCE_TYPE_MESH_FILE)
+
+        validate(self.mesh_locations, TLRESOURCE_TYPE_MESH)
+
+        validate(self.morph_file_locations, TLRESOURCE_TYPE_MORPH_FILE)
+
+        validate(self.morph_locations, TLRESOURCE_TYPE_MORPH)
+
+        validate(self.material_file_locations, TLRESOURCE_TYPE_MATERIAL_FILE)
+
+        validate(self.material_locations, TLRESOURCE_TYPE_MATERIAL)
+
+        validate(self.anim_file_locations, TLRESOURCE_TYPE_ANIM_FILE)
+
+        validate(self.anim_locations, TLRESOURCE_TYPE_ANIM)
+
+        validate(self.scene_anim_locations, TLRESOURCE_TYPE_SCENE_ANIM)
+
+        validate(self.skeleton_locations, TLRESOURCE_TYPE_SKELETON)
+
+        return a4
+
+
+
+def init():
+        script_dir = os.path.dirname(__file__)
+        string_path = os.path.join(script_dir, "string_hash_dictionary.txt")
+        try:
+            with io.open(string_path, mode="r") as dictionary_file:
+                for i, line in enumerate(dictionary_file):
+                    if i > 1:
+
+                        arr = line.split()
+                        #print(line)
+
+                        if len(arr) != 2:
+                            continue
+
+                        h = int(arr[0], 16)
+                        string_hash_dictionary[h] = arr[1]
+
+                keys = string_hash_dictionary.keys()
+                #print(type(keys))
+
+        except IOError:
+            input("Could not open file!")
+
+        assert(len(string_hash_dictionary) != 0)
+
+
+class vector4d(Structure):
+    _fields_ = [
+                ("arr", c_float * 4),
+                ]
+
+assert(sizeof(vector4d) == 16)
+
+
+class resource_pack_location(Structure):
+    _fields_ = [("loc", resource_location),
+                ("field_10", c_int),
+                ("field_14", c_int),
+                ("field_18", c_int),
+                ("field_1C", c_int),
+                ("prerequisite_offset", c_int),
+                ("prerequisite_count", c_int),
+                ("field_28", c_int),
+                ("field_2C", c_int),
+                ("m_name", c_char * 32)
+                ]
+
+assert(sizeof(resource_pack_location) == 0x50)
+
+class TypeDirectoryEntry(IntEnum):
+    MATERIAL = 1
+    MESH = 2
+
+
+class nglDirectoryEntry(Structure):
+    _fields_ = [("field_0", c_char),
+                ("field_1", c_char),
+                ("field_2", c_char),
+                ("typeDirectoryEntry", c_char),
+                ("field_4", c_int), # <--- this is pointer to the resource (texture, mesh)
+                ("field_8", c_int),
+                ]
+
+assert(sizeof(nglDirectoryEntry) == 0xC)
+
+class Lod(Structure):
+    _fields_ = [
+                ("field_0", c_int),
+                ("field_4", c_float),
+                ]
+
+assert(sizeof(Lod) == 0x8)
+
+class tlHashString(Structure):
+    _fields_ = [
+                ("field_0", c_int),
+                ]
+
+assert(sizeof(tlHashString) == 4)
+
+class nglVertexBuffer(Structure):
+    _fields_ = [
+                ("m_vertexData", c_int),
+                ("Size", c_int), # <---- size of vertex data in bytes
+                ("m_vertexBuffer", c_int)
+            ]
+
+class nglMeshSection(Structure):
+    _fields_ = [
+                ("Name", c_int), # <----- tlFixedString
+                ("Material", c_int), # <----- nglMaterialBase
+                ("NBones", c_int),
+                ("BonesIdx", c_int), # <----- u16
+                ("SphereCenter", vector4d),
+                ("SphereRadius", c_float),
+                ("Flags", c_int),
+                ("m_primitiveType", c_int),
+                ("NIndices", c_int),
+                ("m_indices", c_int), # <--- u16
+                ("m_indexBuffer", c_int),
+                ("NVertices", c_int),
+                ("VertexBuffer", nglVertexBuffer),
+                ("m_stride", c_int),
+                ("field_4C", c_int),
+                ("field_50", c_int),
+                ("VertexDef", c_int),
+                ("field_58", c_int),
+                ("field_5C", c_int)
+                ]
+
+class Section(Structure):
+    _fields_ = [
+                ("field_0", c_int),
+                ("Section", c_int), # <---- nglMeshSection
+                ]
+
+class nglMesh(Structure):
+    _fields_ = [
+                ("Name", c_int), # <----- tlFixedString
+                ("Flags", c_int),
+                ("NSections", c_int),
+                ("Sections", c_int),
+                ("NBones", c_int),
+                ("Bones", c_int),
+                ("NLODs", c_int),
+                ("LODs", c_int),
+                ("field_20", vector4d),
+                ("SphereRadius", c_float),
+                ("File", c_int),
+                ("NextMesh", c_int),
+                ("field_3C", c_int)
+                ]
+
+
+class nglMeshFileHeader(Structure):
+    _fields_ = [
+                ("Tag", c_char * 4),
+                ("Version", c_int),
+                ("NDirectoryEntries", c_int),
+                ("DirectoryEntries", c_int),
+                ("field_10", c_int)
+                ]
+
+
+class tlFixedString(Structure):
+    _fields_ = [
+                ("m_hash", c_int),
+                ("field_4", c_char * 28)
+                ]
+
+
+
+class nglShader(Structure):
+    _fields_ = [
+                ("m_vtbl", c_int),
+                ("field_4", c_int),
+                ("field_8", c_int),
+                ]
+
+class nglTexture(Structure):
+    _fields_ = [
+                ("field_0", c_int),
+                ]
+
+class nglMaterialBase(Structure):
+    _fields_ = [("Name", c_int),
+                ("field_4", POINTER(nglShader)),
+                ("File", c_int),
+                ("NextMaterial", c_int),
+                ("field_10", c_int),
+                ("field_14", c_int),
+                ("field_18", POINTER(tlFixedString)),
+                ("field_1C", POINTER(nglTexture)),
+                ("field_20", POINTER(nglTexture)),
+                ("field_24", POINTER(nglTexture)),
+                ("field_28", vector4d),
+                ("field_38", c_float),
+                ("field_3C", c_int),
+                ("field_40", c_int),
+                ("field_44", c_int),
+                ("m_outlineFeature", c_int),
+                ("m_blend_mode", c_int),
+                ]
+
+#assert(sizeof(nglMaterialBase) == 0x50)
+
+DEV_MODE = 1
+
+def write_indices(resource_file, indices, primitive_type, enable_normals: bool):
+    if primitive_type == 5:
+        face = [indices[0], indices[1], indices[2]]
+        if enable_normals:
+            resource_file.write("f " + ("%d/%d/%d %d/%d/%d %d/%d/%d\n" % (face[0], face[0], face[0],
+                                                             face[1], face[1], face[1],
+                                                             face[2], face[2], face[2])))
+        else:
+            resource_file.write("f " + ("%d/%d %d/%d %d/%d\n" % (face[0], face[0], face[1], face[1], face[2], face[2])))
+
+        for idx in list(indices):
+            face = [face[1], face[2], idx]
+            if len(face) == len(set(face)):
+                if enable_normals:
+                    resource_file.write("f " + ("%d/%d/%d %d/%d/%d %d/%d/%d\n" % (face[0], face[0], face[0],
+                                                                 face[1], face[1], face[1],
+                                                             face[2], face[2], face[2])))
+                else:
+                    resource_file.write("f " + ("%d/%d %d/%d %d/%d\n" % (face[0], face[0], face[1], face[1], face[2], face[2])))
+
+
+    elif primitive_type == 4:
+        N: int = 3
+        assert(len(indices) % 3 == 0)
+        faces  = [indices[n:n+N] for n in range(0, len(indices), N)]
+
+        for face in faces:
+
+            if enable_normals:
+                resource_file.write("f " + ("%d/%d/%d %d/%d/%d %d/%d/%d\n" % (face[0], face[0], face[0],
+                                                             face[1], face[1], face[1],
+                                                             face[2], face[2], face[2])))
+            else:
+                resource_file.write("f " + ("%d/%d %d/%d %d/%d\n" % (face[0], face[0], face[1], face[1], face[2], face[2])))
+
+    else:
+        assert(0)
+
+
+class UserMeshData:
+    """Class to store user mesh data."""
+    def __init__(self, vertices, indices, normals, uvs, bones, bone_indices, bone_weights):
+        self.vertices = vertices
+        self.indices = indices
+        self.normals = normals
+        self.uvs = uvs
+        self.bones= bones
+        self.bone_indices = bone_indices
+        self.bone_weights = bone_weights
+
+    def __repr__(self):
+        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, normals={len(self.normals)}, uvs={len(self.uvs)}, bones={len(self.bones)}, bone_indices={len(self.bone_indices)}, bone_weights={len(self.bone_weights)})"    
+
+
+class SectionExportData:
+    def __init__(self, vertices, triangles, uvs, normals, bone_indices=None, bone_weights=None):
+        self.vertices = vertices
+        self.triangles = triangles
+        self.uvs = uvs
+        self.normals = normals
+        self.bone_indices = bone_indices or []
+        self.bone_weights = bone_weights or []
+
+
+class MeshExportData:
+    def __init__(self, sections):
+        self.sections = sections
+
+class MeshData:
+    """Class to store parsed mesh data."""
+    def __init__(self, name):
+        self.name = name
+        self.sections = []
+        self.bones = []
+
+    def add_section(self, name, section_name, primitive_type, vertices, uvs, normals, indices, materials, bones=None):
+        section_data = {
+            "name": name,
+            "section_name": (
+                section_name if section_name not in (None, "", b"", b"\x00")
+                else (materials[0][0].decode("utf-8").rstrip("\x00") if materials else name)
+            ),
+            "primitive_type": primitive_type,
+            "vertices": vertices,
+            "uvs": uvs,
+            "normals": normals,
+            "indices": indices,
+            "bones": bones,
+            "materials": materials
+        }
+        self.sections.append(section_data)
+
+
+current_path = ""
+DEV_MODE=1
+
+def align_address(size, alignment):
+    return (size + (alignment - 1)) & ~(alignment - 1)
+
+def _entry_type(entry):
+    v = entry.typeDirectoryEntry
+    if isinstance(v, (bytes, bytearray)):
+        return int(v[0])
+    return int(v) & 0xFF
+
+
+def _decode_fixed_string(buffer_bytes, offset):
+    if offset == 0:
+        return ""
+    s = tlFixedString.from_buffer_copy(buffer_bytes[offset : offset + sizeof(tlFixedString)])
+    return s.field_4.decode("utf-8", errors="ignore").rstrip("\x00")
+
+
+def _iter_directory_entries(buffer_bytes, header):
+    for i in range(header.NDirectoryEntries):
+        offset = header.DirectoryEntries + i * sizeof(nglDirectoryEntry)
+        entry = nglDirectoryEntry.from_buffer_copy(buffer_bytes[offset : offset + sizeof(nglDirectoryEntry)])
+        yield i, offset, entry
+
+
+def _find_mesh_entry(buffer_bytes, header, mesh_name=None):
+    fallback = None
+    desired = (mesh_name or "").lower()
+    for _, _, entry in _iter_directory_entries(buffer_bytes, header):
+        if _entry_type(entry) != int(TypeDirectoryEntry.MESH):
+            continue
+        mesh = nglMesh.from_buffer_copy(buffer_bytes[entry.field_4 : entry.field_4 + sizeof(nglMesh)])
+        name = _decode_fixed_string(buffer_bytes, mesh.Name)
+        if fallback is None:
+            fallback = (entry, mesh, name)
+        if desired and name.lower() == desired:
+            return entry, mesh, name
+    return fallback
+
+
+def _read_section_descriptors(buffer_bytes, mesh):
+    sections_t = Section * int(mesh.NSections)
+    sections = sections_t.from_buffer_copy(
+        buffer_bytes[mesh.Sections : mesh.Sections + sizeof(sections_t)]
+    )
+
+    result = []
+    for idx, section in enumerate(sections):
+        sec_off = section.Section
+        sec = nglMeshSection.from_buffer_copy(buffer_bytes[sec_off : sec_off + sizeof(nglMeshSection)])
+        orig_indices = []
+        if sec.NIndices > 0 and sec.m_indices:
+            t_idx = c_ushort * int(sec.NIndices)
+            orig_indices = list(
+                t_idx.from_buffer_copy(
+                    buffer_bytes[sec.m_indices : sec.m_indices + sizeof(t_idx)]
+                )
+            )
+        palette = []
+        if sec.NBones > 0 and sec.BonesIdx:
+            t = c_ushort * int(sec.NBones)
+            palette = list(t.from_buffer_copy(buffer_bytes[sec.BonesIdx : sec.BonesIdx + sizeof(t)]))
+        result.append({
+            "index": idx,
+            "offset": sec_off,
+            "section": sec,
+            "name": _decode_fixed_string(buffer_bytes, sec.Name),
+            "palette": palette,
+            "orig_indices": orig_indices,
+            "orig_nverts": int(sec.NVertices),
+            "orig_nidx": int(sec.NIndices),
+        })
+    return result
+
+
+def _validate_mesh_layout(buffer_bytes, mesh):
+    sections = _read_section_descriptors(buffer_bytes, mesh)
+    size = len(buffer_bytes)
+
+    for item in sections:
+        sec = item["section"]
+        v_off = int(sec.VertexBuffer.m_vertexData)
+        v_size = int(sec.VertexBuffer.Size)
+        if v_off < 0 or v_off + v_size > size:
+            raise ValueError(f"Section {item['index']} vertex buffer is out of file bounds")
+
+        if int(sec.m_stride) * int(sec.NVertices) != v_size:
+            raise ValueError(f"Section {item['index']} has invalid vertex size/stride relationship")
+
+        i_off = int(sec.m_indices)
+        i_count = int(sec.NIndices)
+        if i_count == 0:
+            continue
+        if i_off <= 0 or i_off + i_count * 2 > size:
+            raise ValueError(f"Section {item['index']} index buffer is out of file bounds")
+
+
+def _append_aligned(buffer_bytes, blob, alignment=16):
+    offset = align_address(len(buffer_bytes), alignment)
+    if offset > len(buffer_bytes):
+        buffer_bytes.extend(b"\x00" * (offset - len(buffer_bytes)))
+    buffer_bytes.extend(blob)
+    return offset
+
+
+def _write_or_append_region(buffer_bytes, blob, old_offset, old_capacity, alignment=16):
+    if old_offset and old_capacity >= len(blob):
+        end = old_offset + len(blob)
+        buffer_bytes[old_offset:end] = blob
+        if old_capacity > len(blob):
+            pad_end = old_offset + old_capacity
+            buffer_bytes[end:pad_end] = b"\x00" * (old_capacity - len(blob))
+        return old_offset
+    return _append_aligned(buffer_bytes, blob, alignment)
+
+
+def _triangles_to_strip_indices(triangles):
+    if not triangles:
+        return []
+
+    tris = [tuple(int(v) for v in tri) for tri in triangles]
+
+    edge_to_tris = {}
+    for ti, (a, b, c) in enumerate(tris):
+        e0 = tuple(sorted((a, b)))
+        e1 = tuple(sorted((b, c)))
+        e2 = tuple(sorted((c, a)))
+        edge_to_tris.setdefault(e0, []).append(ti)
+        edge_to_tris.setdefault(e1, []).append(ti)
+        edge_to_tris.setdefault(e2, []).append(ti)
+
+    used = [False] * len(tris)
+    strips = []
+
+    def _extend_forward(strip):
+        while len(strip) >= 2:
+            edge = tuple(sorted((strip[-2], strip[-1])))
+            cands = edge_to_tris.get(edge, [])
+            next_tri = -1
+            next_v = None
+
+            for ti in cands:
+                if used[ti]:
+                    continue
+                tri = tris[ti]
+                if strip[-2] not in tri or strip[-1] not in tri:
+                    continue
+                for v in tri:
+                    if v != strip[-2] and v != strip[-1]:
+                        if len(strip) >= 3 and v == strip[-3]:
+                            continue
+                        next_v = v
+                        next_tri = ti
+                        break
+                if next_tri != -1:
+                    break
+
+            if next_tri == -1:
+                break
+
+            used[next_tri] = True
+            strip.append(next_v)
+
+    for start_idx in range(len(tris)):
+        if used[start_idx]:
+            continue
+
+        a, b, c = tris[start_idx]
+        strip = [a, b, c]
+        used[start_idx] = True
+
+        _extend_forward(strip)
+        strip.reverse()
+        _extend_forward(strip)
+        strip.reverse()
+
+        strips.append(strip)
+
+    stitched = list(strips[0])
+    for strip in strips[1:]:
+        stitched.append(stitched[-1])
+        stitched.append(strip[0])
+        stitched.append(strip[0])
+        stitched.extend(strip[1:])
+
+    if _triangle_multiset(_triangles_from_strip_indices(stitched)) == _triangle_multiset(tris):
+        return stitched
+
+    fallback = []
+    for a, b, c in tris:
+        if not fallback:
+            fallback = [a, b, c]
+            continue
+        last = fallback[-1]
+        fallback.extend([last, last, a, a])
+        if (len(fallback) % 2) == 0:
+            fallback.extend([c, b])
+        else:
+            fallback.extend([b, c])
+    return fallback
+
+
+def _triangles_from_strip_indices(indices):
+    tris = []
+    for i in range(len(indices) - 2):
+        a = indices[i]
+        b = indices[i + 1]
+        c = indices[i + 2]
+        if i % 2 == 1:
+            a, b = b, a
+        if len({a, b, c}) == 3:
+            tris.append((a, b, c))
+    return tris
+
+
+def _triangle_multiset(tris):
+    return sorted(tuple(sorted(t)) for t in tris)
+
+
+def _normalize_weights(weights):
+    total = sum(weights)
+    if total <= 1e-8:
+        return [1.0, 0.0, 0.0, 0.0]
+    return [w / total for w in weights]
+
+
+def _build_section_payload(section_desc, payload):
+    sec = section_desc["section"]
+    stride = int(sec.m_stride)
+    prim = int(sec.m_primitiveType)
+    palette = section_desc["palette"]
+
+    if len(payload.vertices) != len(payload.uvs):
+        raise ValueError(f"Section {section_desc['index']} has mismatched vertex/uv counts")
+
+    if payload.normals and len(payload.normals) != len(payload.vertices):
+        raise ValueError(f"Section {section_desc['index']} has mismatched vertex/normal counts")
+
+    if prim == 4:
+        flat_indices = [i for tri in payload.triangles for i in tri]
+    elif prim == 5:
+        flat_indices = _triangles_to_strip_indices(payload.triangles)
+        orig_indices = section_desc.get("orig_indices", [])
+        if orig_indices:
+            orig_tris = _triangles_from_strip_indices(orig_indices)
+            if len(orig_tris) == len(payload.triangles):
+                if _triangle_multiset(orig_tris) == _triangle_multiset(payload.triangles):
+                    flat_indices = list(orig_indices)
+    else:
+        raise ValueError(f"Unsupported primitive type {prim} in section {section_desc['index']}")
+
+    if payload.vertices and (max(flat_indices) >= len(payload.vertices) or min(flat_indices) < 0):
+        raise ValueError(f"Section {section_desc['index']} generated invalid index range")
+
+    if len(payload.vertices) > 65535:
+        raise ValueError(f"Section {section_desc['index']} exceeds u16 vertex index limit")
+
+    if stride == 64:
+        if len(payload.bone_indices) != len(payload.vertices) or len(payload.bone_weights) != len(payload.vertices):
+            raise ValueError(f"Section {section_desc['index']} requires skinning data for all vertices")
+        vbytes = bytearray()
+        for i, pos in enumerate(payload.vertices):
+            nrm = payload.normals[i] if payload.normals else (0.0, 1.0, 0.0)
+            uv = payload.uvs[i]
+            src_idx = list(payload.bone_indices[i][:4])
+            src_w = list(payload.bone_weights[i][:4])
+            while len(src_idx) < 4:
+                src_idx.append(0)
+                src_w.append(0.0)
+
+            local_idx = []
+            for j, bone_id in enumerate(src_idx):
+                if bone_id < 0 or src_w[j] <= 0.0:
+                    local_idx.append(0.0)
+                    src_w[j] = 0.0
+                    continue
+                if palette:
+                    if bone_id not in palette:
+                        raise ValueError(
+                            f"Section {section_desc['index']} uses bone {bone_id} not in palette"
+                        )
+                    local_idx.append(float(palette.index(bone_id)))
+                else:
+                    local_idx.append(float(bone_id))
+
+            src_w = _normalize_weights(src_w)
+            vbytes.extend(struct.pack(
+                "<3f3f2f4f4f",
+                float(pos[0]), float(pos[1]), float(pos[2]),
+                float(nrm[0]), float(nrm[1]), float(nrm[2]),
+                float(uv[0]), 1.0 - float(uv[1]),
+                float(local_idx[0]), float(local_idx[1]), float(local_idx[2]), float(local_idx[3]),
+                float(src_w[0]), float(src_w[1]), float(src_w[2]), float(src_w[3]),
+            ))
+    elif stride == 12:
+        vbytes = bytearray()
+        for pos in payload.vertices:
+            vbytes.extend(struct.pack(
+                "<3f",
+                float(pos[0]), float(pos[1]), float(pos[2]),
+            ))
+    elif stride == 24:
+        vbytes = bytearray()
+        for i, pos in enumerate(payload.vertices):
+            uv = payload.uvs[i] if payload.uvs else (0.0, 0.0)
+            vbytes.extend(struct.pack(
+                "<3f2fI",
+                float(pos[0]), float(pos[1]), float(pos[2]),
+                float(uv[0]), 1.0 - float(uv[1]),
+                0xFFFFFFFF,
+            ))
+    elif stride in (32, 60):
+        vbytes = bytearray()
+        tail = b"\x00" * (stride - 24)
+        for i, pos in enumerate(payload.vertices):
+            uv = payload.uvs[i] if payload.uvs else (0.0, 0.0)
+            vbytes.extend(struct.pack(
+                "<3f2fI",
+                float(pos[0]), float(pos[1]), float(pos[2]),
+                float(uv[0]), 1.0 - float(uv[1]),
+                0xFFFFFFFF,
+            ))
+            vbytes.extend(tail)
+    else:
+        raise ValueError(f"Unsupported section stride {stride} in section {section_desc['index']}")
+
+    ibytes = b"" if len(flat_indices) == 0 else struct.pack("<" + "H" * len(flat_indices), *flat_indices)
+    return vbytes, ibytes, len(payload.vertices), len(flat_indices)
+
+
+def write_meshfile(filepath, user_mesh, mesh_name=None):
+    with io.open(filepath, "rb") as f:
+        buffer_bytes = bytearray(f.read())
+
+    Header = nglMeshFileHeader.from_buffer_copy(buffer_bytes[:sizeof(nglMeshFileHeader)])
+    assert(Header.Tag == b'PCM ')
+    assert(Header.Version == 0x601)
+    assert(Header.field_10 == 0)
+    found = _find_mesh_entry(buffer_bytes, Header, mesh_name=mesh_name)
+    if found is None:
+        raise ValueError("No mesh entry found in PCMESH")
+
+    entry, mesh, found_name = found
+    print(f"Replacing mesh '{found_name}'")
+
+    sections = _read_section_descriptors(buffer_bytes, mesh)
+    if not isinstance(user_mesh, MeshExportData):
+        raise TypeError("write_meshfile now expects MeshExportData")
+    if len(user_mesh.sections) != len(sections):
+        raise ValueError(
+            f"Section count mismatch: mesh has {len(sections)} sections but export has {len(user_mesh.sections)}"
+        )
+
+    mesh_data_size = 0
+
+    for i, section_desc in enumerate(sections):
+        payload = user_mesh.sections[i]
+        vbytes, ibytes, nverts, nidx = _build_section_payload(section_desc, payload)
+
+        sec_off = section_desc["offset"]
+        sec = section_desc["section"]
+
+        old_vertex_offset = int(sec.VertexBuffer.m_vertexData)
+        old_vertex_capacity = int(sec.VertexBuffer.Size)
+        vertex_offset = _write_or_append_region(
+            buffer_bytes, vbytes, old_vertex_offset, old_vertex_capacity, 16
+        )
+        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.VertexBuffer.offset + nglVertexBuffer.m_vertexData.offset, vertex_offset)
+        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.VertexBuffer.offset + nglVertexBuffer.Size.offset, len(vbytes))
+        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.NVertices.offset, nverts)
+
+        old_index_offset = int(sec.m_indices)
+        old_index_capacity = int(sec.NIndices) * 2
+        if nidx > 0:
+            index_offset = _write_or_append_region(
+                buffer_bytes, ibytes, old_index_offset, old_index_capacity, 16
+            )
+        else:
+            index_offset = 0
+        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.m_indices.offset, index_offset)
+        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.NIndices.offset, nidx)
+        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.field_58.offset, 0)
+
+        prim_type = int(sec.m_primitiveType)
+        if prim_type == 5:
+            mesh_data_size += max(0, nidx - 2)
+        elif prim_type == 4:
+            mesh_data_size += nidx // 3
+
+    struct.pack_into("I", buffer_bytes, entry.field_4 + nglMesh.field_3C.offset, mesh_data_size)
+
+    updated_mesh = nglMesh.from_buffer_copy(
+        buffer_bytes[entry.field_4 : entry.field_4 + sizeof(nglMesh)]
+    )
+    _validate_mesh_layout(buffer_bytes, updated_mesh)
+
+    # Keep pack-like trailing alignment for compatibility.
+    buffer_size = len(buffer_bytes)
+    padding_size = (align_address(buffer_size, 0x1000)) - buffer_size
+    if padding_size > 0:
+        buffer_bytes.extend(b"\x00" * padding_size)
+
+    with io.open(filepath + ".mod", "wb") as f:
+        f.write(buffer_bytes)
+
+    print(f"Successfully updated {filepath}")
+
+def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
+
+    offset = Mesh.Name
+    nameMesh = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
+    ndisplay = nameMesh.field_4.decode("utf-8")
+    if write_obj:
+        folder = 'tmp'
+        try:
+                os.mkdir(folder)
+        except OSError:
+                print ("Creation of the directory %s failed" % folder)
+        else:
+                print ("Successfully created the directory %s " % folder)
+        filepath = os.path.join('.', 'tmp', ndisplay + ".obj")
+        filepath = ''.join(x for x in filepath if x.isprintable())
+        resource_file = open(filepath, mode="w")
+
+    #resource_file.write("MeshName = %s, NSections = %d\n" % (nameMesh.field_4, Mesh.NSections))
+    offset = Mesh.Sections
+    sections_t = Section * int(Mesh.NSections)
+    sections = sections_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(sections_t))])
+
+    prev_NVertices = 0
+    mesh_data = MeshData(name=ndisplay) 
+    
+    offset = Mesh.Bones
+    print(f"nBones = {Mesh.NBones}")
+    for _ in range(Mesh.NBones):
+        mat = struct.unpack_from('16f', buffer_bytes, offset)
+        matrix = [mat[i:i+4] for i in range(0, 16, 4)]
+        mesh_data.bones.append(mathutils.Matrix(matrix))
+        offset += 4 * 4 * 4
+    
+    
+    for idx, section in enumerate(sections):
+        offset = section.Section
+        meshSection = nglMeshSection.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMeshSection))])
+        
+        print(meshSection.Material)
+        
+        offset = meshSection.Name
+        name = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
+        section_name = name.field_4.decode("utf-8").rstrip("\x00")
+        
+        if write_obj:
+                resource_file.write("o " + ndisplay + '_' + str(idx) + '\n')
+
+        #resource_file.write("\nidx_section = %d, name = %s, primitiveType = %d, stride = %d, NIndices = %d, NVertices = %d, SizeVertexDataInBytes = %d\n"
+        #        % (idx, name.field_4, meshSection.m_primitiveType, meshSection.m_stride, meshSection.NIndices, meshSection.NVertices, meshSection.VertexBuffer.Size))
+
+        primCount = 0
+        if meshSection.m_primitiveType == 5:
+            primCount = meshSection.NIndices - 2
+        elif meshSection.m_primitiveType == 4:
+            primCount = meshSection.NIndices / 3
+
+        print("stride = %d" % meshSection.m_stride )
+        #assert(meshSection.m_stride == 64)
+        
+        assert(meshSection.m_stride * meshSection.NVertices == meshSection.VertexBuffer.Size)
+
+        #resource_file.write("NPrimitive = %d\n" % primCount)
+        if meshSection.m_stride == 64:
+            class VertexData(Structure):
+                _fields_ = [
+                    ("pos", c_float * 3),
+                    ("normal", c_float * 3),
+                    ("uv", c_float * 2),
+                    ("bone_indices", c_float * 4),
+                    ("bone_weights", c_float * 4)
+                ]
+
+                def __repr__(self):
+                    return f'VertexData: pos = {list(self.pos)}, normal = {list(self.normal)}, uv = {list(self.uv)}, bone_indices = {list(self.bone_indices)}, bone_weights = {list(self.bone_weights)}'
+
+            assert(sizeof(VertexData) == 0x40)
+        elif meshSection.m_stride == 32 or meshSection.m_stride == 12 or meshSection.m_stride == 24 or meshSection.m_stride == 60:      # @todo: 20
+            class VertexData(Structure):
+                _fields_ = [
+                    ("pos", c_float * 3),
+                    ("uv", c_float * 2),
+                    ("ff", c_float * 1)
+                ]
+
+                def __repr__(self):
+                    return f'VertexData: pos = {list(self.pos)}, uv = {list(self.uv)}'
+
+            assert(sizeof(VertexData) == 0x18)
+        else:
+            raise ValueError(f"Unsupported stride value: {meshSection.m_stride}")
+
+        offset = meshSection.VertexBuffer.m_vertexData
+        print(offset)
+        vertex_data_t = VertexData * int(meshSection.NVertices)
+        vertex_data = vertex_data_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(vertex_data_t))])
+
+        if write_obj:
+                for vtx in vertex_data:
+                        resource_file.write("v " + ("%.6f %.6f %.6f" % (vtx.pos[0], vtx.pos[1], vtx.pos[2])) + '\n')
+                        if meshSection.m_stride > 12:
+                                resource_file.write("vt " + ("%.6f %.6f" % (vtx.uv[0], 1.0 - vtx.uv[1])) + '\n')
+                        if meshSection.m_stride == 64:
+                                resource_file.write("vn " + ("%.6f %.6f %.6f" % (vtx.normal[0], vtx.normal[1], vtx.normal[2])) + '\n')
+                resource_file.write("s off\n")
+
+        offset = meshSection.m_indices
+        indices_data_t = c_ushort * int(meshSection.NIndices)
+        indices = indices_data_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(indices_data_t))])
+
+        print("NIndices = %d" % (meshSection.NIndices))
+
+        if meshSection.NIndices != 0:
+            num_vertices = int(meshSection.NVertices)
+            max_index = max(list(indices))
+            print("max_index = %d, NVertices = %d" % (max_index, num_vertices))
+
+            for i, index in enumerate(indices):
+                indices[i] = prev_NVertices + index + 1
+                
+            if write_obj:
+                write_indices(resource_file, indices, meshSection.m_primitiveType, False)
+        elif meshSection.NVertices == 6:
+            if write_obj:
+                resource_file.write("f " + ("%d %d %d\n" % (1, 2, 3)))
+                resource_file.write("f " + ("%d %d %d\n" % (4, 5, 6)))
+        else:
+
+            print("\nidx_section = %d, name = %s, primitiveType = %d, stride = %d, NIndices = %d, NVertices = %d, SizeVertexDataInBytes = %d\n"
+                % (idx, name.field_4, meshSection.m_primitiveType, meshSection.m_stride, meshSection.NIndices, meshSection.NVertices, meshSection.VertexBuffer.Size))
+            #assert(0)
+
+        prev_NVertices = meshSection.NVertices + prev_NVertices
+
+        #resource_file.write(str(list(indices)) + '\n')
+        if write_obj:
+                resource_file.write("\n\n")
+        vertices = []
+        uvs = []
+        normals = []
+        indices = list(indices_data_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(indices_data_t))]))
+
+        for vtx in vertex_data:
+            vertices.append((
+                round(vtx.pos[0], 6),
+                round(vtx.pos[1], 6),
+                round(vtx.pos[2], 6)
+            ))
+            if hasattr(vtx, 'uv'):
+                uvs.append(tuple(vtx.uv))
+            if hasattr(vtx, 'normal'):
+                normals.append(tuple(vtx.normal))
+
+        local_bones = []
+        if meshSection.m_stride == 64:
+            for vtx in vertex_data:
+                local_bones.append({
+                    "indices": [int(x) for x in vtx.bone_indices],
+                    "weights": [float(x) for x in vtx.bone_weights]
+                })
+                
+        section_bones_idx = []
+        print(f"nbones = {meshSection.NBones}")
+        if meshSection.NBones and meshSection.BonesIdx:
+            off_bones_idx = meshSection.BonesIdx
+            bones_idx_t = c_ushort * int(meshSection.NBones)
+            section_bones_idx = list(bones_idx_t.from_buffer_copy(buffer_bytes[off_bones_idx : (off_bones_idx + sizeof(bones_idx_t))]))
+        
+        bones_mapped = []
+        if local_bones:
+            for v_idx, v in enumerate(local_bones):
+                local_idxs = [int(x) for x in v["indices"]]
+                weights = [float(x) for x in v["weights"]]
+                final_idxs = []
+                if section_bones_idx:
+                    for li in local_idxs:
+                        if li < 0:
+                            final_idxs.append(-1)
+                        elif 0 <= li < len(section_bones_idx):
+                            final_idxs.append(int(section_bones_idx[li]))
+                        else:
+                            final_idxs.append(int(li))
+                else:
+                    final_idxs = [int(li) for li in local_idxs]
+                bones_mapped.append({"indices": final_idxs, "weights": weights})
+        
+        mesh_data.add_section(
+            name=ndisplay + '_' + str(idx),
+            section_name=section_name,
+            primitive_type=meshSection.m_primitiveType,
+            vertices=vertices,
+            uvs=uvs,
+            normals=normals,
+            indices=indices,
+            materials=materials,
+            bones=bones_mapped
+        )        
+    return mesh_data
+
+def read_meshfile(file, write_obj:bool = False):
+    print("Resource pack:", file)
+    current_path = file
+    mesh_data = []
+    with io.open(file, mode="rb") as rPack:
+        buffer_bytes = rPack.read()
+
+        print("0x%02X" % buffer_bytes[0])
+        print("0x%02X" % buffer_bytes[1])
+        print(len(buffer_bytes))
+
+        rPack.seek(0, 2)
+        numOfBytes = rPack.tell()
+        print("Total Size:", numOfBytes, "bytes")
+
+        Header = nglMeshFileHeader.from_buffer_copy(buffer_bytes[0:sizeof(nglMeshFileHeader)])
+        assert(Header.Tag == b'PCM ')
+        assert(Header.Version == 0x601)
+        #assert(Header.NDirectoryEntries == 8)
+        assert(Header.field_10 == 0)
+        
+        
+        materials = []
+
+        for i in range(Header.NDirectoryEntries):
+            print("\nidx = %d" % i)
+
+            offset = Header.DirectoryEntries + i * sizeof(nglDirectoryEntry)
+            print("Offset = 0x%X" % offset);
+
+            entry = nglDirectoryEntry.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglDirectoryEntry))])
+            print("typeDirectoryEntry = %s" % ("MATERIAL" if int.from_bytes(entry.typeDirectoryEntry, byteorder='big') == 1 else "MESH") )
+            print("0x%X 0x%X" % (entry.field_4, entry.field_8))
+
+            type_dir_entry = int.from_bytes(entry.typeDirectoryEntry, byteorder='big')
+            if type_dir_entry == int(TypeDirectoryEntry.MATERIAL):
+
+                offset = entry.field_4
+                Material = nglMaterialBase.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMaterialBase))])
+                print("0x%08X" % Material.Name)
+
+                offset = Material.Name
+                MaterialName = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
+                print("%s" % MaterialName.field_4)
+                
+                offset += sizeof(tlFixedString)
+                matFlag = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
+                offset += sizeof(tlFixedString)
+                
+                texName = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
+                texName = texName.field_4.decode("utf-8")
+                texName = f"{texName.upper()}.DDS"
+                print(f"Texture: {texName}")
+                materials.append([MaterialName.field_4, texName])
+                #assert(Material.field_44 == 1)
+
+            elif type_dir_entry == int(TypeDirectoryEntry.MESH):
+
+                offset = entry.field_4
+                mesh = nglMesh.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMesh))])
+                mesh_data.append(read_mesh(mesh, buffer_bytes, materials, write_obj))
+    print(materials)
+    return mesh_data
+

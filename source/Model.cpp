@@ -1,4 +1,5 @@
 #include "SpiderManTool.h"
+#include "NalIntegration.h"
 #include <glad/glad.h>
 #include <sstream>
 #include <fstream>
@@ -52,7 +53,8 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         uint32_t textureNameOfs = 0;
 
         if (e.size == 80 || e.size == 88) {
-            br.Seek(e.dataOffset + 0x20);
+            // Character materials: diffuse texture at +0x18 (NOT +0x20 which is spheremap)
+            br.Seek(e.dataOffset + 0x18);
             textureNameOfs = br.Read<uint32_t>();
         }
         else {
@@ -65,7 +67,9 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         mat.alphaFlag = ReadStringTableEntry(pcmData, alphaFlagOfs);
         mat.textureName = ReadStringTableEntry(pcmData, textureNameOfs);
         mat.shaderType = shaderType;
-        mat.isTranslucent = (shaderType == 11);
+        // Only "translucent" alpha flags use alpha blending (per openusm shader system)
+        std::string alphaLower = StrToLower(mat.alphaFlag);
+        mat.isTranslucent = (alphaLower.find("translucent") != std::string::npos);
 
         if (meshNameOfs != 0) {
             materialMap[meshNameOfs] = mat;
@@ -126,7 +130,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
 
-    struct Vertex { float x,y,z; float nx,ny,nz; float u,v; };
+    struct Vertex { float x,y,z; float nx,ny,nz; float u,v; float boneIdx[4]; float boneWgt[4]; };
 
     bool loadedFirstLod = false;
     for(auto& inf : infos) {
@@ -212,6 +216,11 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
 
             if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
 
+            // Read per-section bone palette (maps local bone indices to global)
+            // nglMeshSection: NBones at offset +8, BonesIdx at offset +12
+            PCMSectionBonePalette bonePalette;
+            bonePalette.load(pcmData, smOfs);
+
             br.Seek(vofs);
             std::vector<Vertex> vertices;
             bool valid = true;
@@ -224,9 +233,8 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 size_t startV = br.Tell();
                 if (startV + stride > pcmData.size()) { valid = false; break; }
                 Vertex vert;
+                memset(&vert, 0, sizeof(vert));
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
-                vert.nx = 0; vert.ny = 0; vert.nz = 0;
-                vert.u = 0; vert.v = 0;
 
 
                 if (vert.x < bboxMin[0]) bboxMin[0] = vert.x;
@@ -244,6 +252,30 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                     if (startV + 32 <= pcmData.size()) {
                         br.Seek(startV + 24);
                         vert.u = br.Read<float>(); vert.v = br.Read<float>();
+                    }
+                    // Read bone indices and weights (4 floats each, at offset 32 and 48)
+                    if (startV + 64 <= pcmData.size()) {
+                        br.Seek(startV + 32);
+                        for (int bi = 0; bi < 4; bi++) vert.boneIdx[bi] = br.Read<float>();
+                        for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] = br.Read<float>();
+                        // Map local bone indices through section palette to global
+                        if (!bonePalette.palette.empty()) {
+                            for (int bi = 0; bi < 4; bi++) {
+                                int localIdx = (int)vert.boneIdx[bi];
+                                if (localIdx >= 0 && vert.boneWgt[bi] > 0.f)
+                                    vert.boneIdx[bi] = (float)bonePalette.mapIndex(localIdx);
+                                else
+                                    vert.boneWgt[bi] = 0.f;
+                            }
+                        }
+                        // Normalize weights
+                        float wTotal = vert.boneWgt[0] + vert.boneWgt[1] + vert.boneWgt[2] + vert.boneWgt[3];
+                        if (wTotal > 1e-8f) {
+                            float inv = 1.f / wTotal;
+                            for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] *= inv;
+                        } else {
+                            vert.boneWgt[0] = 1.f;
+                        }
                     }
                 } else if (stride == 24) {
                     if (startV + 20 <= pcmData.size()) {
@@ -385,6 +417,8 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0); glEnableVertexAttribArray(0);
             glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
             glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6*sizeof(float))); glEnableVertexAttribArray(2);
+            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(8*sizeof(float))); glEnableVertexAttribArray(3);  // boneIdx
+            glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(12*sizeof(float))); glEnableVertexAttribArray(4); // boneWgt
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
         }
@@ -429,7 +463,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
         Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
 
-    struct Vertex { float x,y,z; float nx,ny,nz; float u,v; };
+    struct Vertex { float x,y,z; float nx,ny,nz; float u,v; float boneIdx[4]; float boneWgt[4]; };
 
     bool loadedFirstLod = false;
     for(auto& inf : infos) {
@@ -515,6 +549,10 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
 
             if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
 
+            // Read per-section bone palette
+            PCMSectionBonePalette bonePalette;
+            bonePalette.load(pcmData, smOfs);
+
             br.Seek(vofs);
             std::vector<Vertex> vertices;
             bool valid = true;
@@ -526,9 +564,8 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                 size_t startV = br.Tell();
                 if (startV + stride > pcmData.size()) { valid = false; break; }
                 Vertex vert;
+                memset(&vert, 0, sizeof(vert));
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
-                vert.nx = 0; vert.ny = 0; vert.nz = 0;
-                vert.u = 0; vert.v = 0;
 
                 if (stride == 64) {
                     if (startV + 24 <= pcmData.size()) {
@@ -538,6 +575,28 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                     if (startV + 32 <= pcmData.size()) {
                         br.Seek(startV + 24);
                         vert.u = br.Read<float>(); vert.v = br.Read<float>();
+                    }
+                    // Read bone indices and weights
+                    if (startV + 64 <= pcmData.size()) {
+                        br.Seek(startV + 32);
+                        for (int bi = 0; bi < 4; bi++) vert.boneIdx[bi] = br.Read<float>();
+                        for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] = br.Read<float>();
+                        if (!bonePalette.palette.empty()) {
+                            for (int bi = 0; bi < 4; bi++) {
+                                int localIdx = (int)vert.boneIdx[bi];
+                                if (localIdx >= 0 && vert.boneWgt[bi] > 0.f)
+                                    vert.boneIdx[bi] = (float)bonePalette.mapIndex(localIdx);
+                                else
+                                    vert.boneWgt[bi] = 0.f;
+                            }
+                        }
+                        float wTotal = vert.boneWgt[0] + vert.boneWgt[1] + vert.boneWgt[2] + vert.boneWgt[3];
+                        if (wTotal > 1e-8f) {
+                            float inv = 1.f / wTotal;
+                            for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] *= inv;
+                        } else {
+                            vert.boneWgt[0] = 1.f;
+                        }
                     }
                 } else if (stride == 24) {
                     if (startV + 20 <= pcmData.size()) {
@@ -669,6 +728,8 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0); glEnableVertexAttribArray(0);
             glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
             glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6*sizeof(float))); glEnableVertexAttribArray(2);
+            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(8*sizeof(float))); glEnableVertexAttribArray(3);
+            glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(12*sizeof(float))); glEnableVertexAttribArray(4);
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
         }
@@ -808,6 +869,9 @@ void SpiderManTool::LoadModelToGL(int index) {
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
     AddMeshFromData(pcmData, e.name, nullptr);
+
+    // Build skeleton visualization from bone data
+    BuildSkeletonVisual(pcmData);
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
@@ -971,6 +1035,10 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
 
             if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
 
+            // Read bone palette for this section
+            PCMSectionBonePalette bonePalette;
+            bonePalette.load(pcmData, smOfs);
+
             SubmeshData sm;
             sm.name = ReadName(meshNameRef);
             sm.textureName = mat.textureName;
@@ -1003,6 +1071,34 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                     br.Seek(startV + 12);
                     nx = br.Read<float>(); ny = br.Read<float>(); nz = br.Read<float>();
                     u = br.Read<float>(); v2 = br.Read<float>();
+
+                    // Read bone indices + weights (4 floats each at offsets 32, 48)
+                    if (startV + 64 <= pcmData.size()) {
+                        br.Seek(startV + 32);
+                        float bIdx[4], bWgt[4];
+                        for (int bi = 0; bi < 4; bi++) bIdx[bi] = br.Read<float>();
+                        for (int bi = 0; bi < 4; bi++) bWgt[bi] = br.Read<float>();
+
+                        // Map through palette
+                        for (int bi = 0; bi < 4; bi++) {
+                            int localIdx = (int)bIdx[bi];
+                            if (localIdx >= 0 && bWgt[bi] > 0.f && !bonePalette.palette.empty())
+                                bIdx[bi] = (float)bonePalette.mapIndex(localIdx);
+                            else if (bWgt[bi] <= 0.f)
+                                bIdx[bi] = 0.f;
+                        }
+                        // Normalize weights
+                        float wTotal = bWgt[0] + bWgt[1] + bWgt[2] + bWgt[3];
+                        if (wTotal > 1e-8f) {
+                            float inv = 1.f / wTotal;
+                            for (int bi = 0; bi < 4; bi++) bWgt[bi] *= inv;
+                        } else {
+                            bWgt[0] = 1.f;
+                        }
+
+                        for (int bi = 0; bi < 4; bi++) sm.joints.push_back((uint16_t)bIdx[bi]);
+                        for (int bi = 0; bi < 4; bi++) sm.weights.push_back(bWgt[bi]);
+                    }
                 } else if (stride == 24) {
                     br.Seek(startV + 12);
                     u = br.Read<float>(); v2 = br.Read<float>();
@@ -1041,7 +1137,51 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
 
     if (submeshes.empty()) return;
 
+    // Check if any submesh has bone data
+    bool hasSkinning = false;
+    for (auto& sm : submeshes) {
+        if (!sm.joints.empty() && !sm.weights.empty()) {
+            hasSkinning = true;
+            break;
+        }
+    }
+
+    // Read bone matrices from PCM for inverse bind matrices
+    // Look for mesh entry to get bone matrices offset
+    PCMBoneMatrices boneMats;
+    for (auto& inf : infos) {
+        if (inf.type != 512) continue;
+        boneMats.load(pcmData, inf.offset);
+        break;
+    }
+
     SkinningGLBWriter writer;
+
+    // If we have skinning data and bone matrices, set up skin nodes
+    int ibmAccessor = -1;
+    if (hasSkinning && !boneMats.matrices.empty()) {
+        totalBones = (uint32_t)boneMats.matrices.size();
+
+        // Add bone nodes
+        for (uint32_t bi = 0; bi < totalBones; bi++) {
+            std::string boneName = "bone_" + std::to_string(bi);
+            int boneNode = writer.AddNode(boneName);
+            writer.AddJoint(boneNode);
+        }
+
+        // Write inverse bind matrices
+        // The PCM stores bind matrices; we use them as-is for the IBM
+        // (Blender/viewers will compute the actual inverse)
+        std::vector<float> ibmData;
+        for (auto& mat : boneMats.matrices) {
+            // Convert row-major 4x4 to column-major for glTF
+            for (int c = 0; c < 4; c++)
+                for (int r = 0; r < 4; r++)
+                    ibmData.push_back(mat[r * 4 + c]);
+        }
+        int ibmView = writer.AddBufferView(ibmData.data(), ibmData.size() * sizeof(float), 0);
+        ibmAccessor = writer.AddAccessor(ibmView, 5126, (int)totalBones, "MAT4");
+    }
 
     for (size_t si = 0; si < submeshes.size(); si++) {
         auto& sm = submeshes[si];
@@ -1060,16 +1200,26 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         int indView = writer.AddBufferView(sm.indices.data(), sm.indices.size() * sizeof(uint16_t), 34963);
         int indAcc = writer.AddAccessor(indView, 5123, (int)sm.indices.size(), "SCALAR");
 
+        int jointAcc = -1, weightAcc = -1;
+        if (!sm.joints.empty() && !sm.weights.empty()) {
+            int jointView = writer.AddBufferView(sm.joints.data(), sm.joints.size() * sizeof(uint16_t), 34962);
+            jointAcc = writer.AddAccessor(jointView, 5123, (int)sm.joints.size() / 4, "VEC4");
+
+            int weightView = writer.AddBufferView(sm.weights.data(), sm.weights.size() * sizeof(float), 34962);
+            weightAcc = writer.AddAccessor(weightView, 5126, (int)sm.weights.size() / 4, "VEC4");
+        }
+
         std::string meshName = sm.name.empty() ? "submesh_" + std::to_string(si) : sm.name;
         int meshIdx = writer.StartMesh(meshName);
-        writer.AddPrimitive(posAcc, normAcc, uvAcc, indAcc, -1, -1, matIdx);
+        writer.AddPrimitive(posAcc, normAcc, uvAcc, indAcc, jointAcc, weightAcc, matIdx);
         writer.EndMesh();
 
-        int nodeIdx = writer.AddNode(meshName, meshIdx);
+        int skinIdx = (hasSkinning && jointAcc >= 0) ? 0 : -1;
+        int nodeIdx = writer.AddNode(meshName, meshIdx, skinIdx);
         writer.AddToScene(nodeIdx);
     }
 
-    writer.WriteToFile(outPath);
+    writer.WriteToFile(outPath, ibmAccessor);
     Log("Converted to: " + outPath);
 }
 
@@ -1248,8 +1398,14 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
         uint32_t meshNameOfs = br.Read<uint32_t>();
         uint32_t alphaFlagOfs = br.Read<uint32_t>();
 
-        br.Seek(e.dataOffset + 0x60);
-        uint32_t textureNameOfs = br.Read<uint32_t>();
+        uint32_t textureNameOfs = 0;
+        if (e.size == 80 || e.size == 88) {
+            br.Seek(e.dataOffset + 0x18);
+            textureNameOfs = br.Read<uint32_t>();
+        } else {
+            br.Seek(e.dataOffset + 0x60);
+            textureNameOfs = br.Read<uint32_t>();
+        }
 
         mat.meshName = readString(meshNameOfs);
         mat.alphaFlag = readString(alphaFlagOfs);
@@ -1436,26 +1592,9 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
             bone.posZ = br.Read<float>();
 
 
-            bone.parentIndex = (i > 0) ? (int)(i - 1) : -1;
-
-
-            if (i == 0) {
-                bone.inferredRole = "Root";
-            } else if (fabs(bone.posX) < 0.2f && bone.posY > 0 && bone.posY < 1.5f) {
-                bone.inferredRole = "Spine";
-            } else if (bone.posX < -0.5f && bone.posY > 0.5f) {
-                bone.inferredRole = "Left Arm/Hand";
-            } else if (bone.posX > 0.5f && bone.posY > 0.5f) {
-                bone.inferredRole = "Right Arm/Hand";
-            } else if (bone.posX < -0.1f && bone.posY < 0.2f) {
-                bone.inferredRole = "Left Leg";
-            } else if (bone.posX > 0.1f && bone.posY < 0.2f) {
-                bone.inferredRole = "Right Leg";
-            } else if (bone.posY > 1.2f) {
-                bone.inferredRole = "Head/Neck";
-            } else {
-                bone.inferredRole = "";
-            }
+            // Parent hierarchy is in nalCompSkeleton (not in PCM bone data)
+            bone.parentIndex = -1;
+            bone.inferredRole = "";
 
             currentPcmDetails.bones.push_back(bone);
         }

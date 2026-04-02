@@ -1,4 +1,5 @@
 #include "Interface.h"
+#include "NalIntegration.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "ImGuiFileDialog.h"
@@ -6,6 +7,7 @@
 #include <string>
 #include <cctype>
 #include <cstdio>
+#include <array>
 
 std::string ToLower(const std::string& str) {
     std::string lower = str;
@@ -96,7 +98,7 @@ void RenderUI(SpiderManTool& tool) {
 
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 320) * 0.5f);
         if (ImGui::Button("Browse to Ultimate Spiderman Directory", ImVec2(320, 50))) {
-            IGFD::FileDialogConfig config; config.path = ".";
+            IGFD::FileDialogConfig config; config.path = tool.searchPath.empty() ? "." : tool.searchPath;
             IGFD::FileDialog::Instance()->OpenDialog("ChooseDirDlgKey", "Choose Directory", nullptr, config);
         }
 
@@ -202,6 +204,79 @@ void RenderUI(SpiderManTool& tool) {
             }
         } else {
             ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up");
+            if (tool.skeletonBoneCount > 0) {
+                ImGui::SetCursorPos(ImVec2(20, 45));
+                ImGui::Checkbox("Show Skeleton", &tool.showSkeleton);
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 0.8f), "(%d bones)", tool.skeletonBoneCount);
+
+                if (tool.showSkeleton && tool.selectedBoneIndex >= 0) {
+                    ImGui::SetCursorPos(ImVec2(20, 70));
+                    int nalIdx = (tool.selectedBoneIndex < (int)tool.nalBoneVboOrder.size())
+                        ? tool.nalBoneVboOrder[tool.selectedBoneIndex] : -1;
+                    std::string boneName = "Bone " + std::to_string(nalIdx);
+                    if (nalIdx >= 0 && tool.loadedSkeleton && tool.loadedSkeleton->bone_map.count(nalIdx)) {
+                        boneName = tool.loadedSkeleton->bone_map.at(nalIdx);
+                    }
+                    std::array<float,3> pos = {0,0,0};
+                    if (nalIdx >= 0 && tool.nalBonePositions.count(nalIdx))
+                        pos = tool.nalBonePositions.at(nalIdx);
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 0.9f), "[%d] %s  (%.2f, %.2f, %.2f)",
+                        nalIdx, boneName.c_str(), pos[0], pos[1], pos[2]);
+                    if (nalIdx >= 0 && tool.loadedSkeleton && tool.loadedSkeleton->parent_map.count(nalIdx)) {
+                        int parentIdx = tool.loadedSkeleton->parent_map.at(nalIdx);
+                        std::string parentName = (parentIdx >= 0 && tool.loadedSkeleton->bone_map.count(parentIdx))
+                            ? tool.loadedSkeleton->bone_map.at(parentIdx) : "ROOT";
+                        ImGui::SetCursorPos(ImVec2(20, 90));
+                        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 0.8f), "Parent: [%d] %s", parentIdx, parentName.c_str());
+                    }
+                    ImGui::SetCursorPos(ImVec2(20, 110));
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 0.8f), "R = Rotate | X/Y/Z = Axis | Esc = Cancel");
+                }
+
+                // Bone selection (click when skeleton is visible)
+                if (tool.showSkeleton && ImGui::IsItemHovered() &&
+                    ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                    !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                    ImVec2 mousePos = ImGui::GetMousePos();
+                    float localX = mousePos.x - winPos.x;
+                    float localY = mousePos.y - winPos.y;
+                    int picked = tool.PickBoneAtScreenPos(localX, localY, winSize.x, winSize.y);
+                    if (picked >= 0) {
+                        tool.selectedBoneIndex = picked;
+                        tool.isRotatingBone = false;
+                    }
+                }
+
+                // R key to start rotation
+                if (tool.selectedBoneIndex >= 0 && ImGui::IsKeyPressed(ImGuiKey_R) && !tool.isRotatingBone) {
+                    tool.isRotatingBone = true;
+                    tool.boneRotationAngle = 0.0f;
+                }
+
+                // Axis selection during rotation
+                if (tool.isRotatingBone) {
+                    if (ImGui::IsKeyPressed(ImGuiKey_X)) tool.boneRotationAxis = 0;
+                    if (ImGui::IsKeyPressed(ImGuiKey_Y)) tool.boneRotationAxis = 1;
+                    if (ImGui::IsKeyPressed(ImGuiKey_Z)) tool.boneRotationAxis = 2;
+
+                    // Mouse movement rotates
+                    float delta = ImGui::GetIO().MouseDelta.x * 0.01f;
+                    if (delta != 0.0f) {
+                        tool.boneRotationAngle += delta;
+                        tool.ApplyBoneRotation(tool.selectedBoneIndex, delta, tool.boneRotationAxis);
+                    }
+
+                    // Left click confirms, Escape cancels
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        tool.isRotatingBone = false;
+                    }
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                        tool.isRotatingBone = false;
+                        tool.ResetBoneRotation();
+                    }
+                }
+            }
         }
 
         tool.RenderModelPreview();
@@ -250,6 +325,15 @@ void RenderUI(SpiderManTool& tool) {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Double-click to load all world areas");
             }
+
+            if (ImGui::Selectable("Extract All World Meshes", false, ImGuiSelectableFlags_AllowDoubleClick)) {
+                if (ImGui::IsMouseDoubleClicked(0)) {
+                    tool.ExtractAllWorldMeshes();
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Double-click to extract all unique PCM meshes as GLB + DDS");
+            }
             ImGui::Separator();
 
             ImGui::BeginChild("PackList", ImVec2(0, 200), true);
@@ -274,6 +358,116 @@ void RenderUI(SpiderManTool& tool) {
             RenderPackNode("Interior Packs", [](const std::string& s) { return IsWorldInteriorPack(s); });
             RenderPackNode("Asset Packs", [](const std::string& s) { return !IsWorldPack(s) && !IsWorldInteriorPack(s); });
             ImGui::EndChild();
+
+            // === Skeleton / Animation Info ===
+            if (tool.loadedSkeleton) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "Skeleton: %s", tool.loadedSkeletonName.c_str());
+                ImGui::Text("  Kind: %s", tool.loadedSkeleton->skeleton_kind.c_str());
+                ImGui::Text("  Bones: %d", (int)tool.loadedSkeleton->bone_map.size());
+                ImGui::Text("  Components: %d", (int)tool.loadedSkeleton->components.size());
+
+                if (ImGui::TreeNode("Bone Hierarchy")) {
+                    for (const auto& [idx, name] : tool.loadedSkeleton->bone_map) {
+                        int parent = tool.loadedSkeleton->parent_map.count(idx) ? tool.loadedSkeleton->parent_map.at(idx) : -1;
+                        std::string parentName = (parent >= 0 && tool.loadedSkeleton->bone_map.count(parent))
+                            ? tool.loadedSkeleton->bone_map.at(parent) : "ROOT";
+                        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f),
+                            "[%d] %s -> %s", idx, name.c_str(), parentName.c_str());
+                    }
+                    ImGui::TreePop();
+                }
+
+                if (ImGui::TreeNode("Components")) {
+                    for (const auto& c : tool.loadedSkeleton->components) {
+                        if (c.type_name.empty() || c.type_name == "Unknown") continue;
+                        std::string label = c.type_name;
+                        if (!c.bone_indices.empty())
+                            label += " (" + std::to_string(c.bone_indices.size()) + " bones)";
+                        if (c.default_pose.valid)
+                            label += " [pose]";
+                        if (c.has_ik)
+                            label += " [IK]";
+                        ImGui::BulletText("%s", label.c_str());
+                    }
+                    ImGui::TreePop();
+                }
+            }
+
+            if (tool.loadedAnimFile && !tool.loadedAnimFile->animations.empty()) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Animations: %s", tool.loadedAnimName.c_str());
+                ImGui::Text("  Count: %d", (int)tool.loadedAnimFile->animations.size());
+
+                if (ImGui::TreeNode("Animation List")) {
+                    for (int ai = 0; ai < (int)tool.loadedAnimFile->animations.size(); ai++) {
+                        const auto& a = tool.loadedAnimFile->animations[ai];
+                        bool isSelected = (tool.selectedAnimIndex == ai);
+                        char label[256];
+                        snprintf(label, sizeof(label), "[%d] %s (%d frames%s%s)",
+                            ai, a.name.c_str(), a.frame_count,
+                            a.is_looping() ? ", loop" : "",
+                            a.is_scene_anim() ? ", scene" : "");
+
+                        if (ImGui::Selectable(label, isSelected)) {
+                            tool.selectedAnimIndex = ai;
+                            tool.currentAnimFrame = 0;
+                            tool.animPlaybackTime = 0.f;
+                            tool.isAnimPlaying = false;
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+
+                if (tool.selectedAnimIndex >= 0 && tool.selectedAnimIndex < (int)tool.loadedAnimFile->animations.size()) {
+                    const auto& selAnim = tool.loadedAnimFile->animations[tool.selectedAnimIndex];
+                    ImGui::Separator();
+                    ImGui::Text("Selected: %s", selAnim.name.c_str());
+                    ImGui::Text("  Frames: %d  Duration: %.3fs", selAnim.frame_count, selAnim.duration);
+                    ImGui::Text("  T_scale: %.6f", selAnim.t_scale);
+                    ImGui::Text("  Decoded comps: %d", (int)selAnim.components.size());
+
+                    // Frame scrubber
+                    int maxFrame = std::max(0, selAnim.frame_count - 1);
+                    ImGui::SliderInt("Frame", &tool.currentAnimFrame, 0, maxFrame);
+
+                    if (tool.isAnimPlaying) {
+                        if (ImGui::Button("Pause")) tool.isAnimPlaying = false;
+                    } else {
+                        if (ImGui::Button("Play")) {
+                            tool.isAnimPlaying = true;
+                            tool.animPlaybackTime = (float)tool.currentAnimFrame *
+                                (selAnim.duration > 0.f ? selAnim.duration / (float)selAnim.frame_count : 1.f / 30.f);
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Reset")) {
+                        tool.currentAnimFrame = 0;
+                        tool.animPlaybackTime = 0.f;
+                        tool.isAnimPlaying = false;
+                    }
+
+                    // Show decoded track values for current frame
+                    if (!selAnim.components.empty() && ImGui::TreeNode("Track Values")) {
+                        for (const auto& comp : selAnim.components) {
+                            char compLabel[64];
+                            snprintf(compLabel, sizeof(compLabel), "Comp %d (mask=0x%X, %d tracks)",
+                                comp.comp_ix, comp.mask, comp.ntracks);
+                            if (ImGui::TreeNode(compLabel)) {
+                                int frame = tool.currentAnimFrame;
+                                if (frame < (int)comp.decoded.frames.size()) {
+                                    const auto& fv = comp.decoded.frames[frame];
+                                    for (int t = 0; t < (int)fv.size(); t++) {
+                                        ImGui::Text("  [%d] = %.6f", t, fv[t]);
+                                    }
+                                }
+                                ImGui::TreePop();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                }
+            }
 
             ImGui::Separator();
 

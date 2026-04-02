@@ -1,4 +1,5 @@
 #include "SpiderManTool.h"
+#include "NalIntegration.h"
 #include <fstream>
 #include <sstream>
 
@@ -131,6 +132,10 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     });
 
     Log("Opened " + fs::path(path).filename().string());
+
+    // Auto-detect and load skeleton/animation from pack
+    LoadSkeletonForCurrentPack();
+    LoadAnimationForCurrentPack();
 }
 
 void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {

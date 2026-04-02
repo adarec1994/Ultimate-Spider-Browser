@@ -1,4 +1,5 @@
 #include "SpiderManTool.h"
+#include "NalIntegration.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -469,4 +470,182 @@ void SpiderManTool::SelectGlobalSearchResult(int index) {
             break;
         }
     }
+}
+
+int SpiderManTool::FindEntryBySignature(uint32_t sig) const {
+    for (int i = 0; i < (int)entries.size(); i++) {
+        const auto& e = entries[i];
+        if (e.offset + 4 > pcPackData.size()) continue;
+        uint32_t fileSig;
+        memcpy(&fileSig, &pcPackData[e.offset], 4);
+        if (fileSig == sig) return i;
+    }
+    return -1;
+}
+
+void SpiderManTool::LoadSkeletonForCurrentPack() {
+    loadedSkeleton.reset();
+    loadedSkeletonName.clear();
+    if (pcPackData.empty() || entries.empty()) return;
+
+    // Search entries for skeleton data (class field matches nalSkeletonFileHeader)
+    // Skeleton files start with a uint32 class value, then version.
+    // We look for entries that aren't PCM or DDS and try parsing them.
+    for (int i = 0; i < (int)entries.size(); i++) {
+        const auto& e = entries[i];
+        if (e.isPcm || e.isDds) continue;
+        if (e.size < 80 || e.offset + e.size > pcPackData.size()) continue;
+
+        // Check if it looks like a skeleton file: version should be reasonable
+        uint32_t cls, ver;
+        memcpy(&cls, &pcPackData[e.offset], 4);
+        memcpy(&ver, &pcPackData[e.offset + 4], 4);
+
+        // nalSkeletonFile versions we know: character skeletons have version patterns
+        // Generic skeletons have version 0x10200
+        // Character skeletons: check for name/category fields at offset 8..72
+        // Quick heuristic: the name field starts at offset 8, should have readable ASCII
+        bool looksLikeSkel = false;
+        if (ver == 0x10200) {
+            looksLikeSkel = true; // Generic skeleton
+        } else if (ver > 0 && ver < 0x100000) {
+            // Check name bytes for printable ASCII
+            int printable = 0;
+            for (size_t j = e.offset + 12; j < e.offset + 40 && j < pcPackData.size(); j++) {
+                uint8_t c = pcPackData[j];
+                if (c == 0) break;
+                if (c >= 32 && c < 127) printable++;
+            }
+            if (printable >= 3) looksLikeSkel = true;
+        }
+
+        if (!looksLikeSkel) continue;
+
+        // Write temp file and parse
+        std::string tempPath = "temp_skel.pcskel";
+        {
+            std::ofstream tmp(tempPath, std::ios::binary);
+            if (!tmp.is_open()) continue;
+            tmp.write((const char*)&pcPackData[e.offset], e.size);
+        }
+
+        auto skel = std::make_shared<NalSkeletonData>();
+        try {
+            *skel = ParseNalSkeleton(tempPath);
+        } catch (const std::exception& ex) {
+            Log("Skeleton parse error: " + std::string(ex.what()));
+            std::remove(tempPath.c_str());
+            continue;
+        } catch (...) {
+            Log("Skeleton parse error (unknown)");
+            std::remove(tempPath.c_str());
+            continue;
+        }
+        std::remove(tempPath.c_str());
+
+        if (!skel->bone_map.empty() || !skel->generic_nodes.empty()) {
+            loadedSkeleton = skel;
+            loadedSkeletonName = skel->name;
+            Log("Loaded skeleton: " + skel->name + " (" +
+                std::to_string(skel->bone_map.size()) + " bones, " +
+                std::to_string(skel->components.size()) + " components) [" +
+                skel->skeleton_kind + "]");
+
+            // Log component types
+            for (const auto& c : skel->components) {
+                if (!c.type_name.empty() && c.type_name != "Unknown") {
+                    std::string info = "  Component: " + c.type_name;
+                    if (!c.bone_indices.empty())
+                        info += " (" + std::to_string(c.bone_indices.size()) + " bone refs)";
+                    if (c.default_pose.valid)
+                        info += " [has default pose]";
+                    Log(info);
+                }
+            }
+
+            // Log bone hierarchy
+            for (const auto& [idx, name] : skel->bone_map) {
+                int parent = skel->parent_map.count(idx) ? skel->parent_map.at(idx) : -1;
+                std::string parentName = (parent >= 0 && skel->bone_map.count(parent))
+                    ? skel->bone_map.at(parent) : "ROOT";
+                Log("  Bone[" + std::to_string(idx) + "] " + name + " -> " + parentName);
+            }
+            return;
+        }
+    }
+}
+
+void SpiderManTool::LoadAnimationForCurrentPack() {
+    loadedAnimFile.reset();
+    loadedAnimName.clear();
+    selectedAnimIndex = -1;
+    currentAnimFrame = 0;
+    isAnimPlaying = false;
+    if (pcPackData.empty() || entries.empty()) return;
+
+    // Search for PCANIM container (signature 0x00010101)
+    for (int i = 0; i < (int)entries.size(); i++) {
+        const auto& e = entries[i];
+        if (e.isPcm || e.isDds) continue;
+        if (e.size < 64 || e.offset + e.size > pcPackData.size()) continue;
+
+        uint32_t sig;
+        memcpy(&sig, &pcPackData[e.offset], 4);
+        if (sig != 0x00010101) continue; // NAL_ANIM_CONTAINER
+
+        std::string tempPath = "temp_anim.pcanim";
+        {
+            std::ofstream tmp(tempPath, std::ios::binary);
+            if (!tmp.is_open()) continue;
+            tmp.write((const char*)&pcPackData[e.offset], e.size);
+        }
+
+        NalSkeletonData* skelPtr = loadedSkeleton ? loadedSkeleton.get() : nullptr;
+        auto animFile = std::make_shared<NalAnimFile>(ParseNalAnimation(tempPath, skelPtr, true));
+        std::remove(tempPath.c_str());
+
+        if (!animFile->animations.empty()) {
+            loadedAnimFile = animFile;
+            loadedAnimName = animFile->name;
+            Log("Loaded " + std::to_string(animFile->animations.size()) + " animations from: " + animFile->name);
+
+            for (size_t a = 0; a < animFile->animations.size(); a++) {
+                const auto& anim = animFile->animations[a];
+                std::string info = "  [" + std::to_string(a) + "] " + anim.name;
+                info += " frames=" + std::to_string(anim.frame_count);
+                info += " dur=" + std::to_string(anim.duration);
+                if (anim.is_looping()) info += " [loop]";
+                if (anim.is_scene_anim()) info += " [scene]";
+                info += " comps=" + std::to_string(anim.components.size());
+                Log(info);
+            }
+            return;
+        }
+    }
+}
+
+void SpiderManTool::UpdateAnimationPlayback(float deltaTime) {
+    if (!isAnimPlaying || !loadedAnimFile || selectedAnimIndex < 0) return;
+    if (selectedAnimIndex >= (int)loadedAnimFile->animations.size()) return;
+
+    const auto& anim = loadedAnimFile->animations[selectedAnimIndex];
+    if (anim.frame_count <= 0) return;
+
+    animPlaybackTime += deltaTime;
+
+    float frameDuration = (anim.duration > 0.f && anim.frame_count > 1)
+        ? anim.duration / (float)(anim.frame_count - 1) : (1.f / 30.f);
+
+    int newFrame = (int)(animPlaybackTime / frameDuration);
+
+    if (anim.is_looping()) {
+        newFrame = newFrame % anim.frame_count;
+    } else {
+        if (newFrame >= anim.frame_count) {
+            newFrame = anim.frame_count - 1;
+            isAnimPlaying = false;
+        }
+    }
+
+    currentAnimFrame = newFrame;
 }

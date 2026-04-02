@@ -2,10 +2,18 @@
 #include "Helpers.h"
 #include <filesystem>
 #include <map>
+#include <array>
 #include <iostream>
 #include <glad/glad.h>
 #include "imgui_hex.h"
 #include <functional>
+#include <optional>
+#include <memory>
+
+// Forward declarations for NAL types (full defs in NalIntegration.h)
+struct NalSkeletonData;
+struct NalAnimFile;
+struct NalAnimEntry;
 
 namespace fs = std::filesystem;
 
@@ -264,6 +272,7 @@ public:
     unsigned int msRbo = 0;
 
     unsigned int modelProgram = 0;
+    unsigned int skeletonProgram = 0; // Separate shader for skeleton (solid color, no lighting)
     std::vector<RenderMesh> previewMeshes;
 
     std::map<uint32_t, unsigned int> textureCache;
@@ -288,6 +297,43 @@ public:
     void LoadSelectedMeshPcmData();
 
     bool isWorldMode = false;
+
+    // Skeleton visualization & bone manipulation
+    bool showSkeleton = false;
+    int selectedBoneIndex = -1;
+    bool isRotatingBone = false;
+    float boneRotationAngle = 0.0f;
+    int boneRotationAxis = 1; // 0=X, 1=Y, 2=Z
+
+    unsigned int skeletonVao = 0;
+    unsigned int skeletonVbo = 0;
+    int skeletonBoneCount = 0;
+    int skeletonLineVertCount = 0; // number of line vertices after bone points in VBO
+
+    struct BoneData {
+        float bindMatrix[16];     // Original 4x4 matrix from PCM
+        float invBindMatrix[16];  // Inverse of bind matrix
+        float position[3];       // Model-space position (mat[12..14])
+    };
+    std::vector<BoneData> skeletonBones;
+
+    // Per-vertex skinning data (for bone deformation)
+    struct VertexSkinData {
+        int boneIndices[4];   // Global bone indices (-1 = unused)
+        float weights[4];     // Bone weights
+    };
+
+    void BuildSkeletonVisual(const std::vector<uint8_t>& pcmData);
+    void RenderSkeletonOverlay();
+    int PickBoneAtScreenPos(float screenX, float screenY, float vpW, float vpH);
+    void ApplyBoneRotation(int boneIdx, float angle, int axis);
+    void ResetBoneRotation();
+
+    // NAL-computed bone world positions (keyed by global NAL bone index)
+    std::map<int, std::array<float,3>> nalBonePositions;
+    std::vector<int> nalBoneVboOrder; // VBO index → NAL global index
+    int nalMaxBoneIndex = -1;
+    void ComputeNALBonePositions();
     float modelCenter[3] = {0.0f, 0.0f, 0.0f};
     float modelRadius = 1.0f;
     float camPos[3] = {0.0f, 10.0f, 50.0f};
@@ -334,6 +380,7 @@ public:
     void LoadBackgroundMeshes();
     void LoadSkybox();
     void LoadAllWorldGeometries();
+    void LoadPackEntities(const std::string& packFilePath, const float* baseTransform);
 
 
     std::vector<GlobalSearchResult> globalSearchResults;
@@ -344,4 +391,20 @@ public:
     void SelectGlobalSearchResult(int index);
 
     void ExportSelectedWorldMesh(bool asGlb);
+    void ExtractAllWorldMeshes();
+
+    // === NAL Skeleton / Animation support ===
+    std::shared_ptr<NalSkeletonData> loadedSkeleton;
+    std::shared_ptr<NalAnimFile>     loadedAnimFile;
+    int selectedAnimIndex = -1;
+    int currentAnimFrame  = 0;
+    bool isAnimPlaying    = false;
+    float animPlaybackTime = 0.f;
+    std::string loadedSkeletonName;
+    std::string loadedAnimName;
+
+    void LoadSkeletonForCurrentPack();
+    void LoadAnimationForCurrentPack();
+    void UpdateAnimationPlayback(float deltaTime);
+    int FindEntryBySignature(uint32_t sig) const;
 };
