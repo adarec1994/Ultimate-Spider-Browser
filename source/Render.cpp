@@ -6,8 +6,408 @@
 #include <fstream>
 #include <algorithm>
 #include <map>
+#include <functional>
+#include <cmath>
 
-static const int MAX_BONES = 48; // Must stay under GL_MAX_VERTEX_UNIFORM_COMPONENTS (48*16=768 floats)
+static const int MAX_BONES = 64;        // per-section shader palette, matching OpenUSM
+static const int MAX_GLOBAL_BONES = 256;
+
+static void Mat4Identity(float* m) {
+    memset(m, 0, sizeof(float) * 16);
+    m[0] = 1.0f;
+    m[5] = 1.0f;
+    m[10] = 1.0f;
+    m[15] = 1.0f;
+}
+
+static void Mat4Multiply(const float* a, const float* b, float* out) {
+    float r[16];
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            r[col * 4 + row] =
+                a[0 * 4 + row] * b[col * 4 + 0] +
+                a[1 * 4 + row] * b[col * 4 + 1] +
+                a[2 * 4 + row] * b[col * 4 + 2] +
+                a[3 * 4 + row] * b[col * 4 + 3];
+        }
+    }
+    memcpy(out, r, sizeof(r));
+}
+
+static void Mat4TransformPoint(const float* m, const float* in, float* out) {
+    out[0] = m[0] * in[0] + m[4] * in[1] + m[8]  * in[2] + m[12];
+    out[1] = m[1] * in[0] + m[5] * in[1] + m[9]  * in[2] + m[13];
+    out[2] = m[2] * in[0] + m[6] * in[1] + m[10] * in[2] + m[14];
+}
+
+static void Mat4TransformVec4(const float* m, const float* in, float* out) {
+    out[0] = m[0] * in[0] + m[4] * in[1] + m[8]  * in[2] + m[12] * in[3];
+    out[1] = m[1] * in[0] + m[5] * in[1] + m[9]  * in[2] + m[13] * in[3];
+    out[2] = m[2] * in[0] + m[6] * in[1] + m[10] * in[2] + m[14] * in[3];
+    out[3] = m[3] * in[0] + m[7] * in[1] + m[11] * in[2] + m[15] * in[3];
+}
+
+static void Mat4AxisRotation(int axis, float angle, float* m) {
+    Mat4Identity(m);
+    float c = cosf(angle);
+    float s = sinf(angle);
+    if (axis == 0) {
+        m[5] = c;  m[6] = s;
+        m[9] = -s; m[10] = c;
+    } else if (axis == 1) {
+        m[0] = c;  m[2] = -s;
+        m[8] = s;  m[10] = c;
+    } else {
+        m[0] = c;  m[1] = s;
+        m[4] = -s; m[5] = c;
+    }
+}
+
+static void Mat4PivotEuler(const std::array<float, 3>& angles, const float* pivot, float* out) {
+    float rx[16], ry[16], rz[16], tmp[16], rot[16];
+    Mat4AxisRotation(0, angles[0], rx);
+    Mat4AxisRotation(1, angles[1], ry);
+    Mat4AxisRotation(2, angles[2], rz);
+    Mat4Multiply(ry, rx, tmp);
+    Mat4Multiply(rz, tmp, rot);
+
+    memcpy(out, rot, sizeof(float) * 16);
+    float rotatedPivot[3];
+    Mat4TransformPoint(rot, pivot, rotatedPivot);
+    out[12] = pivot[0] - rotatedPivot[0];
+    out[13] = pivot[1] - rotatedPivot[1];
+    out[14] = pivot[2] - rotatedPivot[2];
+}
+
+static bool HasAnyRotation(const std::array<float, 3>& angles) {
+    return fabsf(angles[0]) > 0.00001f || fabsf(angles[1]) > 0.00001f || fabsf(angles[2]) > 0.00001f;
+}
+
+struct QuatWXYZ {
+    float w = 1.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+static QuatWXYZ QuatNormalize(QuatWXYZ q) {
+    float len2 = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
+    if (len2 <= 1e-20f) return {};
+    float inv = 1.0f / sqrtf(len2);
+    q.w *= inv;
+    q.x *= inv;
+    q.y *= inv;
+    q.z *= inv;
+    return q;
+}
+
+static QuatWXYZ QuatFromXYZ(float x, float y, float z) {
+    float w2 = 1.0f - (x * x + y * y + z * z);
+    return QuatNormalize({sqrtf(fabsf(w2)), x, y, z});
+}
+
+static QuatWXYZ QuatFromNal(const NalQuat& q) {
+    return QuatNormalize({q.w, q.x, q.y, q.z});
+}
+
+static QuatWXYZ QuatInverse(QuatWXYZ q) {
+    q = QuatNormalize(q);
+    return {q.w, -q.x, -q.y, -q.z};
+}
+
+static QuatWXYZ QuatMul(QuatWXYZ a, QuatWXYZ b) {
+    a = QuatNormalize(a);
+    b = QuatNormalize(b);
+    return QuatNormalize({
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+    });
+}
+
+static QuatWXYZ QuatAxisAngle(int axis, float angle) {
+    float half = angle * 0.5f;
+    float s = sinf(half);
+    float c = cosf(half);
+    if (axis == 0) return QuatNormalize({c, s, 0.0f, 0.0f});
+    if (axis == 1) return QuatNormalize({c, 0.0f, s, 0.0f});
+    return QuatNormalize({c, 0.0f, 0.0f, s});
+}
+
+static QuatWXYZ QuatFromYZAngles(float yAngle, float zAngle) {
+    return QuatMul(QuatAxisAngle(1, yAngle), QuatAxisAngle(2, zAngle));
+}
+
+static float FingerTipHingeAngle(float angle, bool isThumb) {
+    if (!isThumb) return angle;
+    float tip = 2.0f * angle;
+    float halfPi = 1.57079632679f;
+    if (tip > halfPi) return halfPi;
+    if (tip < -halfPi) return -halfPi;
+    return tip;
+}
+
+static void Mat4FromQuat(QuatWXYZ q, float* m) {
+    q = QuatNormalize(q);
+    Mat4Identity(m);
+
+    // Matches Blender plugin pcanim_transforms._mat_from_quat_pos:
+    // NAL engine quats are conjugated before becoming engine matrices.
+    float x = -q.x;
+    float y = -q.y;
+    float z = -q.z;
+    float xx = x * x;
+    float yy = y * y;
+    float zz = z * z;
+    float xy = x * y;
+    float xz = x * z;
+    float yz = y * z;
+    float wx = q.w * x;
+    float wy = q.w * y;
+    float wz = q.w * z;
+
+    m[0]  = 1.0f - 2.0f * (yy + zz);
+    m[1]  = 2.0f * (xy + wz);
+    m[2]  = 2.0f * (xz - wy);
+    m[4]  = 2.0f * (xy - wz);
+    m[5]  = 1.0f - 2.0f * (xx + zz);
+    m[6]  = 2.0f * (yz + wx);
+    m[8]  = 2.0f * (xz + wy);
+    m[9]  = 2.0f * (yz - wx);
+    m[10] = 1.0f - 2.0f * (xx + yy);
+}
+
+static void Mat4BuildTwistLineXform(const std::array<float, 3>& pos, float angle, float* m) {
+    float s = sinf(angle);
+    float c = cosf(angle);
+    Mat4Identity(m);
+    m[9] = -c;
+    m[5] = s;
+    m[10] = s;
+    m[6] = c;
+    m[12] = pos[0];
+    m[13] = pos[1];
+    m[14] = pos[2];
+}
+
+static void Mat4Fing52HingeLocal(float angle, const std::array<float, 3>& pos, float* m) {
+    float s = sinf(angle);
+    float c = cosf(angle);
+    Mat4Identity(m);
+    m[0] = c;
+    m[2] = s;
+    m[8] = -s;
+    m[10] = c;
+    m[12] = pos[0];
+    m[13] = pos[1];
+    m[14] = pos[2];
+}
+
+static void Vec3Sub(const float* a, const float* b, float* out) {
+    out[0] = a[0] - b[0];
+    out[1] = a[1] - b[1];
+    out[2] = a[2] - b[2];
+}
+
+static void Vec3Scale(const float* a, float s, float* out) {
+    out[0] = a[0] * s;
+    out[1] = a[1] * s;
+    out[2] = a[2] * s;
+}
+
+static float Vec3Len(const float* v) {
+    return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+static void Vec3Normalize(float* v) {
+    float len = Vec3Len(v);
+    if (len <= 1e-12f) {
+        v[0] = 0.0f;
+        v[1] = 0.0f;
+        v[2] = 0.0f;
+        return;
+    }
+    float inv = 1.0f / len;
+    v[0] *= inv;
+    v[1] *= inv;
+    v[2] *= inv;
+}
+
+static float Vec3DotLocal(const float* a, const float* b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void Vec3CrossLocal(const float* a, const float* b, float* out) {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static void Mat4ComposeBasis(const float* xAxis, const float* yAxis, const float* zAxis,
+                             const float* pos, float* out) {
+    Mat4Identity(out);
+    out[0] = xAxis[0]; out[1] = xAxis[1]; out[2] = xAxis[2];
+    out[4] = yAxis[0]; out[5] = yAxis[1]; out[6] = yAxis[2];
+    out[8] = zAxis[0]; out[9] = zAxis[1]; out[10] = zAxis[2];
+    out[12] = pos[0]; out[13] = pos[1]; out[14] = pos[2];
+}
+
+static void Mat4AxisVec(const float* m, int axis, float* out) {
+    const int base = axis * 4;
+    out[0] = m[base + 0];
+    out[1] = m[base + 1];
+    out[2] = m[base + 2];
+}
+
+static void Mat4ProjectPointOntoXform(const float* point, const float* xform, float* out) {
+    out[0] = xform[12] + point[0] * xform[0] + point[1] * xform[4] + point[2] * xform[8];
+    out[1] = xform[13] + point[0] * xform[1] + point[1] * xform[5] + point[2] * xform[9];
+    out[2] = xform[14] + point[0] * xform[2] + point[1] * xform[6] + point[2] * xform[10];
+}
+
+static void RemapNalIkRows(float* m) {
+    float x[3] = {m[0], m[1], m[2]};
+    float y[3] = {m[4], m[5], m[6]};
+    float z[3] = {m[8], m[9], m[10]};
+    m[0] = -x[0]; m[1] = -x[1]; m[2] = -x[2];
+    m[4] = -z[0]; m[5] = -z[1]; m[6] = -z[2];
+    m[8] = -y[0]; m[9] = -y[1]; m[10] = -y[2];
+}
+
+static void SolveNalIk(const float* baseModelMatrix,
+                       const std::array<float, 3>& baseJoint,
+                       const float* targetModelMatrix,
+                       const NalIKData& ikData,
+                       float spinAngle,
+                       bool armHeuristic,
+                       bool mirrorArm,
+                       float* upperOut,
+                       float* lowerOut) {
+    float baseJointArr[3] = {baseJoint[0], baseJoint[1], baseJoint[2]};
+    float modelBaseJoint[3];
+    Mat4ProjectPointOntoXform(baseJointArr, baseModelMatrix, modelBaseJoint);
+
+    float targetPos[3] = {targetModelMatrix[12], targetModelMatrix[13], targetModelMatrix[14]};
+    float targetDir[3];
+    Vec3Sub(targetPos, modelBaseJoint, targetDir);
+    float dist = Vec3Len(targetDir);
+    if (dist <= 1e-12f) dist = 1e-12f;
+    Vec3Scale(targetDir, 1.0f / dist, targetDir);
+
+    float cosUpper = dist * ikData.fUpperIKc + (1.0f / dist) * ikData.fUpperIKInvc;
+    float cosLower = dist * ikData.fLowerIKc + (1.0f / dist) * ikData.fLowerIKInvc;
+    cosUpper = std::max(-1.0f, std::min(1.0f, cosUpper));
+    cosLower = std::max(-1.0f, std::min(1.0f, cosLower));
+    float sinUpper = sqrtf(std::max(0.0f, 1.0f - cosUpper * cosUpper));
+    float sinLower = sqrtf(std::max(0.0f, 1.0f - cosLower * cosLower));
+
+    float midDir[3];
+    if (!armHeuristic) {
+        float targetY[3];
+        Mat4AxisVec(targetModelMatrix, 1, targetY);
+        Vec3CrossLocal(targetDir, targetY, midDir);
+    } else {
+        float row0[3], row1[3], row2[3];
+        Mat4AxisVec(baseModelMatrix, 0, row0);
+        Mat4AxisVec(baseModelMatrix, 1, row1);
+        Mat4AxisVec(baseModelMatrix, 2, row2);
+        if (mirrorArm) {
+            row1[0] = -row1[0]; row1[1] = -row1[1]; row1[2] = -row1[2];
+            Vec3CrossLocal(row1, targetDir, midDir);
+        } else {
+            Vec3CrossLocal(targetDir, row1, midDir);
+        }
+        float sign = Vec3DotLocal(targetDir, row1);
+        float adjusted[3];
+        if (sign < 0.0f) {
+            float negSum[3] = {-row0[0] - row2[0], -row0[1] - row2[1], -row0[2] - row2[2]};
+            adjusted[0] = midDir[0] * (sign + 1.0f) + negSum[0] * (-sign);
+            adjusted[1] = midDir[1] * (sign + 1.0f) + negSum[1] * (-sign);
+            adjusted[2] = midDir[2] * (sign + 1.0f) + negSum[2] * (-sign);
+        } else {
+            float diff[3] = {row2[0] - row0[0], row2[1] - row0[1], row2[2] - row0[2]};
+            adjusted[0] = midDir[0] * (1.0f - sign) + diff[0] * sign;
+            adjusted[1] = midDir[1] * (1.0f - sign) + diff[1] * sign;
+            adjusted[2] = midDir[2] * (1.0f - sign) + diff[2] * sign;
+        }
+        memcpy(midDir, adjusted, sizeof(adjusted));
+    }
+
+    float zAxis[3], yAxis[3], xAxis[3] = {targetDir[0], targetDir[1], targetDir[2]};
+    Vec3CrossLocal(targetDir, midDir, zAxis);
+    Vec3Normalize(zAxis);
+    Vec3CrossLocal(zAxis, targetDir, yAxis);
+    float basis[16];
+    Mat4ComposeBasis(xAxis, yAxis, zAxis, modelBaseJoint, basis);
+
+    float sinTwist = sinf(spinAngle);
+    float cosTwist = cosf(spinAngle);
+    float zero[3] = {0.0f, 0.0f, 0.0f};
+    float upperX[3] = {cosUpper, sinUpper * cosTwist, sinUpper * sinTwist};
+    float upperY[3] = {-sinUpper, cosUpper * cosTwist, cosUpper * sinTwist};
+    float upperZ[3] = {0.0f, -sinTwist, cosTwist};
+    float upperLocal[16];
+    Mat4ComposeBasis(upperX, upperY, upperZ, zero, upperLocal);
+    Mat4Multiply(basis, upperLocal, upperOut);
+
+    float lowerPos[3] = {
+        ikData.fUpperArmLength * cosUpper,
+        cosTwist * (ikData.fUpperArmLength * sinUpper),
+        sinTwist * (ikData.fUpperArmLength * sinUpper)
+    };
+    float lowerX[3] = {cosLower, -(sinLower * cosTwist), -(sinLower * sinTwist)};
+    float lowerY[3] = {sinLower, cosLower * cosTwist, cosLower * sinTwist};
+    float lowerZ[3] = {0.0f, -sinTwist, cosTwist};
+    float lowerLocal[16];
+    Mat4ComposeBasis(lowerX, lowerY, lowerZ, lowerPos, lowerLocal);
+    Mat4Multiply(basis, lowerLocal, lowerOut);
+
+    RemapNalIkRows(upperOut);
+    RemapNalIkRows(lowerOut);
+}
+
+static QuatWXYZ QuatFromMat4(const float* m) {
+    float m00 = m[0],  m01 = m[4],  m02 = m[8];
+    float m10 = m[1],  m11 = m[5],  m12 = m[9];
+    float m20 = m[2],  m21 = m[6],  m22 = m[10];
+
+    QuatWXYZ q;
+    float trace = m00 + m11 + m22;
+    if (trace > 0.0f) {
+        float s = sqrtf(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        float s = sqrtf(std::max(1e-20f, 1.0f + m00 - m11 - m22)) * 2.0f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        float s = sqrtf(std::max(1e-20f, 1.0f + m11 - m00 - m22)) * 2.0f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        float s = sqrtf(std::max(1e-20f, 1.0f + m22 - m00 - m11)) * 2.0f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+
+    return QuatNormalize({q.w, -q.x, -q.y, -q.z});
+}
+
+static bool GetDefaultQuat(const NalComponentData* comp, int index, QuatWXYZ& out) {
+    if (!comp || index < 0 || index >= (int)comp->default_pose.quats.size()) return false;
+    out = QuatFromNal(comp->default_pose.quats[index]);
+    return true;
+}
 
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
@@ -291,20 +691,29 @@ void SpiderManTool::InitModelPreview() {
         "uniform mat4 view;\n"
         "uniform mat4 projection;\n"
         "uniform bool useSkinning;\n"
-        "uniform mat4 boneMatrices[48];\n"
+        "uniform mat4 boneMatrices[64];\n"
         "void main() {\n"
         "    vec4 skinnedPos;\n"
         "    vec3 skinnedNorm;\n"
         "    if (useSkinning && (boneWeights.x + boneWeights.y + boneWeights.z + boneWeights.w) > 0.01) {\n"
         "        mat4 skinMat = mat4(0.0);\n"
+        "        float usedWeight = 0.0;\n"
         "        for (int i = 0; i < 4; i++) {\n"
-        "            int idx = int(boneIndices[i]);\n"
-        "            if (idx >= 0 && idx < 48 && boneWeights[i] > 0.0) {\n"
-        "                skinMat += boneWeights[i] * boneMatrices[idx];\n"
+        "            int idx = int(boneIndices[i] + 0.5);\n"
+        "            float w = boneWeights[i];\n"
+        "            if (idx >= 0 && idx < 64 && w > 0.0) {\n"
+        "                skinMat += w * boneMatrices[idx];\n"
+        "                usedWeight += w;\n"
         "            }\n"
         "        }\n"
-        "        skinnedPos = skinMat * vec4(pos, 1.0);\n"
-        "        skinnedNorm = mat3(skinMat) * normal;\n"
+        "        if (usedWeight > 0.001) {\n"
+        "            if (usedWeight < 0.999) skinMat += (1.0 - usedWeight) * mat4(1.0);\n"
+        "            skinnedPos = skinMat * vec4(pos, 1.0);\n"
+        "            skinnedNorm = mat3(skinMat) * normal;\n"
+        "        } else {\n"
+        "            skinnedPos = vec4(pos, 1.0);\n"
+        "            skinnedNorm = normal;\n"
+        "        }\n"
         "    } else {\n"
         "        skinnedPos = vec4(pos, 1.0);\n"
         "        skinnedNorm = normal;\n"
@@ -552,19 +961,21 @@ void SpiderManTool::RenderModelPreview() {
     GLint locUseSkinning = glGetUniformLocation(modelProgram, "useSkinning");
     GLint locBoneMatrices = glGetUniformLocation(modelProgram, "boneMatrices");
 
-    // Bone matrix data at function scope so skeleton overlay can access it
+    int pcmBoneCount = std::min((int)skeletonBones.size(), MAX_GLOBAL_BONES);
+
+    // Global skin matrices are keyed by actual PCM/NAL bone index. They are
+    // remapped to each mesh section's local palette before draw, like OpenUSM.
     bool skinningActive = false;
-    std::vector<float> boneMatData(MAX_BONES * 16, 0.f);
+    std::vector<float> globalBoneMatData(MAX_GLOBAL_BONES * 16, 0.f);
     // Identity = rest pose (vertices are already in bind pose, so identity = no deformation)
-    for (int i = 0; i < MAX_BONES; i++) {
-        boneMatData[i*16+0] = 1.f; boneMatData[i*16+5] = 1.f;
-        boneMatData[i*16+10] = 1.f; boneMatData[i*16+15] = 1.f;
+    for (int i = 0; i < MAX_GLOBAL_BONES; i++) {
+        Mat4Identity(&globalBoneMatData[i * 16]);
     }
 
     // For skeleton overlay: track world-space bone positions (animated or bind pose)
     // These are the BIND positions by default, updated if animation is active
-    std::vector<float> bonePosWorld(MAX_BONES * 3, 0.f);
-    for (int i = 0; i < skeletonBoneCount && i < MAX_BONES; i++) {
+    std::vector<float> bonePosWorld(MAX_GLOBAL_BONES * 3, 0.f);
+    for (int i = 0; i < pcmBoneCount; i++) {
         bonePosWorld[i*3+0] = skeletonBones[i].position[0];
         bonePosWorld[i*3+1] = skeletonBones[i].position[1];
         bonePosWorld[i*3+2] = skeletonBones[i].position[2];
@@ -573,207 +984,821 @@ void SpiderManTool::RenderModelPreview() {
     // Compute and upload bone matrices if animation is selected
     if (loadedAnimFile && loadedSkeleton && selectedAnimIndex >= 0 &&
         selectedAnimIndex < (int)loadedAnimFile->animations.size() &&
-        skeletonBoneCount > 0) {
+        pcmBoneCount > 0) {
 
         const auto& anim = loadedAnimFile->animations[selectedAnimIndex];
-        int frame = currentAnimFrame;
+        int playbackFrameCount = anim.playback_frame_count();
+        int frame = std::max(0, std::min(currentAnimFrame, std::max(0, playbackFrameCount - 1)));
 
-        // --- Step 1: Collect per-bone local rotation quaternions from decoded tracks ---
-        // quat as (x,y,z,w), default = identity (0,0,0,1)
-        struct BoneAnimQuat { float x=0, y=0, z=0, w=1; bool hasData=false; };
-        std::vector<BoneAnimQuat> boneLocalQuats(MAX_BONES);
-        // Track position offsets for fakeroot/IK
-        float rootOffset[3] = {0,0,0};
+        struct BonePoseDelta {
+            QuatWXYZ rot;
+            bool hasRot = false;
+        };
+        std::vector<BonePoseDelta> poseDeltas(MAX_GLOBAL_BONES);
+        float rootOffset[3] = {0.0f, 0.0f, 0.0f};
+        std::map<int, std::array<float, 16>> runtimeWorld;
 
-        // Helper: find skeleton component by type
-        auto findSkelComp = [&](uint32_t type1, uint32_t type2 = 0) -> const NalComponentData* {
+        auto parentOf = [&](int idx) -> int {
+            auto it = loadedSkeleton->parent_map.find(idx);
+            if (it == loadedSkeleton->parent_map.end()) return -1;
+            int parent = it->second;
+            return (parent >= 0 && parent < pcmBoneCount && parent != idx) ? parent : -1;
+        };
+
+        std::vector<float> restLocal(MAX_GLOBAL_BONES * 16, 0.0f);
+        std::vector<float> animLocal(MAX_GLOBAL_BONES * 16, 0.0f);
+        std::vector<float> animWorld(MAX_GLOBAL_BONES * 16, 0.0f);
+        for (int i = 0; i < MAX_GLOBAL_BONES; ++i) {
+            Mat4Identity(&restLocal[i * 16]);
+            Mat4Identity(&animLocal[i * 16]);
+            Mat4Identity(&animWorld[i * 16]);
+        }
+
+        std::vector<QuatWXYZ> restLocalQuat(MAX_GLOBAL_BONES);
+        std::vector<uint8_t> hasRestLocalQuat(MAX_GLOBAL_BONES, 0);
+        for (int i = 0; i < pcmBoneCount; ++i) {
+            int parent = parentOf(i);
+            if (parent >= 0) {
+                Mat4Multiply(skeletonBones[parent].invBindMatrix, skeletonBones[i].bindMatrix, &restLocal[i * 16]);
+            } else {
+                memcpy(&restLocal[i * 16], skeletonBones[i].bindMatrix, sizeof(float) * 16);
+            }
+
+            restLocalQuat[i] = QuatFromMat4(&restLocal[i * 16]);
+            hasRestLocalQuat[i] = 1;
+        }
+
+        auto findComponentForAnim = [&](const NalAnimComponent& comp) -> const NalComponentData* {
+            if (comp.slot_ix >= 0 && comp.slot_ix < (int)loadedSkeleton->components.size()) {
+                const auto& bySlot = loadedSkeleton->components[comp.slot_ix];
+                if (nal_type_to_comp_id(bySlot.type_id) == comp.comp_ix) return &bySlot;
+            }
             for (const auto& sc : loadedSkeleton->components) {
-                if (sc.type_id == type1 || (type2 && sc.type_id == type2))
-                    return &sc;
+                if (nal_type_to_comp_id(sc.type_id) == comp.comp_ix) return &sc;
             }
             return nullptr;
         };
 
-        // Helper: set bone quat from track data
-        auto setBoneQuat = [&](int boneIdx, float qx, float qy, float qz) {
-            if (boneIdx < 0 || boneIdx >= MAX_BONES) return;
-            float w2 = 1.f - (qx*qx + qy*qy + qz*qz);
-            boneLocalQuats[boneIdx] = {qx, qy, qz, sqrtf(fabsf(w2)), true};
+        auto setBoneDeltaQuat = [&](int boneIdx, QuatWXYZ delta) {
+            if (boneIdx < 0 || boneIdx >= pcmBoneCount) return;
+            auto& dst = poseDeltas[boneIdx];
+            dst.rot = dst.hasRot ? QuatMul(dst.rot, delta) : QuatNormalize(delta);
+            dst.hasRot = true;
         };
 
-        // Helper: apply masked quats to bone array
-        auto applyMaskedQuats = [&](const std::vector<float>& fv, uint32_t mask,
-                                     const std::vector<int>& bones, int maxBits) {
-            int trackIdx = 0;
-            for (int bit = 0; bit < maxBits; bit++) {
-                if (!(mask & (1u << bit))) continue;
-                if (trackIdx + 2 >= (int)fv.size()) break;
-                if (bit < (int)bones.size())
-                    setBoneQuat(bones[bit], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
-                trackIdx += 3;
+        auto setAbsoluteTrackQuat = [&](int boneIdx, QuatWXYZ q, bool hasDefault, QuatWXYZ defaultQ) {
+            if (boneIdx < 0 || boneIdx >= pcmBoneCount) return;
+            if (hasRestLocalQuat[boneIdx]) {
+                defaultQ = restLocalQuat[boneIdx];
+                hasDefault = true;
+            }
+            QuatWXYZ delta = hasDefault ? QuatMul(QuatInverse(defaultQ), q) : q;
+            setBoneDeltaQuat(boneIdx, delta);
+        };
+
+        auto setTrackXYZ = [&](int boneIdx, float x, float y, float z, const NalComponentData* sc, int defaultIdx) {
+            QuatWXYZ defaultQ;
+            bool hasDefault = GetDefaultQuat(sc, defaultIdx, defaultQ);
+            setAbsoluteTrackQuat(boneIdx, QuatFromXYZ(x, y, z), hasDefault, defaultQ);
+        };
+
+        auto setTrackXYZWithDefault = [&](int boneIdx, float x, float y, float z, bool hasDefault, QuatWXYZ defaultQ) {
+            setAbsoluteTrackQuat(boneIdx, QuatFromXYZ(x, y, z), hasDefault, defaultQ);
+        };
+
+        auto consumeXYZ = [](const std::vector<float>& values, int& cursor, float out[3]) -> bool {
+            if (cursor + 2 >= (int)values.size()) return false;
+            out[0] = values[cursor++];
+            out[1] = values[cursor++];
+            out[2] = values[cursor++];
+            return true;
+        };
+
+        auto defaultQuatOrIdentity = [&](const NalComponentData* compData, int index) -> QuatWXYZ {
+            QuatWXYZ q;
+            return GetDefaultQuat(compData, index, q) ? q : QuatWXYZ{};
+        };
+
+        auto matFromQuatPos = [&](QuatWXYZ q, const std::array<float, 3>& pos, float* out) {
+            Mat4FromQuat(q, out);
+            out[12] = pos[0];
+            out[13] = pos[1];
+            out[14] = pos[2];
+        };
+
+        auto storeRuntimeWorld = [&](int boneIdx, const float* m) {
+            if (boneIdx < 0 || boneIdx >= pcmBoneCount) return;
+            auto& dst = runtimeWorld[boneIdx];
+            memcpy(dst.data(), m, sizeof(float) * 16);
+        };
+
+        auto getRuntimeWorld = [&](int boneIdx, float* out) -> bool {
+            auto it = runtimeWorld.find(boneIdx);
+            if (it == runtimeWorld.end()) return false;
+            memcpy(out, it->second.data(), sizeof(float) * 16);
+            return true;
+        };
+
+        auto localToRuntimeParent = [&](const float* local, int parentBoneIdx, float* out) {
+            float parent[16];
+            if (getRuntimeWorld(parentBoneIdx, parent)) {
+                Mat4Multiply(parent, local, out);
+            } else if (parentBoneIdx >= 0 && parentBoneIdx < pcmBoneCount) {
+                Mat4Multiply(skeletonBones[parentBoneIdx].bindMatrix, local, out);
+            } else {
+                memcpy(out, local, sizeof(float) * 16);
             }
         };
 
+        auto applyMaskedLocalQuats = [&](const NalComponentData* sc, const std::vector<float>& values,
+                                         uint32_t mask, int maxBits) {
+            if (!sc) return;
+            int cursor = 0;
+            for (int bit = 0; bit < maxBits; ++bit) {
+                if ((mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(values, cursor, xyz)) break;
+                if (bit < (int)sc->bone_indices.size())
+                    setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+        };
+
+        bool animHasStdLegs = false;
+        bool animHasStdArms = false;
         for (const auto& comp : anim.components) {
+            if (!comp.decoded.frames.empty()) {
+                animHasStdLegs = animHasStdLegs || comp.comp_ix == NalComp::LEGS;
+                animHasStdArms = animHasStdArms || comp.comp_ix == NalComp::ARMS;
+            }
+        }
+        bool solveLegsIk = !animHasStdLegs;
+        bool solveArmsIk = !animHasStdArms;
+
+        std::vector<const NalAnimComponent*> sortedComponents;
+        sortedComponents.reserve(anim.components.size());
+        for (const auto& comp : anim.components) sortedComponents.push_back(&comp);
+        std::sort(sortedComponents.begin(), sortedComponents.end(),
+            [](const NalAnimComponent* a, const NalAnimComponent* b) {
+                int as = (a->slot_ix >= 0) ? a->slot_ix : (1 << 30);
+                int bs = (b->slot_ix >= 0) ? b->slot_ix : (1 << 30);
+                if (as != bs) return as < bs;
+                return a->comp_ix < b->comp_ix;
+            });
+
+        for (const NalAnimComponent* compPtr : sortedComponents) {
+            const NalAnimComponent& comp = *compPtr;
             if (frame < 0 || frame >= (int)comp.decoded.frames.size()) continue;
             const auto& fv = comp.decoded.frames[frame];
+            const NalComponentData* sc = findComponentForAnim(comp);
+            if (!sc) continue;
+            if (comp.comp_ix == NalComp::LEGS_IK && animHasStdLegs) continue;
+            if (comp.comp_ix == NalComp::ARMS_IK && animHasStdArms) continue;
 
+            int cursor = 0;
             if (comp.comp_ix == NalComp::TORSO_HEAD || comp.comp_ix == NalComp::TORSO_HEAD_STD) {
-                const auto* sc = findSkelComp(NalCompType::TorsoHead_TwoNeck, NalCompType::TorsoHead_OneNeck);
-                if (!sc || sc->bone_indices.size() < 6) continue;
+                if (sc->bone_indices.size() < TorsoBone::COUNT) continue;
                 int roles[] = {TorsoBone::SPINE, TorsoBone::SPINE1, TorsoBone::SPINE2, TorsoBone::NECK, TorsoBone::HEAD};
-                int trackIdx = 0;
-                for (int qi = 0; qi < 5; qi++) {
-                    if (!(comp.mask & (1u << qi))) continue;
-                    if (trackIdx + 2 >= (int)fv.size()) break;
-                    setBoneQuat(sc->bone_indices[roles[qi]], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
-                    trackIdx += 3;
+                QuatWXYZ torsoState[6];
+                for (int i = 0; i < 6; ++i) torsoState[i] = defaultQuatOrIdentity(sc, i);
+                std::array<float, 3> pelvisPos = sc->default_pose.pelvis_pos;
+
+                for (int bit = 0; bit < 5; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    torsoState[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    setAbsoluteTrackQuat(sc->bone_indices[roles[bit]], torsoState[bit], true, defaultQuatOrIdentity(sc, bit));
                 }
-                if (comp.mask & 0x20 && trackIdx + 5 < (int)fv.size()) {
-                    setBoneQuat(sc->bone_indices[TorsoBone::PELVIS], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
+                if (comp.mask & 0x20) {
+                    float xyz[3];
+                    if (consumeXYZ(fv, cursor, xyz)) {
+                        torsoState[5] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                        setAbsoluteTrackQuat(sc->bone_indices[TorsoBone::PELVIS], torsoState[5], true, defaultQuatOrIdentity(sc, 5));
+                    }
+                    float loc[3];
+                    if (consumeXYZ(fv, cursor, loc)) {
+                        pelvisPos = {loc[0], loc[1], loc[2]};
+                        rootOffset[0] += loc[0] - sc->default_pose.pelvis_pos[0];
+                        rootOffset[1] += loc[1] - sc->default_pose.pelvis_pos[1];
+                        rootOffset[2] += loc[2] - sc->default_pose.pelvis_pos[2];
+                    }
+                }
+
+                if (sc->offset_locs.size() >= 5) {
+                    float local[16];
+                    float world[16];
+                    int pelvis = sc->bone_indices[TorsoBone::PELVIS];
+                    matFromQuatPos(torsoState[5], pelvisPos, world);
+                    storeRuntimeWorld(pelvis, world);
+
+                    for (int i = 0; i < 5; ++i) {
+                        int childRole = roles[i];
+                        int child = sc->bone_indices[childRole];
+                        int parent = sc->bone_indices[childRole - 1];
+                        matFromQuatPos(torsoState[i], sc->offset_locs[i], local);
+                        localToRuntimeParent(local, parent, world);
+                        storeRuntimeWorld(child, world);
+                    }
+
+                    if (sc->type_id == NalCompType::TorsoHead_TwoNeck &&
+                        sc->bone_indices.size() > TorsoBone::NECK_AUX) {
+                        int neckAux = sc->bone_indices[TorsoBone::NECK_AUX];
+                        QuatWXYZ emptyQ = QuatNormalize({
+                            sc->empty_neck_orient[3],
+                            sc->empty_neck_orient[0],
+                            sc->empty_neck_orient[1],
+                            sc->empty_neck_orient[2]
+                        });
+                        matFromQuatPos(emptyQ, sc->empty_neck_pos, local);
+                        localToRuntimeParent(local, sc->bone_indices[TorsoBone::SPINE2], world);
+                        storeRuntimeWorld(neckAux, world);
+                    }
                 }
             }
             else if (comp.comp_ix == NalComp::LEGS) {
-                const auto* sc = findSkelComp(NalCompType::LegsFeet_Compressed);
-                if (sc && sc->bone_indices.size() >= 8) applyMaskedQuats(fv, comp.mask, sc->bone_indices, 8);
-            }
-            else if (comp.comp_ix == NalComp::LEGS_IK) {
-                const auto* sc = findSkelComp(NalCompType::LegsFeet_IK);
-                if (!sc || sc->bone_indices.size() < 8) continue;
-                int trackIdx = 0;
-                for (int bit = 0; bit < 2; bit++) {
-                    if (!(comp.mask & (1u << bit))) continue;
-                    if (trackIdx + 2 >= (int)fv.size()) break;
-                    setBoneQuat(sc->bone_indices[bit], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
-                    trackIdx += 3;
+                if (sc->bone_indices.size() < LegBone::COUNT) continue;
+                QuatWXYZ legState[8];
+                for (int i = 0; i < 8; ++i) legState[i] = defaultQuatOrIdentity(sc, i);
+                for (int bit = 0; bit < 8; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    legState[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    setAbsoluteTrackQuat(sc->bone_indices[bit], legState[bit], true, defaultQuatOrIdentity(sc, bit));
                 }
-                for (int bit = 2; bit < 4; bit++) {
-                    if (!(comp.mask & (1u << bit))) continue;
-                    if (trackIdx + 2 >= (int)fv.size()) break;
-                    setBoneQuat(sc->bone_indices[bit], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
-                    trackIdx += 7;
+
+                if (sc->offset_locs.size() >= 8) {
+                    int parentRole[8] = {LegBone::L_FOOT, LegBone::R_FOOT, LegBone::L_CALF, LegBone::R_CALF,
+                                         -1, LegBone::L_THIGH, -1, LegBone::R_THIGH};
+                    int order[8] = {LegBone::L_THIGH, LegBone::L_CALF, LegBone::L_FOOT, LegBone::L_TOE,
+                                    LegBone::R_THIGH, LegBone::R_CALF, LegBone::R_FOOT, LegBone::R_TOE};
+                    int anchor = sc->bone_indices[LegBone::PELVIS];
+                    float local[16];
+                    float world[16];
+                    for (int oi = 0; oi < 8; ++oi) {
+                        int role = order[oi];
+                        int bone = sc->bone_indices[role];
+                        matFromQuatPos(legState[role], sc->offset_locs[role], local);
+                        int parent = parentRole[role] >= 0 ? sc->bone_indices[parentRole[role]] : anchor;
+                        localToRuntimeParent(local, parent, world);
+                        storeRuntimeWorld(bone, world);
+                    }
                 }
             }
             else if (comp.comp_ix == NalComp::ARMS) {
-                const auto* sc = findSkelComp(NalCompType::ArmsHands_Compressed);
-                if (sc && sc->bone_indices.size() >= 8) applyMaskedQuats(fv, comp.mask, sc->bone_indices, 8);
+                if (sc->bone_indices.size() < ArmBone::COUNT) continue;
+                QuatWXYZ armState[8];
+                for (int i = 0; i < 8; ++i) armState[i] = defaultQuatOrIdentity(sc, i);
+                for (int bit = 0; bit < 8; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    armState[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    setAbsoluteTrackQuat(sc->bone_indices[bit], armState[bit], true, defaultQuatOrIdentity(sc, bit));
+                }
+
+                if (sc->offset_locs.size() >= 8) {
+                    int anchor = sc->bone_indices[ArmBone::NECK_PARENT];
+                    int order[8] = {ArmBone::L_CLAV, ArmBone::L_UPPER, ArmBone::L_FORE, ArmBone::L_HAND,
+                                    ArmBone::R_CLAV, ArmBone::R_UPPER, ArmBone::R_FORE, ArmBone::R_HAND};
+                    float local[16];
+                    float world[16];
+                    for (int oi = 0; oi < 8; ++oi) {
+                        int role = order[oi];
+                        int bone = sc->bone_indices[role];
+                        matFromQuatPos(armState[role], sc->offset_locs[role], local);
+                        int parent = (role == ArmBone::L_CLAV || role == ArmBone::R_CLAV)
+                            ? anchor
+                            : sc->bone_indices[role - 1];
+                        localToRuntimeParent(local, parent, world);
+                        storeRuntimeWorld(bone, world);
+                    }
+
+                    if (sc->fore_twist_locs.size() >= 4 && sc->bone_indices.size() > ArmBone::R_TWIST1) {
+                        int twistBones[4] = {ArmBone::L_TWIST0, ArmBone::L_TWIST1, ArmBone::R_TWIST0, ArmBone::R_TWIST1};
+                        int twistParents[4] = {ArmBone::L_FORE, ArmBone::L_TWIST0, ArmBone::R_FORE, ArmBone::R_TWIST0};
+                        for (int i = 0; i < 4; ++i) {
+                            int bone = sc->bone_indices[twistBones[i]];
+                            int parent = sc->bone_indices[twistParents[i]];
+                            Mat4BuildTwistLineXform(sc->fore_twist_locs[i], 1.57079632679f, local);
+                            localToRuntimeParent(local, parent, world);
+                            storeRuntimeWorld(bone, world);
+                        }
+                    }
+                }
+            }
+            else if (comp.comp_ix == NalComp::LEGS_IK) {
+                if (sc->bone_indices.size() < LegBone::COUNT) continue;
+                QuatWXYZ toeState[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+                QuatWXYZ footState[2] = {defaultQuatOrIdentity(sc, 2), defaultQuatOrIdentity(sc, 3)};
+                std::array<float, 3> footPos[2] = {sc->default_pose.foot_pos[0], sc->default_pose.foot_pos[1]};
+                float kneeSpin[2] = {sc->default_pose.knee_spin[0], sc->default_pose.knee_spin[1]};
+
+                for (int bit = 0; bit < 2; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    toeState[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    setAbsoluteTrackQuat(sc->bone_indices[bit], toeState[bit], true, defaultQuatOrIdentity(sc, bit));
+                }
+                for (int bit = 2; bit < 4; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    int side = bit - 2;
+                    footState[side] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    setAbsoluteTrackQuat(sc->bone_indices[bit], footState[side], true, defaultQuatOrIdentity(sc, bit));
+
+                    float pos[3];
+                    if (consumeXYZ(fv, cursor, pos)) {
+                        footPos[side] = {pos[0], pos[1], pos[2]};
+                    }
+                    if (cursor < (int)fv.size()) kneeSpin[side] = fv[cursor++];
+                }
+
+                int anchor = sc->bone_indices[LegBone::PELVIS];
+                float identity[16];
+                Mat4Identity(identity);
+                float local[16], world[16];
+                for (int side = 0; side < 2; ++side) {
+                    int footRole = side == 0 ? LegBone::L_FOOT : LegBone::R_FOOT;
+                    int toeRole = side == 0 ? LegBone::L_TOE : LegBone::R_TOE;
+                    int thighRole = side == 0 ? LegBone::L_THIGH : LegBone::R_THIGH;
+                    int calfRole = side == 0 ? LegBone::L_CALF : LegBone::R_CALF;
+                    int foot = sc->bone_indices[footRole];
+                    int toe = sc->bone_indices[toeRole];
+
+                    matFromQuatPos(footState[side], footPos[side], local);
+                    if (solveLegsIk && sc->has_ik && sc->offset_locs.size() > (size_t)thighRole) {
+                        float upperLocal[16], lowerLocal[16];
+                        SolveNalIk(identity, sc->offset_locs[thighRole], local, sc->ik_data[side],
+                                   kneeSpin[side], false, false, upperLocal, lowerLocal);
+                        localToRuntimeParent(upperLocal, anchor, world);
+                        storeRuntimeWorld(sc->bone_indices[thighRole], world);
+                        localToRuntimeParent(lowerLocal, anchor, world);
+                        storeRuntimeWorld(sc->bone_indices[calfRole], world);
+                    }
+
+                    localToRuntimeParent(local, anchor, world);
+                    storeRuntimeWorld(foot, world);
+
+                    std::array<float, 3> toeOff = (sc->offset_locs.size() > (size_t)toeRole)
+                        ? sc->offset_locs[toeRole]
+                        : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+                    matFromQuatPos(toeState[side], toeOff, local);
+                    localToRuntimeParent(local, foot, world);
+                    storeRuntimeWorld(toe, world);
+                }
             }
             else if (comp.comp_ix == NalComp::ARMS_IK) {
-                const auto* sc = findSkelComp(NalCompType::ArmsHands_IK);
-                if (!sc || sc->bone_indices.size() < 8) continue;
-                int trackIdx = 0;
-                for (int bit = 0; bit < 2; bit++) {
-                    if (!(comp.mask & (1u << bit))) continue;
-                    if (trackIdx + 2 >= (int)fv.size()) break;
-                    setBoneQuat(sc->bone_indices[bit], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
-                    trackIdx += 3;
+                if (sc->bone_indices.size() < ArmIKBone::COUNT) continue;
+                QuatWXYZ clavState[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+                QuatWXYZ handState[2] = {QuatWXYZ{}, QuatWXYZ{}};
+                for (int i = 0; i < 2; ++i) {
+                    if (i < (int)sc->default_pose.hand_quats.size()) handState[i] = QuatFromNal(sc->default_pose.hand_quats[i]);
                 }
-                for (int bit = 2; bit < 4; bit++) {
-                    if (!(comp.mask & (1u << bit))) continue;
-                    if (trackIdx + 2 >= (int)fv.size()) break;
-                    setBoneQuat(sc->bone_indices[bit], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
-                    trackIdx += 7;
+                std::array<float, 3> handPos[2] = {sc->default_pose.hand_pos[0], sc->default_pose.hand_pos[1]};
+                float elbowSpin[2] = {sc->default_pose.elbow_spin[0], sc->default_pose.elbow_spin[1]};
+
+                for (int bit = 0; bit < 2; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    clavState[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    setAbsoluteTrackQuat(sc->bone_indices[bit], clavState[bit], true, defaultQuatOrIdentity(sc, bit));
+                }
+                for (int bit = 2; bit < 4; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    int side = bit - 2;
+                    handState[side] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    QuatWXYZ defaultQ = side < (int)sc->default_pose.hand_quats.size()
+                        ? QuatFromNal(sc->default_pose.hand_quats[side])
+                        : QuatWXYZ{};
+                    setAbsoluteTrackQuat(sc->bone_indices[bit], handState[side], true, defaultQ);
+
+                    float pos[3];
+                    if (consumeXYZ(fv, cursor, pos)) {
+                        handPos[side] = {pos[0], pos[1], pos[2]};
+                    }
+                    if (cursor < (int)fv.size()) elbowSpin[side] = fv[cursor++];
+                }
+
+                if (sc->offset_locs.size() >= 2) {
+                    int anchor = sc->bone_indices[ArmIKBone::NECK_PARENT];
+                    int handAnchor = (sc->bone_indices.size() > ArmIKBone::PELVIS && sc->bone_indices[ArmIKBone::PELVIS] >= 0)
+                        ? sc->bone_indices[ArmIKBone::PELVIS]
+                        : anchor;
+                    float local[16], world[16];
+
+                    int clavRoles[2] = {ArmIKBone::L_CLAV, ArmIKBone::R_CLAV};
+                    int handRoles[2] = {ArmIKBone::L_HAND, ArmIKBone::R_HAND};
+                    for (int side = 0; side < 2; ++side) {
+                        int clav = sc->bone_indices[clavRoles[side]];
+                        matFromQuatPos(clavState[side], sc->offset_locs[side], local);
+                        localToRuntimeParent(local, anchor, world);
+                        storeRuntimeWorld(clav, world);
+                        float clavWorld[16];
+                        memcpy(clavWorld, world, sizeof(clavWorld));
+
+                        int hand = sc->bone_indices[handRoles[side]];
+                        matFromQuatPos(handState[side], handPos[side], local);
+                        localToRuntimeParent(local, handAnchor, world);
+                        storeRuntimeWorld(hand, world);
+                        float handWorld[16];
+                        memcpy(handWorld, world, sizeof(handWorld));
+
+                        int upperRole = side == 0 ? ArmIKBone::L_UPPER : ArmIKBone::R_UPPER;
+                        int foreRole = side == 0 ? ArmIKBone::L_FORE : ArmIKBone::R_FORE;
+                        if (solveArmsIk && sc->has_ik && sc->offset_locs.size() > (size_t)upperRole) {
+                            float upperWorld[16], foreWorld[16];
+                            SolveNalIk(clavWorld, sc->offset_locs[upperRole], handWorld, sc->ik_data[side],
+                                       elbowSpin[side], true, side == 1, upperWorld, foreWorld);
+                            storeRuntimeWorld(sc->bone_indices[upperRole], upperWorld);
+                            storeRuntimeWorld(sc->bone_indices[foreRole], foreWorld);
+                        }
+                    }
                 }
             }
             else if (comp.comp_ix == NalComp::FAKEROOT_STD) {
-                if (comp.mask & 0x1 && fv.size() >= 6) {
-                    rootOffset[0] = fv[3]; rootOffset[1] = fv[4]; rootOffset[2] = fv[5];
+                if ((comp.mask & 0x1) && fv.size() >= 6) {
+                    rootOffset[0] += fv[3] - sc->default_pose.pelvis_pos[0];
+                    rootOffset[1] += fv[4] - sc->default_pose.pelvis_pos[1];
+                    rootOffset[2] += fv[5] - sc->default_pose.pelvis_pos[2];
                 }
             }
-            else if (comp.comp_ix >= NalComp::FING52 && comp.comp_ix <= NalComp::FING5) {
-                const NalComponentData* sc = nullptr;
-                for (const auto& s : loadedSkeleton->components) {
-                    if (s.type_id == NalCompType::FiveFinger_Top2KnuckleCurl ||
-                        s.type_id == NalCompType::FiveFinger_IndividualCurl ||
-                        s.type_id == NalCompType::FiveFinger_ReducedAngular ||
-                        s.type_id == NalCompType::FiveFinger_FullRotational) { sc = &s; break; }
+            else if (comp.comp_ix == NalComp::FING5) {
+                if (sc->bone_indices.size() < 30) continue;
+                for (int bit = 0; bit < 30; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
                 }
-                if (!sc || sc->bone_indices.size() < 30) continue;
-                int trackIdx = 0;
-                for (int bi = 0; bi < 30 && bi < (int)sc->bone_indices.size(); bi++) {
-                    if (trackIdx + 2 >= (int)fv.size()) break;
-                    setBoneQuat(sc->bone_indices[bi], fv[trackIdx], fv[trackIdx+1], fv[trackIdx+2]);
-                    trackIdx += 3;
+            }
+            else if (comp.comp_ix == NalComp::FING5_REDUCED) {
+                if (sc->bone_indices.size() < 30) continue;
+                float baseY[8] = {};
+                float baseZ[8] = {};
+                float midHinge[10] = {};
+                float tipHinge[10] = {};
+                QuatWXYZ thumb[2] = {};
+                for (int i = 0; i < 2; ++i) {
+                    QuatWXYZ q;
+                    thumb[i] = GetDefaultQuat(sc, i, q) ? q : QuatWXYZ{};
+                }
+
+                for (int bit = 0; bit < 30; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    if (bit < 2) {
+                        float xyz[3];
+                        if (!consumeXYZ(fv, cursor, xyz)) break;
+                        thumb[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    } else if (bit < 10) {
+                        if (cursor + 1 >= (int)fv.size()) break;
+                        baseZ[bit - 2] = fv[cursor++];
+                        baseY[bit - 2] = fv[cursor++];
+                    } else if (bit < 20) {
+                        if (cursor >= (int)fv.size()) break;
+                        midHinge[bit - 10] = fv[cursor++];
+                    } else {
+                        if (cursor >= (int)fv.size()) break;
+                        tipHinge[bit - 20] = fv[cursor++];
+                    }
+                }
+
+                for (int base = 0; base < 10; ++base) {
+                    if (base < 2) {
+                        QuatWXYZ def;
+                        bool hasDef = GetDefaultQuat(sc, base, def);
+                        setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                    } else {
+                        setBoneDeltaQuat(sc->bone_indices[base], QuatFromYZAngles(baseY[base - 2], baseZ[base - 2]));
+                    }
+                    setBoneDeltaQuat(sc->bone_indices[10 + base], QuatAxisAngle(0, midHinge[base]));
+                    setBoneDeltaQuat(sc->bone_indices[20 + base], QuatAxisAngle(0, tipHinge[base]));
+                }
+            }
+            else if (comp.comp_ix == NalComp::FING5_CURL) {
+                if (sc->bone_indices.size() < 30) continue;
+                float baseZ[8] = {};
+                float hinge[10] = {};
+                float defaultHinge[10] = {};
+                for (int i = 0; i < 10 && i < (int)sc->default_pose.finger_curl.size(); ++i)
+                    hinge[i] = defaultHinge[i] = sc->default_pose.finger_curl[i];
+                QuatWXYZ thumb[2] = {};
+                for (int i = 0; i < 2; ++i) {
+                    QuatWXYZ q;
+                    thumb[i] = GetDefaultQuat(sc, i, q) ? q : QuatWXYZ{};
+                }
+
+                for (int bit = 0; bit < 10; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    if (bit < 2) {
+                        float xyz[3];
+                        if (!consumeXYZ(fv, cursor, xyz)) break;
+                        thumb[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                        if (cursor < (int)fv.size()) hinge[bit] = fv[cursor++];
+                    } else {
+                        if (cursor + 1 >= (int)fv.size()) break;
+                        baseZ[bit - 2] = fv[cursor++];
+                        hinge[bit] = fv[cursor++];
+                    }
+                }
+
+                for (int base = 0; base < 10; ++base) {
+                    if (base < 2) {
+                        QuatWXYZ def;
+                        bool hasDef = GetDefaultQuat(sc, base, def);
+                        setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                    } else {
+                        QuatWXYZ def = QuatFromYZAngles(defaultHinge[base], 0.0f);
+                        setAbsoluteTrackQuat(sc->bone_indices[base], QuatFromYZAngles(hinge[base], baseZ[base - 2]), true, def);
+                    }
+                    setBoneDeltaQuat(sc->bone_indices[10 + base], QuatAxisAngle(0, hinge[base] - defaultHinge[base]));
+                    setBoneDeltaQuat(sc->bone_indices[20 + base], QuatAxisAngle(0,
+                        FingerTipHingeAngle(hinge[base], base < 2) - FingerTipHingeAngle(defaultHinge[base], base < 2)));
+                }
+            }
+            else if (comp.comp_ix == NalComp::FING52) {
+                if (sc->bone_indices.size() < 30) continue;
+                QuatWXYZ thumb[2] = {};
+                for (int i = 0; i < 2; ++i) {
+                    QuatWXYZ q;
+                    thumb[i] = GetDefaultQuat(sc, i, q) ? q : QuatWXYZ{};
+                }
+                float baseY[8] = {};
+                float baseZ[8] = {};
+                float hinge[10] = {};
+                for (int i = 0; i < 8 && i < (int)sc->default_pose.base_y_tracks.size(); ++i)
+                    baseY[i] = sc->default_pose.base_y_tracks[i];
+                for (int i = 0; i < 8 && i < (int)sc->default_pose.base_z_tracks.size(); ++i)
+                    baseZ[i] = sc->default_pose.base_z_tracks[i];
+                for (int i = 0; i < 10 && i < (int)sc->default_pose.hinge_tracks.size(); ++i)
+                    hinge[i] = sc->default_pose.hinge_tracks[i];
+
+                for (int bit = 0; bit < 20; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    if (bit < 2) {
+                        float xyz[3];
+                        if (!consumeXYZ(fv, cursor, xyz)) break;
+                        thumb[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    } else if (bit < 10) {
+                        if (cursor + 1 >= (int)fv.size()) break;
+                        baseY[bit - 2] = fv[cursor++];
+                        baseZ[bit - 2] = fv[cursor++];
+                    } else {
+                        if (cursor >= (int)fv.size()) break;
+                        hinge[bit - 10] = fv[cursor++];
+                    }
+                }
+
+                std::map<int, std::array<float, 16>> baseWorldByChain;
+                if (sc->offset_locs.size() >= 30) {
+                    auto anchorIdForChain = [&](int chain) -> int {
+                        int slot = (chain == 1 || chain >= 6) ? 1 : 0;
+                        int idx = FingerBone::L_HAND_PARENT + slot;
+                        return (idx < (int)sc->bone_indices.size()) ? sc->bone_indices[idx] : -1;
+                    };
+                    auto loadAnchorWorld = [&](int anchorId, float* out) {
+                        if (anchorId >= 0 && getRuntimeWorld(anchorId, out)) return;
+                        if (anchorId >= 0 && anchorId < pcmBoneCount) {
+                            memcpy(out, skeletonBones[anchorId].bindMatrix, sizeof(float) * 16);
+                            return;
+                        }
+                        Mat4Identity(out);
+                    };
+
+                    float local[16], world[16], anchorWorld[16];
+                    for (int base = 0; base < 10; ++base) {
+                        QuatWXYZ q = (base < 2)
+                            ? thumb[base]
+                            : QuatFromYZAngles(baseY[base - 2], baseZ[base - 2]);
+                        matFromQuatPos(q, sc->offset_locs[base], local);
+                        loadAnchorWorld(anchorIdForChain(base), anchorWorld);
+                        Mat4Multiply(anchorWorld, local, world);
+
+                        std::array<float, 16> stored{};
+                        memcpy(stored.data(), world, sizeof(float) * 16);
+                        baseWorldByChain[base] = stored;
+                        storeRuntimeWorld(sc->bone_indices[base], world);
+                    }
+
+                    for (int chain = 0; chain < 10; ++chain) {
+                        auto baseIt = baseWorldByChain.find(chain);
+                        if (baseIt == baseWorldByChain.end()) continue;
+
+                        float midLocal[16], tipLocal[16], midWorld[16], tipWorld[16];
+                        Mat4Fing52HingeLocal(hinge[chain], sc->offset_locs[10 + chain], midLocal);
+                        Mat4Fing52HingeLocal(FingerTipHingeAngle(hinge[chain], chain < 2), sc->offset_locs[20 + chain], tipLocal);
+                        Mat4Multiply(baseIt->second.data(), midLocal, midWorld);
+                        Mat4Multiply(midWorld, tipLocal, tipWorld);
+                        storeRuntimeWorld(sc->bone_indices[10 + chain], midWorld);
+                        storeRuntimeWorld(sc->bone_indices[20 + chain], tipWorld);
+                    }
+                }
+
+                for (int base = 0; base < 10; ++base) {
+                    if (base < 2) {
+                        QuatWXYZ def;
+                        bool hasDef = GetDefaultQuat(sc, base, def);
+                        setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                    } else {
+                        QuatWXYZ def = QuatFromYZAngles(
+                            (base - 2 < (int)sc->default_pose.base_y_tracks.size()) ? sc->default_pose.base_y_tracks[base - 2] : 0.0f,
+                            (base - 2 < (int)sc->default_pose.base_z_tracks.size()) ? sc->default_pose.base_z_tracks[base - 2] : 0.0f);
+                        setAbsoluteTrackQuat(sc->bone_indices[base], QuatFromYZAngles(baseY[base - 2], baseZ[base - 2]), true, def);
+                    }
+                    float defHinge = (base < (int)sc->default_pose.hinge_tracks.size()) ? sc->default_pose.hinge_tracks[base] : 0.0f;
+                    setBoneDeltaQuat(sc->bone_indices[10 + base], QuatAxisAngle(0, hinge[base] - defHinge));
+                    setBoneDeltaQuat(sc->bone_indices[20 + base], QuatAxisAngle(0,
+                        FingerTipHingeAngle(hinge[base], base < 2) - FingerTipHingeAngle(defHinge, base < 2)));
                 }
             }
         }
 
-        // --- Step 2: Build world-space animated matrices through hierarchy ---
-        // For each bone: worldAnim[bone] = worldAnim[parent] * localRotation * bindLocalOffset
-        // bindLocalOffset = invBind[parent] * bind[child]
-        // skinMatrix[bone] = worldAnim[bone] * invBind[bone]
-
-        // First build animated world matrices
-        std::vector<float> animWorld(MAX_BONES * 16, 0.f);
-        for (int i = 0; i < MAX_BONES; i++) {
-            animWorld[i*16+0] = 1.f; animWorld[i*16+5] = 1.f;
-            animWorld[i*16+10] = 1.f; animWorld[i*16+15] = 1.f;
-        }
-        // Copy bind matrices as starting point
-        for (int i = 0; i < skeletonBoneCount && i < MAX_BONES; i++) {
-            memcpy(&animWorld[i*16], skeletonBones[i].bindMatrix, 64);
-        }
-
-        // Apply rotations: for each bone with animation data, rotate the bind matrix
-        // This is a simplified approach: rotate the bone's bind-pose world matrix
-        // by the animation quaternion around the bone's own position
-        for (int i = 0; i < skeletonBoneCount && i < MAX_BONES; i++) {
-            auto& bq = boneLocalQuats[i];
-            if (!bq.hasData) continue;
-
-            float qx=bq.x, qy=bq.y, qz=bq.z, qw=bq.w;
-            float xx=qx*qx, yy=qy*qy, zz=qz*qz;
-            float xy=qx*qy, xz=qx*qz, yz=qy*qz;
-            float wx=qw*qx, wy=qw*qy, wz=qw*qz;
-
-            // Rotation matrix from quaternion
-            float R[9] = {
-                1.f-2.f*(yy+zz), 2.f*(xy+wz),     2.f*(xz-wy),
-                2.f*(xy-wz),     1.f-2.f*(xx+zz), 2.f*(yz+wx),
-                2.f*(xz+wy),     2.f*(yz-wx),     1.f-2.f*(xx+yy)
-            };
-
-            // Rotate the 3x3 part of the bind matrix: newRot = R * oldRot
-            float* m = &animWorld[i*16];
-            float oldRot[9] = {m[0],m[1],m[2], m[4],m[5],m[6], m[8],m[9],m[10]};
-            m[0]  = R[0]*oldRot[0] + R[1]*oldRot[3] + R[2]*oldRot[6];
-            m[1]  = R[0]*oldRot[1] + R[1]*oldRot[4] + R[2]*oldRot[7];
-            m[2]  = R[0]*oldRot[2] + R[1]*oldRot[5] + R[2]*oldRot[8];
-            m[4]  = R[3]*oldRot[0] + R[4]*oldRot[3] + R[5]*oldRot[6];
-            m[5]  = R[3]*oldRot[1] + R[4]*oldRot[4] + R[5]*oldRot[7];
-            m[6]  = R[3]*oldRot[2] + R[4]*oldRot[5] + R[5]*oldRot[8];
-            m[8]  = R[6]*oldRot[0] + R[7]*oldRot[3] + R[8]*oldRot[6];
-            m[9]  = R[6]*oldRot[1] + R[7]*oldRot[4] + R[8]*oldRot[7];
-            m[10] = R[6]*oldRot[2] + R[7]*oldRot[5] + R[8]*oldRot[8];
-        }
-
-        // Apply root offset from fakeroot
-        for (int i = 0; i < skeletonBoneCount && i < MAX_BONES; i++) {
-            animWorld[i*16+12] += rootOffset[0];
-            animWorld[i*16+13] += rootOffset[1];
-            animWorld[i*16+14] += rootOffset[2];
-        }
-
-        // --- Step 3: Compute skinning matrices = animWorld * invBind ---
-        for (int i = 0; i < skeletonBoneCount && i < MAX_BONES; i++) {
-            float* aw = &animWorld[i*16];
-            float* ib = skeletonBones[i].invBindMatrix;
-            float* out = &boneMatData[i*16];
-            for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
-                out[r*4+c] = aw[r*4+0]*ib[0*4+c] + aw[r*4+1]*ib[1*4+c] +
-                             aw[r*4+2]*ib[2*4+c] + aw[r*4+3]*ib[3*4+c];
+        for (int i = 0; i < pcmBoneCount; ++i) {
+            if (poseDeltas[i].hasRot) {
+                float rot[16];
+                Mat4FromQuat(poseDeltas[i].rot, rot);
+                Mat4Multiply(&restLocal[i * 16], rot, &animLocal[i * 16]);
+            } else {
+                memcpy(&animLocal[i * 16], &restLocal[i * 16], sizeof(float) * 16);
             }
         }
 
-        // Update bone positions for skeleton overlay
-        for (int i = 0; i < skeletonBoneCount && i < MAX_BONES; i++) {
+        std::vector<uint8_t> visitState(pcmBoneCount, 0);
+        std::function<void(int)> buildWorld = [&](int boneIdx) {
+            if (boneIdx < 0 || boneIdx >= pcmBoneCount) return;
+            if (visitState[boneIdx] == 2) return;
+            if (visitState[boneIdx] == 1) {
+                memcpy(&animWorld[boneIdx * 16], &animLocal[boneIdx * 16], sizeof(float) * 16);
+                visitState[boneIdx] = 2;
+                return;
+            }
+            visitState[boneIdx] = 1;
+            auto runtimeIt = runtimeWorld.find(boneIdx);
+            if (runtimeIt != runtimeWorld.end()) {
+                memcpy(&animWorld[boneIdx * 16], runtimeIt->second.data(), sizeof(float) * 16);
+            } else if (int parent = parentOf(boneIdx); parent >= 0) {
+                buildWorld(parent);
+                Mat4Multiply(&animWorld[parent * 16], &animLocal[boneIdx * 16], &animWorld[boneIdx * 16]);
+            } else {
+                memcpy(&animWorld[boneIdx * 16], &animLocal[boneIdx * 16], sizeof(float) * 16);
+            }
+            visitState[boneIdx] = 2;
+        };
+
+        for (int i = 0; i < pcmBoneCount; ++i) buildWorld(i);
+
+        // Component-world poses already carry their sampled pelvis/target
+        // translations, like OpenUSM's VirtualGetBoneMatrices path. Only use
+        // the root offset for the older local-delta fallback.
+        if (runtimeWorld.empty()) {
+            for (int i = 0; i < pcmBoneCount; i++) {
+                animWorld[i*16+12] += rootOffset[0];
+                animWorld[i*16+13] += rootOffset[1];
+                animWorld[i*16+14] += rootOffset[2];
+            }
+        }
+
+        for (int i = 0; i < pcmBoneCount; i++) {
+            Mat4Multiply(&animWorld[i*16], skeletonBones[i].invBindMatrix, &globalBoneMatData[i*16]);
+        }
+
+        for (int i = 0; i < pcmBoneCount; i++) {
             bonePosWorld[i*3+0] = animWorld[i*16+12];
             bonePosWorld[i*3+1] = animWorld[i*16+13];
             bonePosWorld[i*3+2] = animWorld[i*16+14];
+            if (nalBonePositions.count(i)) {
+                nalBonePositions[i] = {bonePosWorld[i*3+0], bonePosWorld[i*3+1], bonePosWorld[i*3+2]};
+            }
         }
 
-        glUniformMatrix4fv(locBoneMatrices, MAX_BONES, GL_FALSE, boneMatData.data());
         skinningActive = true;
+    }
+
+    std::map<int, std::array<float, 16>> manualPivotTransforms;
+    for (const auto& entry : manualBoneRotations) {
+        int boneIdx = entry.first;
+        const auto& angles = entry.second;
+        if (boneIdx < 0 || boneIdx >= pcmBoneCount || !HasAnyRotation(angles)) continue;
+
+        float pivot[3] = {
+            bonePosWorld[boneIdx * 3 + 0],
+            bonePosWorld[boneIdx * 3 + 1],
+            bonePosWorld[boneIdx * 3 + 2]
+        };
+
+        std::array<float, 16> transform{};
+        Mat4PivotEuler(angles, pivot, transform.data());
+        manualPivotTransforms[boneIdx] = transform;
+    }
+
+    if (!manualPivotTransforms.empty()) {
+        auto parentOf = [&](int idx) -> int {
+            if (!loadedSkeleton) return -1;
+            auto it = loadedSkeleton->parent_map.find(idx);
+            return (it != loadedSkeleton->parent_map.end()) ? it->second : -1;
+        };
+
+        auto boneDepth = [&](int idx) -> int {
+            int depth = 0;
+            for (int guard = 0; guard < 256; ++guard) {
+                idx = parentOf(idx);
+                if (idx < 0) break;
+                ++depth;
+            }
+            return depth;
+        };
+
+        auto isDescendantOrSelf = [&](int boneIdx, int ancestorIdx) -> bool {
+            if (boneIdx == ancestorIdx) return true;
+            for (int guard = 0; guard < 256; ++guard) {
+                boneIdx = parentOf(boneIdx);
+                if (boneIdx < 0) return false;
+                if (boneIdx == ancestorIdx) return true;
+            }
+            return false;
+        };
+
+        for (int boneIdx = 0; boneIdx < pcmBoneCount; ++boneIdx) {
+            std::vector<int> affectingBones;
+            for (const auto& entry : manualPivotTransforms) {
+                if (isDescendantOrSelf(boneIdx, entry.first)) {
+                    affectingBones.push_back(entry.first);
+                }
+            }
+            if (affectingBones.empty()) continue;
+
+            std::sort(affectingBones.begin(), affectingBones.end(),
+                [&](int a, int b) { return boneDepth(a) < boneDepth(b); });
+
+            float combined[16];
+            Mat4Identity(combined);
+            for (int activeBone : affectingBones) {
+                float next[16];
+                Mat4Multiply(combined, manualPivotTransforms[activeBone].data(), next);
+                memcpy(combined, next, sizeof(next));
+            }
+
+            float finalSkin[16];
+            Mat4Multiply(combined, &globalBoneMatData[boneIdx * 16], finalSkin);
+            memcpy(&globalBoneMatData[boneIdx * 16], finalSkin, sizeof(finalSkin));
+
+            float bindPos[3] = {
+                skeletonBones[boneIdx].position[0],
+                skeletonBones[boneIdx].position[1],
+                skeletonBones[boneIdx].position[2]
+            };
+            float posedPos[3];
+            Mat4TransformPoint(finalSkin, bindPos, posedPos);
+            bonePosWorld[boneIdx * 3 + 0] = posedPos[0];
+            bonePosWorld[boneIdx * 3 + 1] = posedPos[1];
+            bonePosWorld[boneIdx * 3 + 2] = posedPos[2];
+            if (nalBonePositions.count(boneIdx)) {
+                nalBonePositions[boneIdx] = {posedPos[0], posedPos[1], posedPos[2]};
+            }
+        }
+
+        skinningActive = true;
+    }
+
+    if (skinningActive && skeletonVbo && loadedSkeleton && !nalBoneVboOrder.empty()) {
+        struct BoneVert { float x, y, z, r, g, b; };
+        std::vector<BoneVert> pointVerts;
+        std::vector<BoneVert> lineVerts;
+        pointVerts.reserve(nalBoneVboOrder.size());
+
+        for (int nalIdx : nalBoneVboOrder) {
+            auto it = nalBonePositions.find(nalIdx);
+            if (it == nalBonePositions.end()) continue;
+            const auto& p = it->second;
+            pointVerts.push_back({p[0], p[1], p[2], 1.0f, 1.0f, 0.0f});
+        }
+
+        for (const auto& [childIdx, parentIdx] : loadedSkeleton->parent_map) {
+            if (parentIdx < 0) continue;
+            auto childIt = nalBonePositions.find(childIdx);
+            auto parentIt = nalBonePositions.find(parentIdx);
+            if (childIt == nalBonePositions.end() || parentIt == nalBonePositions.end()) continue;
+            const auto& cp = childIt->second;
+            const auto& pp = parentIt->second;
+            lineVerts.push_back({pp[0], pp[1], pp[2], 0.0f, 0.9f, 1.0f});
+            lineVerts.push_back({cp[0], cp[1], cp[2], 0.0f, 0.9f, 1.0f});
+        }
+
+        std::vector<BoneVert> allVerts;
+        allVerts.reserve(pointVerts.size() + lineVerts.size());
+        allVerts.insert(allVerts.end(), pointVerts.begin(), pointVerts.end());
+        allVerts.insert(allVerts.end(), lineVerts.begin(), lineVerts.end());
+        skeletonBoneCount = (int)pointVerts.size();
+        skeletonLineVertCount = (int)lineVerts.size();
+
+        glBindBuffer(GL_ARRAY_BUFFER, skeletonVbo);
+        glBufferData(GL_ARRAY_BUFFER, allVerts.size() * sizeof(BoneVert), allVerts.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
     glUniform1i(locUseSkinning, skinningActive ? 1 : 0);
 
@@ -783,6 +1808,35 @@ void SpiderManTool::RenderModelPreview() {
     GLint locIsFakeShadow = glGetUniformLocation(modelProgram, "isFakeShadow");
     GLint locIsColorVolume = glGetUniformLocation(modelProgram, "isColorVolume");
     GLint locIsHighlighted = glGetUniformLocation(modelProgram, "isHighlighted");
+
+    auto uploadSectionBoneMatrices = [&](const RenderMesh& mesh) {
+        if (!skinningActive) return;
+
+        std::vector<float> sectionBoneMatData(MAX_BONES * 16, 0.f);
+        for (int i = 0; i < MAX_BONES; ++i) {
+            Mat4Identity(&sectionBoneMatData[i * 16]);
+        }
+
+        if (!mesh.bonePalette.empty()) {
+            int localCount = std::min((int)mesh.bonePalette.size(), MAX_BONES);
+            for (int localIdx = 0; localIdx < localCount; ++localIdx) {
+                int globalIdx = mesh.bonePalette[localIdx];
+                if (globalIdx < 0 || globalIdx >= pcmBoneCount) continue;
+                memcpy(&sectionBoneMatData[localIdx * 16],
+                       &globalBoneMatData[globalIdx * 16],
+                       sizeof(float) * 16);
+            }
+        } else {
+            int localCount = std::min(pcmBoneCount, MAX_BONES);
+            for (int localIdx = 0; localIdx < localCount; ++localIdx) {
+                memcpy(&sectionBoneMatData[localIdx * 16],
+                       &globalBoneMatData[localIdx * 16],
+                       sizeof(float) * 16);
+            }
+        }
+
+        glUniformMatrix4fv(locBoneMatrices, MAX_BONES, GL_FALSE, sectionBoneMatData.data());
+    };
 
     auto isInFrustum = [&](const float bboxMin[3], const float bboxMax[3]) -> bool {
         float cx = (bboxMin[0] + bboxMax[0]) * 0.5f;
@@ -830,6 +1884,7 @@ void SpiderManTool::RenderModelPreview() {
             glUniform1i(locIsColorVolume, 0);
             glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
 
+            uploadSectionBoneMatrices(m);
             glBindVertexArray(m.vao);
             glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
         }
@@ -861,13 +1916,17 @@ void SpiderManTool::RenderModelPreview() {
 void SpiderManTool::ComputeNALBonePositions() {
     nalBonePositions.clear();
     nalMaxBoneIndex = -1;
-    if (!loadedSkeleton || loadedSkeleton->bone_map.empty()) {
+    if (!loadedSkeleton) {
         Log("ComputeNALBonePositions: no skeleton data");
         return;
     }
+    if (loadedSkeleton->bone_map.empty() && skeletonBones.empty()) {
+        Log("ComputeNALBonePositions: no skeleton bones");
+        return;
+    }
 
-    // --- Fallback: generate humanoid positions from bone names ---
-    // This always works as long as we have bone_map and parent_map
+    // Fallback: generate humanoid positions from bone names.
+    // This always works as long as we have bone_map and parent_map.
     auto nameToPos = [](const std::string& name) -> std::array<float,3> {
         // Humanoid position estimates (Y-up, model centered at origin)
         if (name == "pelvis")       return {0.0f, 2.8f, 0.0f};
@@ -899,7 +1958,8 @@ void SpiderManTool::ComputeNALBonePositions() {
         return {0.0f, 3.0f, 0.0f}; // unknown bones near center
     };
 
-    // First try offset_locs from parsed skeleton components
+    // First use PCM bind matrices when available. This matches the Blender
+    // importer path and keeps the skeleton overlay aligned with the mesh.
     auto setPos = [&](int idx, float x, float y, float z) {
         if (idx < 0) return;
         nalBonePositions[idx] = {x, y, z};
@@ -913,6 +1973,26 @@ void SpiderManTool::ComputeNALBonePositions() {
         auto pp = getPos(parentIdx);
         setPos(childIdx, pp[0]+offset[0], pp[1]+offset[1], pp[2]+offset[2]);
     };
+
+    if (!skeletonBones.empty()) {
+        int named = 0;
+        for (int idx = 0; idx < static_cast<int>(skeletonBones.size()); ++idx) {
+            const auto& bone = skeletonBones[idx];
+            setPos(idx, bone.position[0], bone.position[1], bone.position[2]);
+            if (loadedSkeleton->bone_map.count(idx)) ++named;
+        }
+
+        if (nalBonePositions.size() >= 3) {
+            Log("ComputeNALBonePositions: using " + std::to_string(nalBonePositions.size()) +
+                " PCM bind-matrix positions (" + std::to_string(named) + " named)");
+            return;
+        }
+
+        nalBonePositions.clear();
+        nalMaxBoneIndex = -1;
+        Log("ComputeNALBonePositions: only " + std::to_string(skeletonBones.size()) +
+            " PCM bind matrices available; falling back to NAL offsets");
+    }
 
     // Try offset_locs from torso
     bool hasOffsetLocs = false;
@@ -1031,6 +2111,8 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
     skeletonBones.clear();
     selectedBoneIndex = -1;
     isRotatingBone = false;
+    manualBoneRotations.clear();
+    boneRotationsBeforeEdit.clear();
 
     // Also read PCM bone matrices (for GPU skinning later)
     if (pcmData.size() >= 16) {
@@ -1193,47 +2275,58 @@ void SpiderManTool::RenderSkeletonOverlay() {
 int SpiderManTool::PickBoneAtScreenPos(float screenX, float screenY, float vpW, float vpH) {
     if (skeletonBoneCount == 0 || nalBoneVboOrder.empty()) return -1;
 
-    float ndcX = (2.0f * screenX / vpW) - 1.0f;
-    float ndcY = 1.0f - (2.0f * screenY / vpH);
-
     float fov = 1.0f;
-    float fbAspect = 3840.0f / 2160.0f;
+    float aspect = 3840.0f / 2160.0f;
+    float znear = 0.1f;
+    float zfar = 20000.0f;
     float tanHalfFov = tan(fov / 2.0f);
 
-    float right[3]; Cross(camFront, camUp, right); Normalize(right);
-    float up[3]; Cross(right, camFront, up); Normalize(up);
+    float proj[16] = {0};
+    proj[0] = 1.0f / (aspect * tanHalfFov);
+    proj[5] = 1.0f / tanHalfFov;
+    proj[10] = -(zfar + znear) / (zfar - znear);
+    proj[11] = -1.0f;
+    proj[14] = -(2.0f * zfar * znear) / (zfar - znear);
 
-    float rayDir[3] = {
-        camFront[0] + right[0] * ndcX * tanHalfFov * fbAspect + up[0] * ndcY * tanHalfFov,
-        camFront[1] + right[1] * ndcX * tanHalfFov * fbAspect + up[1] * ndcY * tanHalfFov,
-        camFront[2] + right[2] * ndcX * tanHalfFov * fbAspect + up[2] * ndcY * tanHalfFov
-    };
-    Normalize(rayDir);
+    float view[16];
+    float target[3] = {camPos[0] + camFront[0], camPos[1] + camFront[1], camPos[2] + camFront[2]};
+    LookAt(camPos, target, camUp, view);
+
+    float viewProj[16];
+    Mat4Multiply(proj, view, viewProj);
 
     int closest = -1;
-    float closestDist = 1e30f;
-    float pickRadius = 0.05f;
+    float closestScore = 1e30f;
+    const float pickRadiusPx = 16.0f;
 
     for (int vboIdx = 0; vboIdx < (int)nalBoneVboOrder.size(); vboIdx++) {
         int nalIdx = nalBoneVboOrder[vboIdx];
         if (!nalBonePositions.count(nalIdx)) continue;
         auto& pos = nalBonePositions[nalIdx];
 
-        float dx = pos[0] - camPos[0];
-        float dy = pos[1] - camPos[1];
-        float dz = pos[2] - camPos[2];
-        float t = dx*rayDir[0] + dy*rayDir[1] + dz*rayDir[2];
-        if (t < 0) continue;
-        float px = camPos[0] + rayDir[0]*t - pos[0];
-        float py = camPos[1] + rayDir[1]*t - pos[1];
-        float pz = camPos[2] + rayDir[2]*t - pos[2];
-        float dist = sqrt(px*px + py*py + pz*pz);
+        float world[4] = {pos[0], pos[1], pos[2], 1.0f};
+        float clip[4];
+        Mat4TransformVec4(viewProj, world, clip);
+        if (clip[3] <= 0.0001f) continue;
 
-        float camDist = sqrt(dx*dx + dy*dy + dz*dz);
-        float scaledRadius = pickRadius * camDist;
+        float ndcX = clip[0] / clip[3];
+        float ndcY = clip[1] / clip[3];
+        float ndcZ = clip[2] / clip[3];
+        if (ndcX < -1.2f || ndcX > 1.2f || ndcY < -1.2f || ndcY > 1.2f || ndcZ < -1.0f || ndcZ > 1.0f) {
+            continue;
+        }
 
-        if (dist < scaledRadius && t < closestDist) {
-            closestDist = t;
+        float px = (ndcX * 0.5f + 0.5f) * vpW;
+        float py = (0.5f - ndcY * 0.5f) * vpH;
+        float dx = px - screenX;
+        float dy = py - screenY;
+        float distPx = sqrtf(dx * dx + dy * dy);
+        if (distPx > pickRadiusPx) continue;
+
+        float depthBias = clip[3] * 0.001f;
+        float score = distPx + depthBias;
+        if (score < closestScore) {
+            closestScore = score;
             closest = vboIdx;
         }
     }
@@ -1242,65 +2335,17 @@ int SpiderManTool::PickBoneAtScreenPos(float screenX, float screenY, float vpW, 
 
 void SpiderManTool::ApplyBoneRotation(int boneIdx, float angle, int axis) {
     if (boneIdx < 0 || boneIdx >= skeletonBoneCount) return;
-
-    // Build rotation matrix around the bone's position
-    float c = cos(angle), s = sin(angle);
-    float R[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    if (axis == 0) { R[5]=c; R[6]=s; R[9]=-s; R[10]=c; }      // X
-    else if (axis == 1) { R[0]=c; R[2]=-s; R[8]=s; R[10]=c; }  // Y
-    else { R[0]=c; R[1]=s; R[4]=-s; R[5]=c; }                   // Z
-
-    float bx = skeletonBones[boneIdx].position[0];
-    float by = skeletonBones[boneIdx].position[1];
-    float bz = skeletonBones[boneIdx].position[2];
-
-    // For each submesh, update vertices weighted to this bone
-    for (auto& mesh : previewMeshes) {
-        if (mesh.positions.empty()) continue;
-        int vCount = (int)mesh.positions.size() / 3;
-
-        // Re-upload vertex data — must match VBO layout (pos, norm, uv, boneIdx, boneWgt)
-        bool modified = false;
-        struct Vertex { float x,y,z,nx,ny,nz,u,v,boneIdx[4],boneWgt[4]; };
-        std::vector<Vertex> verts(vCount);
-        for (int v = 0; v < vCount; v++) {
-            memset(&verts[v], 0, sizeof(Vertex));
-            verts[v].x = mesh.positions[v*3]; verts[v].y = mesh.positions[v*3+1]; verts[v].z = mesh.positions[v*3+2];
-            verts[v].nx = mesh.normals[v*3]; verts[v].ny = mesh.normals[v*3+1]; verts[v].nz = mesh.normals[v*3+2];
-            verts[v].u = mesh.uvs[v*2]; verts[v].v = mesh.uvs[v*2+1];
-        }
-
-        // Simple: rotate ALL vertices near this bone by proximity
-        for (int v = 0; v < vCount; v++) {
-            float vx = verts[v].x - bx;
-            float vy = verts[v].y - by;
-            float vz = verts[v].z - bz;
-            float dist = sqrt(vx*vx + vy*vy + vz*vz);
-            if (dist > 0.3f) continue; // Only affect nearby vertices
-
-            float weight = 1.0f - (dist / 0.3f);
-            float rx = R[0]*vx + R[4]*vy + R[8]*vz;
-            float ry = R[1]*vx + R[5]*vy + R[9]*vz;
-            float rz = R[2]*vx + R[6]*vy + R[10]*vz;
-
-            verts[v].x = bx + vx + (rx - vx) * weight;
-            verts[v].y = by + vy + (ry - vy) * weight;
-            verts[v].z = bz + vz + (rz - vz) * weight;
-            modified = true;
-        }
-
-        if (modified) {
-            glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
-            glBufferSubData(GL_ARRAY_BUFFER, 0, verts.size() * sizeof(Vertex), verts.data());
-        }
-    }
+    int nalIdx = (boneIdx >= 0 && boneIdx < (int)nalBoneVboOrder.size()) ? nalBoneVboOrder[boneIdx] : boneIdx;
+    if (nalIdx < 0 || nalIdx >= MAX_GLOBAL_BONES) return;
+    axis = std::max(0, std::min(axis, 2));
+    auto& angles = manualBoneRotations[nalIdx];
+    angles[axis] += angle;
 }
 
 void SpiderManTool::ResetBoneRotation() {
-    // Reload the model to restore original vertex positions
-    if (currentPcmIndex >= 0) {
-        LoadModelToGL(currentPcmIndex);
-    }
+    manualBoneRotations.clear();
+    boneRotationsBeforeEdit.clear();
+    boneRotationAngle = 0.0f;
 }
 
 void SpiderManTool::CloseDdsPreview() {

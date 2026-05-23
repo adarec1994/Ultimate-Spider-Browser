@@ -59,6 +59,7 @@ struct RenderMesh {
     std::vector<float> normals;
     std::vector<float> uvs;
     std::vector<uint16_t> indices;
+    std::vector<uint16_t> bonePalette;
 
 
     std::string textureName;
@@ -304,6 +305,8 @@ public:
     bool isRotatingBone = false;
     float boneRotationAngle = 0.0f;
     int boneRotationAxis = 1; // 0=X, 1=Y, 2=Z
+    std::map<int, std::array<float, 3>> manualBoneRotations;      // NAL/PCM bone index -> XYZ radians
+    std::map<int, std::array<float, 3>> boneRotationsBeforeEdit;   // used for Esc cancel while rotating
 
     unsigned int skeletonVao = 0;
     unsigned int skeletonVbo = 0;
@@ -316,12 +319,6 @@ public:
         float position[3];       // Model-space position (mat[12..14])
     };
     std::vector<BoneData> skeletonBones;
-
-    // Per-vertex skinning data (for bone deformation)
-    struct VertexSkinData {
-        int boneIndices[4];   // Global bone indices (-1 = unused)
-        float weights[4];     // Bone weights
-    };
 
     void BuildSkeletonVisual(const std::vector<uint8_t>& pcmData);
     void RenderSkeletonOverlay();

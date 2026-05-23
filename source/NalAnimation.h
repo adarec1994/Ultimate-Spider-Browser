@@ -10,12 +10,14 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <algorithm>
 
 constexpr uint32_t NAL_ANIM_CONTAINER = 0x00010101;
 constexpr uint32_t NAL_CHAR_ANIM      = 0x00010003;
 constexpr uint32_t NAL_GEN_ANIM       = 0x00010200;
 constexpr uint32_t NAL_FLAG_LOOPING    = 0x00000001;
 constexpr uint32_t NAL_FLAG_SCENE_ANIM = 0x00020000;
+constexpr float    NAL_PREVIEW_FPS     = 30.0f;
 
 // ─── NAL component type → iComponentID mapping ───
 static inline int nal_type_to_comp_id(uint32_t type_hash) {
@@ -49,6 +51,9 @@ struct NalAnimSkeletonEntry {
 struct NalAnimComponent {
     int comp_ix     = -1;
     int slot_ix     = -1;
+    int flags       = 0;
+    int name_id     = -1;
+    uint32_t type_hash = 0;
     uint32_t mask   = 0;
     int ntracks     = 0;
     std::vector<uint8_t> codec_ixs;
@@ -59,6 +64,7 @@ struct NalAnimComponent {
 // ─── Single animation header + decoded data ───
 struct NalAnimEntry {
     // Header fields
+    int32_t  offset        = 0;
     int32_t  vtbl          = 0;
     int32_t  next_anim_rel = 0;
     uint32_t name_hash     = 0;
@@ -84,6 +90,19 @@ struct NalAnimEntry {
     bool is_char_anim()  const { return version == NAL_CHAR_ANIM; }
     bool is_gen_anim()   const { return version == NAL_GEN_ANIM; }
 
+    int playback_frame_count() const {
+        if (frame_count > 0) return frame_count;
+        int decodedFrames = 0;
+        for (const auto& comp : components) {
+            decodedFrames = std::max(decodedFrames, (int)comp.decoded.frames.size());
+        }
+        return std::max(1, decodedFrames);
+    }
+
+    float playback_duration() const {
+        return (float)playback_frame_count() / NAL_PREVIEW_FPS;
+    }
+
     // Decoded components
     std::vector<NalAnimComponent> components;
     std::vector<std::string> warnings;
@@ -106,51 +125,77 @@ struct NalAnimFile {
 };
 
 // ─── Build component slots from skeleton data (matches _build_component_slots) ───
-static inline std::vector<int> nal_build_component_slots(const NalSkeletonData* skel) {
+struct NalAnimComponentSlot {
+    int slot_ix = 0;
+    int name_id = -1;
+    uint32_t type_hash = 0;
+    int flags = 0;
+    int comp_ix = -1;
+};
+
+static inline std::vector<NalAnimComponentSlot> nal_build_component_slots(const NalSkeletonData* skel) {
     if (skel && !skel->components.empty()) {
-        std::vector<int> slots;
-        for (auto& c : skel->components)
-            slots.push_back(nal_type_to_comp_id(c.type_id));
+        std::vector<NalAnimComponentSlot> slots;
+        for (auto& c : skel->components) {
+            NalAnimComponentSlot slot;
+            slot.slot_ix = c.component_index;
+            slot.name_id = c.component_index;
+            slot.type_hash = c.type_id;
+            slot.flags = c.component_flags;
+            slot.comp_ix = nal_type_to_comp_id(c.type_id);
+            slots.push_back(slot);
+        }
         return slots;
     }
-    // Default order when no skeleton
-    return {
-        NalComp::TORSO_HEAD, NalComp::LEGS_IK, NalComp::ARMS,
-        NalComp::FING52, NalComp::FAKEROOT_STD, NalComp::ARBITRARY_PO, NalComp::GENERIC
+
+    const int default_order[] = {
+        NalComp::ARBITRARY_PO, NalComp::GENERIC, NalComp::FAKEROOT_STD,
+        NalComp::TORSO_HEAD, NalComp::TORSO_HEAD_STD, NalComp::LEGS,
+        NalComp::LEGS_IK, NalComp::ARMS, NalComp::ARMS_IK, NalComp::TENTACLE,
+        NalComp::FING52, NalComp::FING5_CURL, NalComp::FING5_REDUCED,
+        NalComp::FING5
     };
+    std::vector<NalAnimComponentSlot> slots;
+    for (int comp_ix : default_order) {
+        NalAnimComponentSlot slot;
+        slot.slot_ix = comp_ix;
+        slot.comp_ix = comp_ix;
+        slots.push_back(slot);
+    }
+    return slots;
 }
 
 // ─── Decode one animation's components (matches _decode_anim_components) ───
 static inline void nal_decode_anim_components(
     const std::vector<uint8_t>& blob,
     NalAnimEntry& anim,
-    const std::vector<int>& comp_slots)
+    const std::vector<NalAnimComponentSlot>& comp_slots,
+    bool legacy_layout = false)
 {
-    int base = anim.vtbl; // The anim starts at this offset in blob
-    // Actually we need the base offset. Let's compute from the anim struct offsets.
-    // The offsets in the anim header are relative to the start of the anim header.
-    // We need to know where in the blob this anim lives.
+    int comp_list_abs = anim.offset + anim.comp_list_offs - (legacy_layout ? 8 : 0);
+    int anim_list_abs = anim.offset + anim.anim_user_data_offs;
+    int track_list_abs = anim.offset + anim.track_data_offs;
 
-    // comp_list_offs is relative to (base + 8) per the C++ code: compListAbs = base + data.compList_offs - 8
-    // Let's use the stored absolute offsets from parsing
-
-    int comp_list_abs   = anim.comp_list_offs;  // These should be set as absolute during parsing
-    int anim_list_abs   = anim.anim_user_data_offs;
-    int track_list_abs  = anim.track_data_offs;
+    if (comp_list_abs < 0 || anim_list_abs < 0 || track_list_abs < 0) {
+        anim.warnings.push_back("Invalid component table offsets");
+        return;
+    }
 
     int anim_user_data_ix = 0;
     int track_ix = 0;
 
-    for (int slot_ix = 0; slot_ix < (int)comp_slots.size(); ++slot_ix) {
-        int comp_ix = comp_slots[slot_ix];
+    for (const auto& slot : comp_slots) {
+        int comp_ix = slot.comp_ix;
+        int table_ix = legacy_layout ? comp_ix : slot.slot_ix;
+        if (table_ix < 0) continue;
 
         // Read flags from comp list
-        if (comp_list_abs + comp_ix * 4 + 4 > (int)blob.size()) continue;
+        if (comp_list_abs + table_ix * 4 < 0 ||
+            comp_list_abs + table_ix * 4 + 4 > (int)blob.size()) continue;
         int32_t flags;
-        memcpy(&flags, blob.data() + comp_list_abs + comp_ix * 4, 4);
+        memcpy(&flags, blob.data() + comp_list_abs + table_ix * 4, 4);
 
         if ((flags & 0x1) == 0) continue; // no track data
-        if (!nal_has_track(flags)) continue;
 
         // Read per-anim data
         int per_anim_data_offs = anim_list_abs;
@@ -164,17 +209,32 @@ static inline void nal_decode_anim_components(
             ++anim_user_data_ix;
         }
 
+        if (!nal_has_track(flags)) continue;
+        if (comp_ix < 0) {
+            anim.warnings.push_back("Unknown animation component slot " + std::to_string(slot.slot_ix));
+            ++track_ix;
+            continue;
+        }
+
         // Read mask
-        if (per_anim_data_offs + 4 > (int)blob.size()) { track_ix++; continue; }
+        if (per_anim_data_offs < 0 || per_anim_data_offs + 4 > (int)blob.size()) {
+            anim.warnings.push_back("Animation component mask out of range");
+            track_ix++;
+            continue;
+        }
         int32_t mask;
         memcpy(&mask, blob.data() + per_anim_data_offs, 4);
 
         int codec_ixs_abs = per_anim_data_offs + 4;
         int ntracks = nal_get_num_tracks_for_comp(comp_ix, (uint32_t)mask);
-        if (ntracks <= 0) { track_ix++; continue; }
+        if (ntracks < 0) { track_ix++; continue; }
 
         // Read codec indices
-        if (codec_ixs_abs + ntracks > (int)blob.size()) { track_ix++; continue; }
+        if (codec_ixs_abs < 0 || codec_ixs_abs + ntracks > (int)blob.size()) {
+            anim.warnings.push_back("Animation codec table out of range");
+            track_ix++;
+            continue;
+        }
         std::vector<uint8_t> codec_ixs(blob.data() + codec_ixs_abs, blob.data() + codec_ixs_abs + ntracks);
 
         // Read encoded data
@@ -188,16 +248,24 @@ static inline void nal_decode_anim_components(
                 int32_t track_offset;
                 memcpy(&track_offset, blob.data() + track_entry, 4);
                 int track_data_abs = track_list_abs + track_offset;
-                if (track_data_abs + encoded_size <= (int)blob.size()) {
+                if (track_data_abs >= 0 && track_data_abs + encoded_size <= (int)blob.size()) {
                     encoded_data.assign(blob.data() + track_data_abs, blob.data() + track_data_abs + encoded_size);
                 }
+            }
+            if (encoded_data.empty()) {
+                anim.warnings.push_back("Animation encoded track data out of range");
+                track_ix++;
+                continue;
             }
         }
 
         // Decode frames
         NalAnimComponent comp;
         comp.comp_ix = comp_ix;
-        comp.slot_ix = slot_ix;
+        comp.slot_ix = slot.slot_ix;
+        comp.flags = flags;
+        comp.name_id = slot.name_id;
+        comp.type_hash = slot.type_hash;
         comp.mask = (uint32_t)mask;
         comp.ntracks = ntracks;
         comp.codec_ixs = codec_ixs;
@@ -285,6 +353,7 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath, const NalSkele
 
     while (cur > 0 && cur < (int)blob.size() - 60 && count < limit) {
         NalAnimEntry anim;
+        anim.offset = cur;
 
         // Read anim header (60 bytes: vtbl(4) + nextAnim(4) + name(32) + skelIx(4) + version(4) + duration(4) + flags(4) + t_scale(4))
         memcpy(&anim.vtbl, blob.data() + cur, 4);
@@ -308,10 +377,12 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath, const NalSkele
             memcpy(&anim.internal_offs, blob.data() + cur + 76, 4);
             memcpy(&anim.frame_count, blob.data() + cur + 80, 4);
             memcpy(&anim.current_time, blob.data() + cur + 84, 4);
-            // Convert relative offsets to absolute
-            anim.comp_list_offs = cur + anim.comp_list_offs - 8;
-            anim.anim_user_data_offs = cur + anim.anim_user_data_offs;
-            anim.track_data_offs = cur + anim.track_data_offs;
+            if (cur + 132 <= (int)blob.size()) {
+                memcpy(&anim.anim_track_count, blob.data() + cur + 128, 4);
+            }
+        }
+        else if (anim.is_gen_anim() && cur + 72 <= (int)blob.size()) {
+            memcpy(&anim.frame_count, blob.data() + cur + 68, 4);
         }
 
         result.animations.push_back(anim);
@@ -330,6 +401,10 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath, const NalSkele
         for (auto& anim : result.animations) {
             if (!anim.is_char_anim()) continue;
             nal_decode_anim_components(blob, anim, comp_slots);
+            if (anim.components.empty() && anim.comp_list_offs >= 8) {
+                anim.warnings.push_back("No components decoded with slot table; trying legacy component-id table");
+                nal_decode_anim_components(blob, anim, comp_slots, true);
+            }
         }
     }
 

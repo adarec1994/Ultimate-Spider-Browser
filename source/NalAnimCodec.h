@@ -9,6 +9,10 @@
 #include <vector>
 #include <functional>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 // ─── Component IDs (match pcanim_codec.py) ───
 namespace NalComp {
     constexpr int ARBITRARY_PO  = 0;
@@ -34,7 +38,20 @@ constexpr int INITIAL_VALUES_BIT_TABLE[] = {2, 4, 7, 20};
 constexpr int SCENE_INITIAL_VALUES_BIT_TABLE[] = {4, 7, 12, 30};
 
 // ─── Helpers ───
-static inline int nal_popcount(uint32_t v) { return __builtin_popcount(v); }
+static inline int nal_popcount(uint32_t v) {
+#if defined(_MSC_VER)
+    return static_cast<int>(__popcnt(v));
+#elif defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcount(v);
+#else
+    int count = 0;
+    while (v != 0) {
+        v &= v - 1;
+        ++count;
+    }
+    return count;
+#endif
+}
 
 static inline int nal_count(uint32_t mask, uint32_t filt, int weight = 1) {
     return weight * nal_popcount(mask & filt);
@@ -654,12 +671,27 @@ static void integrate_tentacle(NalTrackState* t, const uint8_t* c, uint32_t m, i
     for (int i = 0; i < nt; ++i) { if (f == 1) t[i].whole += t[i].delta; else { float dd = t[i].sec_delta + t[i].delta; t[i].delta = dd; t[i].whole += dd; } }
 }
 
-static void integrate_fing_linear(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
+static void integrate_linear_tracks(NalTrackState* t, const uint8_t* c, int nt, int f, NalBitStream& d, float ts, bool sa) {
     float sq = DEQUANT_SCALE * ts;
-    int nt = nal_get_num_tracks_for_comp(NalComp::FING52, m); // works for fing52/reduced
     nal_dequant_tracks(t, c, nt, d, f, sq, sa);
     if (f == 0) return;
     for (int i = 0; i < nt; ++i) { if (f == 1) t[i].whole += t[i].delta; else { float dd = t[i].sec_delta + t[i].delta; t[i].delta = dd; t[i].whole += dd; } }
+}
+
+static void integrate_fing52(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
+    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING52, m), f, d, ts, sa);
+}
+
+static void integrate_fing5_curl(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
+    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING5_CURL, m), f, d, ts, sa);
+}
+
+static void integrate_fing5_reduced(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
+    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING5_REDUCED, m), f, d, ts, sa);
+}
+
+static void integrate_fing5(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
+    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING5, m), f, d, ts, sa);
 }
 
 // ─── Integrator dispatch ───
@@ -675,10 +707,10 @@ static inline Integrator nal_get_integrator(int comp_ix) {
     case NalComp::ARMS:           return integrate_arms;
     case NalComp::ARMS_IK:        return integrate_arms_ik;
     case NalComp::TENTACLE:       return integrate_tentacle;
-    case NalComp::FING52:
-    case NalComp::FING5_CURL:
-    case NalComp::FING5_REDUCED:
-    case NalComp::FING5:          return integrate_fing_linear;
+    case NalComp::FING52:         return integrate_fing52;
+    case NalComp::FING5_CURL:     return integrate_fing5_curl;
+    case NalComp::FING5_REDUCED:  return integrate_fing5_reduced;
+    case NalComp::FING5:          return integrate_fing5;
     default: return integrate_noop;
     }
 }
@@ -698,14 +730,15 @@ static inline NalDecodedFrames nal_decode_component_frames(
     bool is_scene_anim)
 {
     NalDecodedFrames result;
-    if (frame_count <= 0 || codec_ixs.empty()) return result;
+    if (frame_count <= 0) return result;
+    result.frames.resize(frame_count);
+    if (codec_ixs.empty()) return result;
 
     Integrator integrator = nal_get_integrator(comp_ix);
     int ntracks = (int)codec_ixs.size();
     std::vector<NalTrackState> tracks(ntracks);
     NalBitStream dec(encoded_data.data(), encoded_data.size());
 
-    result.frames.resize(frame_count);
     for (int frame = 0; frame < frame_count; ++frame) {
         integrator(tracks.data(), codec_ixs.data(), mask, frame, dec, current_time, is_scene_anim);
 

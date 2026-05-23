@@ -170,12 +170,13 @@ void RenderUI(SpiderManTool& tool) {
         ImVec2 winPos = ImGui::GetCursorScreenPos();
         ImVec2 winSize = ImGui::GetContentRegionAvail();
         ImGui::Image((void*)(intptr_t)tool.viewportTextureId, winSize, ImVec2(0,1), ImVec2(1,0));
+        bool viewportImageHovered = ImGui::IsItemHovered();
 
         bool uiHovered = ImGui::GetIO().WantCaptureMouse;
         bool isViewportActive = !uiHovered;
 
 
-        if (tool.isWorldMode && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        if (tool.isWorldMode && viewportImageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
             ImVec2 mousePos = ImGui::GetMousePos();
             float localX = mousePos.x - winPos.x;
             float localY = mousePos.y - winPos.y;
@@ -235,7 +236,7 @@ void RenderUI(SpiderManTool& tool) {
                 }
 
                 // Bone selection (click when skeleton is visible)
-                if (tool.showSkeleton && ImGui::IsItemHovered() &&
+                if (tool.showSkeleton && !tool.isRotatingBone && viewportImageHovered &&
                     ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
                     !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
                     ImVec2 mousePos = ImGui::GetMousePos();
@@ -252,6 +253,7 @@ void RenderUI(SpiderManTool& tool) {
                 if (tool.selectedBoneIndex >= 0 && ImGui::IsKeyPressed(ImGuiKey_R) && !tool.isRotatingBone) {
                     tool.isRotatingBone = true;
                     tool.boneRotationAngle = 0.0f;
+                    tool.boneRotationsBeforeEdit = tool.manualBoneRotations;
                 }
 
                 // Axis selection during rotation
@@ -270,10 +272,13 @@ void RenderUI(SpiderManTool& tool) {
                     // Left click confirms, Escape cancels
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         tool.isRotatingBone = false;
+                        tool.boneRotationsBeforeEdit.clear();
                     }
                     if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                         tool.isRotatingBone = false;
-                        tool.ResetBoneRotation();
+                        tool.manualBoneRotations = tool.boneRotationsBeforeEdit;
+                        tool.boneRotationsBeforeEdit.clear();
+                        tool.boneRotationAngle = 0.0f;
                     }
                 }
             }
@@ -413,7 +418,7 @@ void RenderUI(SpiderManTool& tool) {
                             tool.selectedAnimIndex = ai;
                             tool.currentAnimFrame = 0;
                             tool.animPlaybackTime = 0.f;
-                            tool.isAnimPlaying = false;
+                            tool.isAnimPlaying = true;
                         }
                     }
                     ImGui::TreePop();
@@ -423,12 +428,15 @@ void RenderUI(SpiderManTool& tool) {
                     const auto& selAnim = tool.loadedAnimFile->animations[tool.selectedAnimIndex];
                     ImGui::Separator();
                     ImGui::Text("Selected: %s", selAnim.name.c_str());
-                    ImGui::Text("  Frames: %d  Duration: %.3fs", selAnim.frame_count, selAnim.duration);
+                    int playbackFrameCount = selAnim.playback_frame_count();
+                    float playbackDuration = selAnim.playback_duration();
+                    ImGui::Text("  Frames: %d  Header duration: %.3fs  Preview: %.3fs",
+                        playbackFrameCount, selAnim.duration, playbackDuration);
                     ImGui::Text("  T_scale: %.6f", selAnim.t_scale);
                     ImGui::Text("  Decoded comps: %d", (int)selAnim.components.size());
 
                     // Frame scrubber
-                    int maxFrame = std::max(0, selAnim.frame_count - 1);
+                    int maxFrame = std::max(0, playbackFrameCount - 1);
                     ImGui::SliderInt("Frame", &tool.currentAnimFrame, 0, maxFrame);
 
                     if (tool.isAnimPlaying) {
@@ -436,8 +444,7 @@ void RenderUI(SpiderManTool& tool) {
                     } else {
                         if (ImGui::Button("Play")) {
                             tool.isAnimPlaying = true;
-                            tool.animPlaybackTime = (float)tool.currentAnimFrame *
-                                (selAnim.duration > 0.f ? selAnim.duration / (float)selAnim.frame_count : 1.f / 30.f);
+                            tool.animPlaybackTime = (float)tool.currentAnimFrame / NAL_PREVIEW_FPS;
                         }
                     }
                     ImGui::SameLine();

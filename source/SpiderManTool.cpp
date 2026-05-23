@@ -3,6 +3,8 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <cmath>
 
 void SpiderManTool::Log(const std::string& msg) {
     logBuffer += msg + "\n";
@@ -607,6 +609,10 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         if (!animFile->animations.empty()) {
             loadedAnimFile = animFile;
             loadedAnimName = animFile->name;
+            selectedAnimIndex = 0;
+            currentAnimFrame = 0;
+            animPlaybackTime = 0.0f;
+            isAnimPlaying = true;
             Log("Loaded " + std::to_string(animFile->animations.size()) + " animations from: " + animFile->name);
 
             for (size_t a = 0; a < animFile->animations.size(); a++) {
@@ -629,23 +635,16 @@ void SpiderManTool::UpdateAnimationPlayback(float deltaTime) {
     if (selectedAnimIndex >= (int)loadedAnimFile->animations.size()) return;
 
     const auto& anim = loadedAnimFile->animations[selectedAnimIndex];
-    if (anim.frame_count <= 0) return;
+    int frameCount = anim.playback_frame_count();
+    if (frameCount <= 0) return;
 
     animPlaybackTime += deltaTime;
 
-    float frameDuration = (anim.duration > 0.f && anim.frame_count > 1)
-        ? anim.duration / (float)(anim.frame_count - 1) : (1.f / 30.f);
+    float duration = anim.playback_duration();
+    animPlaybackTime = fmodf(animPlaybackTime, duration);
 
-    int newFrame = (int)(animPlaybackTime / frameDuration);
-
-    if (anim.is_looping()) {
-        newFrame = newFrame % anim.frame_count;
-    } else {
-        if (newFrame >= anim.frame_count) {
-            newFrame = anim.frame_count - 1;
-            isAnimPlaying = false;
-        }
-    }
+    int newFrame = (int)floorf(animPlaybackTime * NAL_PREVIEW_FPS);
+    newFrame = std::max(0, std::min(newFrame, frameCount - 1));
 
     currentAnimFrame = newFrame;
 }

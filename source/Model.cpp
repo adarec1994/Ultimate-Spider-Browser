@@ -5,6 +5,8 @@
 #include <fstream>
 #include <cmath>
 
+static constexpr int PREVIEW_MAX_BONES = 64;
+
 static std::string ReadStringTableEntry(const std::vector<uint8_t>& data, uint32_t offset) {
     if (offset == 0 || offset + 32 > data.size()) return "";
     size_t strStart = offset + 4;
@@ -258,14 +260,17 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                         br.Seek(startV + 32);
                         for (int bi = 0; bi < 4; bi++) vert.boneIdx[bi] = br.Read<float>();
                         for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] = br.Read<float>();
-                        // Map local bone indices through section palette to global
-                        if (!bonePalette.palette.empty()) {
-                            for (int bi = 0; bi < 4; bi++) {
-                                int localIdx = (int)vert.boneIdx[bi];
-                                if (localIdx >= 0 && vert.boneWgt[bi] > 0.f)
-                                    vert.boneIdx[bi] = (float)bonePalette.mapIndex(localIdx);
-                                else
-                                    vert.boneWgt[bi] = 0.f;
+                        // OpenUSM keeps blend indices local to this section palette.
+                        for (int bi = 0; bi < 4; bi++) {
+                            int localIdx = (int)(vert.boneIdx[bi] + 0.5f);
+                            int localLimit = bonePalette.palette.empty()
+                                ? PREVIEW_MAX_BONES
+                                : std::min(PREVIEW_MAX_BONES, (int)bonePalette.palette.size());
+                            if (localIdx >= 0 && localIdx < localLimit && vert.boneWgt[bi] > 0.f) {
+                                vert.boneIdx[bi] = (float)localIdx;
+                            } else {
+                                vert.boneIdx[bi] = 0.f;
+                                vert.boneWgt[bi] = 0.f;
                             }
                         }
                         // Normalize weights
@@ -274,7 +279,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                             float inv = 1.f / wTotal;
                             for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] *= inv;
                         } else {
-                            vert.boneWgt[0] = 1.f;
+                            for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] = 0.f;
                         }
                     }
                 } else if (stride == 24) {
@@ -355,6 +360,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             mesh.textureId = tex;
             mesh.isTranslucent = mat.isTranslucent;
             mesh.shaderType = mat.shaderType;
+            mesh.bonePalette = bonePalette.palette;
 
 
             std::string texNameLower = StrToLower(mat.textureName);
@@ -581,13 +587,16 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                         br.Seek(startV + 32);
                         for (int bi = 0; bi < 4; bi++) vert.boneIdx[bi] = br.Read<float>();
                         for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] = br.Read<float>();
-                        if (!bonePalette.palette.empty()) {
-                            for (int bi = 0; bi < 4; bi++) {
-                                int localIdx = (int)vert.boneIdx[bi];
-                                if (localIdx >= 0 && vert.boneWgt[bi] > 0.f)
-                                    vert.boneIdx[bi] = (float)bonePalette.mapIndex(localIdx);
-                                else
-                                    vert.boneWgt[bi] = 0.f;
+                        for (int bi = 0; bi < 4; bi++) {
+                            int localIdx = (int)(vert.boneIdx[bi] + 0.5f);
+                            int localLimit = bonePalette.palette.empty()
+                                ? PREVIEW_MAX_BONES
+                                : std::min(PREVIEW_MAX_BONES, (int)bonePalette.palette.size());
+                            if (localIdx >= 0 && localIdx < localLimit && vert.boneWgt[bi] > 0.f) {
+                                vert.boneIdx[bi] = (float)localIdx;
+                            } else {
+                                vert.boneIdx[bi] = 0.f;
+                                vert.boneWgt[bi] = 0.f;
                             }
                         }
                         float wTotal = vert.boneWgt[0] + vert.boneWgt[1] + vert.boneWgt[2] + vert.boneWgt[3];
@@ -595,7 +604,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                             float inv = 1.f / wTotal;
                             for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] *= inv;
                         } else {
-                            vert.boneWgt[0] = 1.f;
+                            for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] = 0.f;
                         }
                     }
                 } else if (stride == 24) {
@@ -675,6 +684,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             mesh.textureId = tex;
             mesh.isTranslucent = mat.isTranslucent;
             mesh.shaderType = mat.shaderType;
+            mesh.bonePalette = bonePalette.palette;
 
             std::string texNameLower = StrToLower(mat.textureName);
             mesh.isFakeShadow = (texNameLower.find("fake_shadow") != std::string::npos);
