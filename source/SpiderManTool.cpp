@@ -488,30 +488,29 @@ int SpiderManTool::FindEntryBySignature(uint32_t sig) const {
 void SpiderManTool::LoadSkeletonForCurrentPack() {
     loadedSkeleton.reset();
     loadedSkeletonName.clear();
+    skeletonCandidates.clear();
+    activeSkeletonCandidate = -1;
     if (pcPackData.empty() || entries.empty()) return;
 
-    // Search entries for skeleton data (class field matches nalSkeletonFileHeader)
-    // Skeleton files start with a uint32 class value, then version.
-    // We look for entries that aren't PCM or DDS and try parsing them.
+    // Walk every non-PCM/non-DDS entry, try to parse it as a skeleton, and keep
+    // every one that produces a non-empty bone map / generic node list. We
+    // previously stopped at the first match -- that broke for packs with
+    // multiple skeletons because we'd attach the wrong one to whichever mesh
+    // the user opened. The candidate list is then ranked against the active
+    // mesh name in SelectSkeletonForMesh.
     for (int i = 0; i < (int)entries.size(); i++) {
         const auto& e = entries[i];
         if (e.isPcm || e.isDds) continue;
         if (e.size < 80 || e.offset + e.size > pcPackData.size()) continue;
 
-        // Check if it looks like a skeleton file: version should be reasonable
         uint32_t cls, ver;
         memcpy(&cls, &pcPackData[e.offset], 4);
         memcpy(&ver, &pcPackData[e.offset + 4], 4);
 
-        // nalSkeletonFile versions we know: character skeletons have version patterns
-        // Generic skeletons have version 0x10200
-        // Character skeletons: check for name/category fields at offset 8..72
-        // Quick heuristic: the name field starts at offset 8, should have readable ASCII
         bool looksLikeSkel = false;
         if (ver == 0x10200) {
             looksLikeSkel = true; // Generic skeleton
         } else if (ver > 0 && ver < 0x100000) {
-            // Check name bytes for printable ASCII
             int printable = 0;
             for (size_t j = e.offset + 12; j < e.offset + 40 && j < pcPackData.size(); j++) {
                 uint8_t c = pcPackData[j];
@@ -523,7 +522,6 @@ void SpiderManTool::LoadSkeletonForCurrentPack() {
 
         if (!looksLikeSkel) continue;
 
-        // Write temp file and parse
         std::string tempPath = "temp_skel.pcskel";
         {
             std::ofstream tmp(tempPath, std::ios::binary);
@@ -535,46 +533,114 @@ void SpiderManTool::LoadSkeletonForCurrentPack() {
         try {
             *skel = ParseNalSkeleton(tempPath);
         } catch (const std::exception& ex) {
-            Log("Skeleton parse error: " + std::string(ex.what()));
+            Log("Skeleton parse error in entry " + std::to_string(i) + ": " + ex.what());
             std::remove(tempPath.c_str());
             continue;
         } catch (...) {
-            Log("Skeleton parse error (unknown)");
+            Log("Skeleton parse error (unknown) in entry " + std::to_string(i));
             std::remove(tempPath.c_str());
             continue;
         }
         std::remove(tempPath.c_str());
 
-        if (!skel->bone_map.empty() || !skel->generic_nodes.empty()) {
-            loadedSkeleton = skel;
-            loadedSkeletonName = skel->name;
-            Log("Loaded skeleton: " + skel->name + " (" +
-                std::to_string(skel->bone_map.size()) + " bones, " +
-                std::to_string(skel->components.size()) + " components) [" +
-                skel->skeleton_kind + "]");
+        if (skel->bone_map.empty() && skel->generic_nodes.empty()) continue;
 
-            // Log component types
-            for (const auto& c : skel->components) {
-                if (!c.type_name.empty() && c.type_name != "Unknown") {
-                    std::string info = "  Component: " + c.type_name;
-                    if (!c.bone_indices.empty())
-                        info += " (" + std::to_string(c.bone_indices.size()) + " bone refs)";
-                    if (c.default_pose.valid)
-                        info += " [has default pose]";
-                    Log(info);
-                }
-            }
+        SkeletonCandidate cand;
+        cand.data = skel;
+        cand.name = skel->name;
+        cand.entryIndex = i;
+        skeletonCandidates.push_back(cand);
+    }
 
-            // Log bone hierarchy
-            for (const auto& [idx, name] : skel->bone_map) {
-                int parent = skel->parent_map.count(idx) ? skel->parent_map.at(idx) : -1;
-                std::string parentName = (parent >= 0 && skel->bone_map.count(parent))
-                    ? skel->bone_map.at(parent) : "ROOT";
-                Log("  Bone[" + std::to_string(idx) + "] " + name + " -> " + parentName);
-            }
-            return;
+    Log("Found " + std::to_string(skeletonCandidates.size()) + " skeleton(s) in pack");
+    for (size_t k = 0; k < skeletonCandidates.size(); ++k) {
+        const auto& c = skeletonCandidates[k];
+        Log("  [" + std::to_string(k) + "] " + (c.name.empty() ? "<unnamed>" : c.name) +
+            " (" + std::to_string(c.data->bone_map.size()) + " bones, " +
+            std::to_string(c.data->components.size()) + " components) [" +
+            c.data->skeleton_kind + "]");
+    }
+
+    if (!skeletonCandidates.empty()) {
+        // Default to the first candidate. The mesh-load path will refine this
+        // via SelectSkeletonForMesh once it knows the model name.
+        ActivateSkeletonCandidate(0);
+    }
+}
+
+void SpiderManTool::ActivateSkeletonCandidate(int candidateIndex) {
+    if (candidateIndex < 0 || candidateIndex >= (int)skeletonCandidates.size()) {
+        loadedSkeleton.reset();
+        loadedSkeletonName.clear();
+        activeSkeletonCandidate = -1;
+        return;
+    }
+    if (activeSkeletonCandidate == candidateIndex && loadedSkeleton) return;
+
+    activeSkeletonCandidate = candidateIndex;
+    const auto& cand = skeletonCandidates[candidateIndex];
+    loadedSkeleton = cand.data;
+    loadedSkeletonName = cand.name;
+
+    Log("Active skeleton: " + (cand.name.empty() ? "<unnamed>" : cand.name) +
+        " (" + std::to_string(cand.data->bone_map.size()) + " bones)");
+}
+
+void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName) {
+    if (skeletonCandidates.empty()) return;
+    if (meshName.empty()) {
+        ActivateSkeletonCandidate(0);
+        return;
+    }
+
+    // Score each candidate by how well its name matches the mesh.
+    //   - exact case-insensitive match (best)
+    //   - prefix match either direction
+    //   - substring match either direction
+    //   - longest common substring (fallback, weighted by length)
+    std::string meshLower = StrToLower(meshName);
+    // Strip common suffixes/prefixes that don't help matching
+    auto stripExt = [](std::string s) {
+        size_t dot = s.find_last_of('.');
+        if (dot != std::string::npos) s.resize(dot);
+        return s;
+    };
+    meshLower = stripExt(meshLower);
+
+    int bestIdx = 0;
+    int bestScore = -1;
+    for (size_t k = 0; k < skeletonCandidates.size(); ++k) {
+        const std::string skelLower = StrToLower(skeletonCandidates[k].name);
+        if (skelLower.empty()) continue;
+        int score = 0;
+        if (skelLower == meshLower) {
+            score = 1000;
+        } else if (meshLower.find(skelLower) != std::string::npos ||
+                   skelLower.find(meshLower) != std::string::npos) {
+            // Substring -- prefer matches near the start.
+            size_t a = meshLower.find(skelLower);
+            size_t b = skelLower.find(meshLower);
+            score = 500 - (int)std::min(a == std::string::npos ? 999 : a,
+                                        b == std::string::npos ? 999 : b);
+        } else {
+            // Cheap longest common prefix in chars (no allocations).
+            int prefix = 0;
+            int lim = (int)std::min(meshLower.size(), skelLower.size());
+            while (prefix < lim && meshLower[prefix] == skelLower[prefix]) ++prefix;
+            score = prefix;
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            bestIdx = (int)k;
         }
     }
+
+    if (bestScore <= 0) {
+        // No usable match; keep whatever's currently active (or default to 0).
+        if (activeSkeletonCandidate < 0) ActivateSkeletonCandidate(0);
+        return;
+    }
+    ActivateSkeletonCandidate(bestIdx);
 }
 
 void SpiderManTool::LoadAnimationForCurrentPack() {

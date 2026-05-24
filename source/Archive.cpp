@@ -8,23 +8,42 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
 
     isModelLoaded = false;
     isModelPreview = false;
-    for (auto& m : previewMeshes) {
-        if (m.vao) glDeleteVertexArrays(1, &m.vao);
-        if (m.vbo) glDeleteBuffers(1, &m.vbo);
-        if (m.ebo) glDeleteBuffers(1, &m.ebo);
-    }
-    previewMeshes.clear();
 
-    for (auto& t : textureCache) {
-        if (t.second != 0) glDeleteTextures(1, &t.second);
-    }
-    textureCache.clear();
+    // If the user is browsing the world (isWorldMode), keep the world rendered
+    // -- clicking another pack should just switch the file browser, not blow
+    // the loaded city away. LoadModelToGL handles the actual teardown when
+    // the user opens a single-mesh preview.
+    const bool preserveWorld = isWorldMode;
 
-    // Clear name-based texture cache too
-    for (auto& t : textureNameCache) {
-        if (t.second != 0) glDeleteTextures(1, &t.second);
+    if (!preserveWorld) {
+        for (auto& m : previewMeshes) {
+            if (m.vao) glDeleteVertexArrays(1, &m.vao);
+            if (m.vbo) glDeleteBuffers(1, &m.vbo);
+            if (m.ebo) glDeleteBuffers(1, &m.ebo);
+        }
+        previewMeshes.clear();
+
+        for (auto& t : textureCache) {
+            if (t.second != 0) glDeleteTextures(1, &t.second);
+        }
+        textureCache.clear();
+
+        // Clear name-based texture cache too
+        for (auto& t : textureNameCache) {
+            if (t.second != 0) glDeleteTextures(1, &t.second);
+        }
+        textureNameCache.clear();
+
+        // World mesh selection only matters when world geometry is loaded.
+        selectedMeshIndex = -1;
+        selectedMeshPcmData.clear();
+        showWorldMeshHexEditor = false;
+
+        // materialMap is per-PCM-being-parsed; ParseMaterialEntries rebuilds
+        // it on every AddMeshFromData call. Clearing here is the safe default
+        // for non-world flows.
+        materialMap.clear();
     }
-    textureNameCache.clear();
 
     if (ddsTextureId != 0) {
         glDeleteTextures(1, &ddsTextureId);
@@ -35,14 +54,6 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     selectedFileIndex = -1;
     currentPcmInfos.clear();
     currentPcmIndex = -1;
-
-    // Reset world mesh selection
-    selectedMeshIndex = -1;
-    selectedMeshPcmData.clear();
-    showWorldMeshHexEditor = false;
-    isWorldMode = false;
-
-    materialMap.clear();
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) { Log("Failed to open " + path); return; }

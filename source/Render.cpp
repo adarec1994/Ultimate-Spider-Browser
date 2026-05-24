@@ -634,6 +634,44 @@ unsigned int SpiderManTool::LoadTextureByName(const std::string& textureName) {
         }
     }
 
+    // Area-prefix fallback. Many materials reference area-specific texture
+    // names that don't actually exist as DDS files -- the engine resolves
+    // them at runtime to a generic counterpart (typically the `nat_` variant
+    // or the prefix-stripped name). Example: tree leaves in GG.PCPACK have
+    // material->field_60 = "gg_tree_leaves" but no pack ships a DDS with
+    // that hash; the actual texture is "nat_tree_leaves" in GJ.PCPACK +
+    // HK*.PCPACK. Without this fallback the leaves render textureless and
+    // the fragment shader paints them as solid vertex color (= green square,
+    // hence "no alpha" in the user's report). The fallback tries two names:
+    //   1. swap a 2-3 char area prefix for "nat_"  (gg_tree_leaves -> nat_tree_leaves)
+    //   2. strip the prefix entirely               (gg_tree_leaves -> tree_leaves)
+    // We bail out if the name already starts with "nat_" to avoid recursion,
+    // and we only call ourselves recursively (so any subsequent fallback hits
+    // the caches just set up).
+    auto tryFallback = [&](const std::string& candidate) -> unsigned int {
+        if (candidate.empty() || candidate == nameLower) return 0;
+        unsigned int tex = LoadTextureByName(candidate);
+        if (tex != 0) {
+            // Cache the result against the ORIGINAL name so future lookups
+            // skip the fallback work entirely.
+            textureNameCache[nameLower] = tex;
+        }
+        return tex;
+    };
+    if (nameLower.compare(0, 4, "nat_") != 0) {
+        // Pattern: "{prefix}_{rest}" where prefix is 2 or 3 chars (area code).
+        size_t under = nameLower.find('_');
+        if (under == 2 || under == 3) {
+            std::string rest = nameLower.substr(under + 1);
+            if (!rest.empty()) {
+                unsigned int tex = tryFallback("nat_" + rest);
+                if (tex != 0) return tex;
+                tex = tryFallback(rest);
+                if (tex != 0) return tex;
+            }
+        }
+    }
+
     textureNameCache[nameLower] = 0;
     return 0;
 }
@@ -678,23 +716,35 @@ void SpiderManTool::InitModelPreview() {
 
     if (modelProgram != 0 && skeletonProgram != 0) return;
 
+    // Vertex shader -- skinning is the only thing the game's vertex shader does
+    // that we still emulate (per us_person/0_VS.txt and friends). The interesting
+    // detail is that we now pass the per-vertex baked color straight through to
+    // the fragment shader, matching the `mov oD0, v2` line of us_pcuv_VS.txt.
     const char* vShaderCode = "#version 130\n"
         "in vec3 pos;\n"
         "in vec3 normal;\n"
         "in vec2 texCoord;\n"
         "in vec4 boneIndices;\n"
         "in vec4 boneWeights;\n"
+        "in vec4 vertColor;\n"
         "out vec2 TexCoord;\n"
-        "out vec3 FragNormal;\n"
-        "out vec3 FragPos;\n"
+        "out vec4 VertColor;\n"
+        "out vec3 WorldPos;\n"   // for water fresnel
         "uniform mat4 model;\n"
         "uniform mat4 view;\n"
         "uniform mat4 projection;\n"
         "uniform bool useSkinning;\n"
         "uniform mat4 boneMatrices[64];\n"
+        // Water: rolling-wave displacement and a small UV scroll. The engine
+        // ports a high-poly `oceanmesh` (USOcean2Shader, Archive/OpenUSM ngl.cpp:
+        // OceanMesh) plus per-TOD water textures (water_day.dat / water_night.dat
+        // etc.). We don't replicate the original DX9 shader pipeline; instead we
+        // animate the existing mesh: two cross-summed sin waves displace Y, and
+        // the texCoords get a slow scroll so any caustic-like texture looks alive.
+        "uniform bool isWater;\n"
+        "uniform float time;\n"
         "void main() {\n"
         "    vec4 skinnedPos;\n"
-        "    vec3 skinnedNorm;\n"
         "    if (useSkinning && (boneWeights.x + boneWeights.y + boneWeights.z + boneWeights.w) > 0.01) {\n"
         "        mat4 skinMat = mat4(0.0);\n"
         "        float usedWeight = 0.0;\n"
@@ -709,63 +759,115 @@ void SpiderManTool::InitModelPreview() {
         "        if (usedWeight > 0.001) {\n"
         "            if (usedWeight < 0.999) skinMat += (1.0 - usedWeight) * mat4(1.0);\n"
         "            skinnedPos = skinMat * vec4(pos, 1.0);\n"
-        "            skinnedNorm = mat3(skinMat) * normal;\n"
         "        } else {\n"
         "            skinnedPos = vec4(pos, 1.0);\n"
-        "            skinnedNorm = normal;\n"
         "        }\n"
         "    } else {\n"
         "        skinnedPos = vec4(pos, 1.0);\n"
-        "        skinnedNorm = normal;\n"
         "    }\n"
-        "    TexCoord = texCoord;\n"
-        "    FragNormal = mat3(model) * skinnedNorm;\n"
-        "    FragPos = vec3(model * skinnedPos);\n"
-        "    gl_Position = projection * view * model * skinnedPos;\n"
+        "    if (isWater) {\n"
+        // Two sin waves at orthogonal scales (a low slow swell + faster ripple)
+        // summed for a less repetitive surface. Amplitudes are conservative
+        // because the game uses game-unit scale (~1.0 ~= 1 metre).
+        "        float wave1 = sin(skinnedPos.x * 0.0040 + time * 0.7);\n"
+        "        float wave2 = sin(skinnedPos.z * 0.0055 + time * 0.9);\n"
+        "        float wave3 = sin((skinnedPos.x + skinnedPos.z) * 0.012 + time * 1.6);\n"
+        "        skinnedPos.y += wave1 * 6.0 + wave2 * 5.0 + wave3 * 1.5;\n"
+        "    }\n"
+        "    vec4 worldPos = model * skinnedPos;\n"
+        "    WorldPos = worldPos.xyz;\n"
+        "    if (isWater) {\n"
+        // Slow UV scroll so any baked caustic / specular texture moves.
+        "        TexCoord = texCoord + vec2(time * 0.012, time * 0.009);\n"
+        "    } else {\n"
+        "        TexCoord = texCoord;\n"
+        "    }\n"
+        "    VertColor = vertColor;\n"
+        "    gl_Position = projection * view * worldPos;\n"
         "}\n";
 
+    // Fragment shader -- mirror of OpenUSM's us_pcuv pixel shader:
+    //     tex t0
+    //     mul r0, t0, v0    // texture * interpolated vertex color
+    // The game has NO per-pixel lighting; the cel-shaded look comes from baked
+    // per-vertex colors stored in the PCM. We add the alpha-mode handling we
+    // already had (PUNCHTHROUGH discard, BLEND zero-alpha discard) and a couple
+    // of editor-only branches (isFakeShadow / isColorVolume / isHighlighted)
+    // that have no analogue in the original engine.
+    //
+    // blendMode values match OpenUSM nglBlendModeType (ngl.h:36-51):
+    //   0 = OPAQUE, 1 = PUNCHTHROUGH (alpha test discard), 2+ = BLEND/ADDITIVE/etc.
     const char* fShaderCode = "#version 130\n"
         "in vec2 TexCoord;\n"
-        "in vec3 FragNormal;\n"
-        "in vec3 FragPos;\n"
+        "in vec4 VertColor;\n"
+        "in vec3 WorldPos;\n"
         "out vec4 FragColor;\n"
         "uniform sampler2D diffTexture;\n"
         "uniform bool hasTexture;\n"
-        "uniform bool isTranslucent;\n"
+        "uniform int  blendMode;\n"
+        "uniform float alphaRef;\n"
         "uniform bool isFakeShadow;\n"
         "uniform bool isColorVolume;\n"
         "uniform bool isHighlighted;\n"
-        "uniform vec3 viewPos;\n"
+        // Debug-transparent meshes (collision proxies, color/shadow volumes,
+        // GENERIC_WHITE placeholders, triggers) render as a faint white ghost
+        // so the user can see them without them dominating the view.
+        "uniform bool debugTransparent;\n"
+        // Water: tint, fresnel-style alpha, and a fake spec highlight. The
+        // engine has a dedicated USOcean2Shader pass we can't reproduce in
+        // detail; this is a stylised approximation that reads as water in our
+        // viewer (semi-transparent blue, brighter at grazing angles, animated
+        // by the vertex shader's wave displacement + UV scroll).
+        "uniform bool isWater;\n"
+        "uniform float time;\n"
+        "uniform vec3 viewPosWorld;\n"
         "void main() {\n"
-        "    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));\n"
-        "    vec3 norm = normalize(FragNormal);\n"
-        "    float diff = dot(norm, lightDir);\n"
-        "    float toon;\n"
-        "    if (diff > 0.7) toon = 1.0;\n"
-        "    else if (diff > 0.35) toon = 0.7;\n"
-        "    else if (diff > 0.0) toon = 0.5;\n"
-        "    else toon = 0.3;\n"
-        "    vec3 baseColor;\n"
-        "    float alpha = 1.0;\n"
-        "    if (isFakeShadow || isColorVolume) {\n"
-        "        baseColor = vec3(0.0, 0.0, 0.0);\n"
-        "        alpha = 0.3;\n"
+        "    vec4 result;\n"
+        "    if (isWater) {\n"
+        // Two sample taps with offset UVs to imitate moving surface detail.
+        "        vec3 deepColor    = vec3(0.05, 0.20, 0.32);\n"
+        "        vec3 shallowColor = vec3(0.30, 0.55, 0.62);\n"
+        "        vec4 base = vec4(deepColor, 0.85);\n"
+        "        if (hasTexture) {\n"
+        "            vec4 tex1 = texture(diffTexture, TexCoord);\n"
+        "            vec4 tex2 = texture(diffTexture, TexCoord * 1.7 + vec2(time * -0.018, time * 0.014));\n"
+        "            float caustic = (tex1.r + tex2.r) * 0.5;\n"
+        "            base.rgb = mix(deepColor, shallowColor, caustic);\n"
+        "        }\n"
+        // Fresnel: water gets bluer at low grazing angles and brighter looking
+        // straight down. WorldPos and viewPosWorld are in world space.
+        "        vec3 viewDir = normalize(viewPosWorld - WorldPos);\n"
+        "        float fres = pow(1.0 - clamp(viewDir.y, 0.0, 1.0), 3.0);\n"
+        "        base.rgb = mix(base.rgb, shallowColor, fres * 0.4);\n"
+        "        base.a   = mix(0.78, 0.94, fres);\n"
+        // Tiny fake highlight near top of view (cheap sun-on-water glint).
+        "        float glint = pow(max(0.0, viewDir.y), 8.0) * 0.25;\n"
+        "        base.rgb += vec3(glint);\n"
+        "        result = base;\n"
+        "    } else if (debugTransparent) {\n"
+        "        result = vec4(0.85, 0.85, 0.9, 0.18);\n"
+        "    } else if (isFakeShadow || isColorVolume) {\n"
+        "        result = vec4(0.0, 0.0, 0.0, 0.3);\n"
         "    } else if (hasTexture) {\n"
         "        vec4 texColor = texture(diffTexture, TexCoord);\n"
-        "        baseColor = texColor.rgb;\n"
-        "        if (isTranslucent) {\n"
-        "            // alpha disabled for debugging\n"
+        "        if (blendMode == 1) {\n"               // PUNCHTHROUGH
+        "            if (texColor.a < alphaRef) discard;\n"
+        "        } else if (blendMode >= 2) {\n"        // BLEND / ADDITIVE / etc.
+        // OpenUSM's setBlending sets alpha-test AlphaFunc=GREATER ref=0 for BLEND
+        // (ngl_dx_state.cpp:226-235). Discard fully-transparent texels so foliage
+        // cutouts don't leak as opaque rectangles.
+        "            if (texColor.a < 0.004) discard;\n"
         "        }\n"
+        "        result = texColor * VertColor;\n"      // mul r0, t0, v0
         "    } else {\n"
-        "        baseColor = vec3(0.8, 0.8, 0.8);\n"
+        // No texture bound -- fall back to plain vertex color so the mesh still
+        // shows its baked shading instead of solid gray.
+        "        result = VertColor;\n"
         "    }\n"
         "    if (isHighlighted) {\n"
-        "        baseColor = mix(baseColor, vec3(0.2, 1.0, 0.3), 0.6);\n"
+        "        result.rgb = mix(result.rgb, vec3(0.2, 1.0, 0.3), 0.6);\n"
         "    }\n"
-        "    vec3 ambient = 0.2 * baseColor;\n"
-        "    vec3 diffuse = toon * baseColor;\n"
-        "    vec3 result = ambient + diffuse;\n"
-        "    FragColor = vec4(result, alpha);\n"
+        "    FragColor = result;\n"
         "}\n";
 
     unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
@@ -788,6 +890,7 @@ void SpiderManTool::InitModelPreview() {
     glBindAttribLocation(modelProgram, 2, "texCoord");
     glBindAttribLocation(modelProgram, 3, "boneIndices");
     glBindAttribLocation(modelProgram, 4, "boneWeights");
+    glBindAttribLocation(modelProgram, 5, "vertColor");
     glLinkProgram(modelProgram);
     { int ok; glGetProgramiv(modelProgram, GL_LINK_STATUS, &ok);
       if (!ok) { char log[512]; glGetProgramInfoLog(modelProgram, 512, NULL, log); printf("LINK ERROR: %s\n", log); } }
@@ -1428,6 +1531,121 @@ void SpiderManTool::RenderModelPreview() {
                     rootOffset[2] += fv[5] - sc->default_pose.pelvis_pos[2];
                 }
             }
+            else if (comp.comp_ix == NalComp::ARBITRARY_PO) {
+                // ArbitraryPO drives weapon/holster/prop attachment bones.
+                // Without this branch the bones stay at their bind pose while
+                // the rest of the character moves around them, producing the
+                // stretched-spike artifacts visible on Sable's swords.
+                //
+                // Layout of one frame's decoded values (per pcanim_comps.py:2649-2733):
+                //   For each masked bit 0..15, the codec emits one vec3.
+                //   Bits 0..11  -> arbStateQuats[bit]   (XYZ form of a quat)
+                //   Bits 12..15 -> arbStatePositions[bit-12]
+                //
+                // Then walk sc->arb_nodes:
+                //   - If is_quat_anim, the node's quat tracks arbStateQuats[quat_ix].
+                //   - If is_pos_anim, the node's position tracks arbStatePositions[pos_ix].
+                //   - Otherwise fall back to the component's default pose (the per-skel
+                //     constants live in arbitrary_skel_quats/positions in Python; we don't
+                //     extract those yet, so we treat default_pose.quats/positions as the
+                //     canonical pose -- right for the common case where the canonical pose
+                //     IS the default pose).
+                //
+                // Each node's bone gets a world matrix = parent_world * matFromQuatPos(quat, pos)
+                // where parent_world comes from another arb_node, runtimeWorld, or the bind matrix.
+
+                QuatWXYZ arbStateQuats[12];
+                std::array<float, 3> arbStatePositions[4];
+                for (int i = 0; i < 12; ++i) {
+                    arbStateQuats[i] = (i < (int)sc->default_pose.quats.size())
+                        ? QuatFromNal(sc->default_pose.quats[i])
+                        : QuatWXYZ{};
+                }
+                for (int i = 0; i < 4; ++i) {
+                    arbStatePositions[i] = (i < (int)sc->default_pose.positions.size())
+                        ? sc->default_pose.positions[i]
+                        : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+                }
+
+                // Consume the frame's per-bit values into the state arrays.
+                for (int bit = 0; bit < 16; ++bit) {
+                    if ((comp.mask & (1u << bit)) == 0) continue;
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    if (bit < 12) {
+                        arbStateQuats[bit] = QuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    } else {
+                        arbStatePositions[bit - 12] = {xyz[0], xyz[1], xyz[2]};
+                    }
+                }
+
+                // ArbitraryPO chains can nest (one arb_node parented to another).
+                // Do up to a few passes so children find their parents regardless of
+                // file order. Cap iterations to avoid infinite loops on bad data.
+                std::map<int, std::array<float, 16>> arbWorld;
+                const int kMaxArbPasses = 4;
+                for (int pass = 0; pass < kMaxArbPasses; ++pass) {
+                    bool progressed = false;
+                    for (const auto& node : sc->arb_nodes) {
+                        int bid = node.my_matrix_ix;
+                        if (bid < 0 || bid >= pcmBoneCount) continue;
+                        if (arbWorld.count(bid)) continue; // already done this pass
+
+                        // Resolve quat
+                        QuatWXYZ quat = QuatWXYZ{};
+                        if (node.is_quat_anim && node.quat_ix < 12) {
+                            quat = arbStateQuats[node.quat_ix];
+                        } else if (node.quat_ix < (int)sc->default_pose.quats.size()) {
+                            quat = QuatFromNal(sc->default_pose.quats[node.quat_ix]);
+                        }
+
+                        // Resolve position
+                        std::array<float, 3> pos = {0.0f, 0.0f, 0.0f};
+                        if (node.is_pos_anim && node.pos_ix < 4) {
+                            pos = arbStatePositions[node.pos_ix];
+                        } else if (node.pos_ix < (int)sc->default_pose.positions.size()) {
+                            pos = sc->default_pose.positions[node.pos_ix];
+                        }
+
+                        float local[16];
+                        matFromQuatPos(quat, pos, local);
+
+                        // Resolve parent world. Search order matches Python:
+                        //   comp_world (this arb pass) -> frame runtimeWorld -> bind matrix.
+                        int parentId = node.parent_matrix_ix;
+                        float world[16];
+                        bool haveParent = false;
+                        if (parentId >= 0) {
+                            auto pit = arbWorld.find(parentId);
+                            if (pit != arbWorld.end()) {
+                                Mat4Multiply(pit->second.data(), local, world);
+                                haveParent = true;
+                            } else if (getRuntimeWorld(parentId, world)) {
+                                float tmp[16];
+                                Mat4Multiply(world, local, tmp);
+                                memcpy(world, tmp, sizeof(tmp));
+                                haveParent = true;
+                            } else if (parentId < pcmBoneCount) {
+                                // Fall back to parent's bind matrix. May be wrong if the
+                                // parent was meant to be animated by another component
+                                // that hasn't run yet -- a later pass might fix it.
+                                Mat4Multiply(skeletonBones[parentId].bindMatrix, local, world);
+                                haveParent = true;
+                            }
+                        }
+                        if (!haveParent) {
+                            memcpy(world, local, sizeof(float) * 16);
+                        }
+
+                        std::array<float, 16> stored{};
+                        memcpy(stored.data(), world, sizeof(float) * 16);
+                        arbWorld[bid] = stored;
+                        storeRuntimeWorld(bid, world);
+                        progressed = true;
+                    }
+                    if (!progressed) break;
+                }
+            }
             else if (comp.comp_ix == NalComp::FING5) {
                 if (sc->bone_indices.size() < 30) continue;
                 for (int bit = 0; bit < 30; ++bit) {
@@ -1804,10 +2022,21 @@ void SpiderManTool::RenderModelPreview() {
 
     GLint locDiffTexture = glGetUniformLocation(modelProgram, "diffTexture");
     GLint locHasTexture = glGetUniformLocation(modelProgram, "hasTexture");
-    GLint locIsTranslucent = glGetUniformLocation(modelProgram, "isTranslucent");
+    GLint locBlendMode = glGetUniformLocation(modelProgram, "blendMode");
+    GLint locAlphaRef = glGetUniformLocation(modelProgram, "alphaRef");
     GLint locIsFakeShadow = glGetUniformLocation(modelProgram, "isFakeShadow");
     GLint locIsColorVolume = glGetUniformLocation(modelProgram, "isColorVolume");
     GLint locIsHighlighted = glGetUniformLocation(modelProgram, "isHighlighted");
+    GLint locDebugTransparent = glGetUniformLocation(modelProgram, "debugTransparent");
+    GLint locIsWater = glGetUniformLocation(modelProgram, "isWater");
+    GLint locTime = glGetUniformLocation(modelProgram, "time");
+    GLint locViewPosWorld = glGetUniformLocation(modelProgram, "viewPosWorld");
+    // Wall-clock time in seconds since process start; drives water animation
+    // (vertex wave displacement + UV scroll). Set once per frame here so all
+    // water meshes share the same phase.
+    float nowSeconds = (float)glfwGetTime();
+    glUniform1f(locTime, nowSeconds);
+    glUniform3f(locViewPosWorld, camPos[0], camPos[1], camPos[2]);
 
     auto uploadSectionBoneMatrices = [&](const RenderMesh& mesh) {
         if (!skinningActive) return;
@@ -1860,42 +2089,135 @@ void SpiderManTool::RenderModelPreview() {
         return true;
     };
 
-    glDisable(GL_BLEND);
-    glDepthMask(GL_TRUE);
     glDisable(GL_CULL_FACE);  // No backface culling - render both sides of all geometry
 
-    // First pass: render ALL meshes as opaque (alpha disabled)
+    // Bucket meshes by blend mode. Three passes:
+    //   1. Opaque        — depth on, depth-write on, no blend
+    //   2. Punchthrough  — same, fragment shader discards sub-threshold texels
+    //   3. Translucent   — depth on, depth-write OFF, blend on, back-to-front sorted
+    // Mirrors OpenUSM's sort-info classification (NGLSORT_OPAQUE vs NGLSORT_TRANSLUCENT
+    // at the blend_mode < 2 boundary, us_person.cpp:1017-1041).
+    std::vector<int> opaqueBucket, punchBucket, blendBucket;
+    opaqueBucket.reserve(previewMeshes.size());
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
-        if (m.isHidden) continue;
-        if (m.indexCount > 0) {
-            if (!isInFrustum(m.bboxMin, m.bboxMax)) continue;
-
-            if (m.textureId != 0) {
-                glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, m.textureId);
-                glUniform1i(locDiffTexture, 0);
-                glUniform1i(locHasTexture, 1);
-            } else {
-                glUniform1i(locHasTexture, 0);
-            }
-            glUniform1i(locIsTranslucent, 0);
-            glUniform1i(locIsFakeShadow, 0);
-            glUniform1i(locIsColorVolume, 0);
-            glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
-
-            uploadSectionBoneMatrices(m);
-            glBindVertexArray(m.vao);
-            glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
+        if ((!isWorldMode && m.isHidden) || m.indexCount <= 0) continue;
+        if (!isWorldMode && !isInFrustum(m.bboxMin, m.bboxMax)) continue;
+        // Debug-transparent meshes (color volumes, shadow volumes, collision
+        // proxies, triggers, GENERIC_WHITE/BLACK placeholders) go through the
+        // translucent bucket with a special shader path -- see the
+        // `debugTransparent` uniform in drawOne. They render as a faint ghost
+        // so the user can see what's there without it dominating the view.
+        if (m.isDebugTransparent) {
+            blendBucket.push_back(i);
+        } else if (m.isFakeShadow) {
+            blendBucket.push_back(i);   // decal-style overlay, draw translucent
+        } else if (m.isAlphaTest) {
+            punchBucket.push_back(i);
+        } else if (m.isTranslucent) {
+            blendBucket.push_back(i);
+        } else {
+            opaqueBucket.push_back(i);
         }
     }
 
-    // Second pass: DISABLED (all meshes rendered as opaque above)
-    // glEnable(GL_BLEND);
-    // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    auto drawOne = [&](int i) {
+        const auto& m = previewMeshes[i];
+        if (m.textureId != 0) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m.textureId);
+            glUniform1i(locDiffTexture, 0);
+            glUniform1i(locHasTexture, 1);
+        } else {
+            glUniform1i(locHasTexture, 0);
+        }
+        // Debug-transparent meshes need BLEND so the alpha=0.18 fragment works.
+        int effectiveBlend = (m.isFakeShadow || m.isColorVolume || m.isDebugTransparent)
+                             ? 2 : (int)m.blendMode;
+        glUniform1i(locBlendMode, effectiveBlend);
+        glUniform1f(locAlphaRef, 0.5f);   // matches typical NGLBM_PUNCHTHROUGH threshold
+        glUniform1i(locIsFakeShadow, m.isFakeShadow ? 1 : 0);
+        glUniform1i(locIsColorVolume, m.isColorVolume ? 1 : 0);
+        glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
+        glUniform1i(locDebugTransparent, m.isDebugTransparent ? 1 : 0);
+        glUniform1i(locIsWater, m.isWater ? 1 : 0);
+        uploadSectionBoneMatrices(m);
+        glBindVertexArray(m.vao);
+        glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
+    };
+
+    // Pass 1: opaque
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    for (int i : opaqueBucket) drawOne(i);
+
+    // Pass 2: punchthrough (alpha-test via discard, depth still writes)
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    for (int i : punchBucket) drawOne(i);
+
+    // Pass 3: translucent — sort back-to-front by bbox-center distance to camera,
+    // disable depth writes so transparent surfaces don't occlude each other.
+    if (!blendBucket.empty()) {
+        std::sort(blendBucket.begin(), blendBucket.end(), [&](int a, int b) {
+            const auto& ma = previewMeshes[a];
+            const auto& mb = previewMeshes[b];
+            float ca[3] = { (ma.bboxMin[0]+ma.bboxMax[0])*0.5f,
+                            (ma.bboxMin[1]+ma.bboxMax[1])*0.5f,
+                            (ma.bboxMin[2]+ma.bboxMax[2])*0.5f };
+            float cb[3] = { (mb.bboxMin[0]+mb.bboxMax[0])*0.5f,
+                            (mb.bboxMin[1]+mb.bboxMax[1])*0.5f,
+                            (mb.bboxMin[2]+mb.bboxMax[2])*0.5f };
+            float da = (ca[0]-camPos[0])*(ca[0]-camPos[0]) +
+                       (ca[1]-camPos[1])*(ca[1]-camPos[1]) +
+                       (ca[2]-camPos[2])*(ca[2]-camPos[2]);
+            float db = (cb[0]-camPos[0])*(cb[0]-camPos[0]) +
+                       (cb[1]-camPos[1])*(cb[1]-camPos[1]) +
+                       (cb[2]-camPos[2])*(cb[2]-camPos[2]);
+            return da > db;  // farthest first
+        });
+
+        glEnable(GL_BLEND);
+        glDepthMask(GL_FALSE);
+        // Pull translucent surfaces forward in depth so decals like fake_shadow
+        // don't z-fight with the ground they sit on.
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -1.0f);
+        for (int i : blendBucket) {
+            const auto& m = previewMeshes[i];
+            // Map nglBlendModeType to OpenGL src/dst factors (mirrors setBlending in
+            // OpenUSM ngl_dx_state.cpp:207-313).
+            switch (m.blendMode) {
+                case NGLBM_ADDITIVE:
+                case NGLBM_CONST_ADDITIVE:
+                    glBlendEquation(GL_FUNC_ADD);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                    break;
+                case NGLBM_SUBTRACTIVE:
+                case NGLBM_CONST_SUBTRACTIVE:
+                    glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                    break;
+                case NGLBM_DESTALPHA_ADDITIVE:
+                    glBlendEquation(GL_FUNC_ADD);
+                    glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
+                    break;
+                case NGLBM_BLEND:
+                case NGLBM_CONST_BLEND:
+                default:
+                    glBlendEquation(GL_FUNC_ADD);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    break;
+            }
+            drawOne(i);
+        }
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(0.0f, 0.0f);
+    }
 
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
+    glBlendEquation(GL_FUNC_ADD);
 
     // Skeleton overlay (NAL-based positions set in BuildSkeletonVisual)
     if (showSkeleton && !isWorldMode && skeletonBoneCount > 0) {
@@ -1917,11 +2239,9 @@ void SpiderManTool::ComputeNALBonePositions() {
     nalBonePositions.clear();
     nalMaxBoneIndex = -1;
     if (!loadedSkeleton) {
-        Log("ComputeNALBonePositions: no skeleton data");
         return;
     }
     if (loadedSkeleton->bone_map.empty() && skeletonBones.empty()) {
-        Log("ComputeNALBonePositions: no skeleton bones");
         return;
     }
 
@@ -1983,15 +2303,12 @@ void SpiderManTool::ComputeNALBonePositions() {
         }
 
         if (nalBonePositions.size() >= 3) {
-            Log("ComputeNALBonePositions: using " + std::to_string(nalBonePositions.size()) +
-                " PCM bind-matrix positions (" + std::to_string(named) + " named)");
+            (void)named;
             return;
         }
 
         nalBonePositions.clear();
         nalMaxBoneIndex = -1;
-        Log("ComputeNALBonePositions: only " + std::to_string(skeletonBones.size()) +
-            " PCM bind matrices available; falling back to NAL offsets");
     }
 
     // Try offset_locs from torso
@@ -2009,8 +2326,6 @@ void SpiderManTool::ComputeNALBonePositions() {
         }
         break;
     }
-
-    Log("ComputeNALBonePositions: offset_locs " + std::string(hasOffsetLocs ? "available" : "EMPTY, using name-based fallback"));
 
     if (hasOffsetLocs) {
         // -- Use offset_locs (exact positions from skeleton file) --
@@ -2090,7 +2405,6 @@ void SpiderManTool::ComputeNALBonePositions() {
 
     // Fallback: if we got fewer than 3 bones from offset_locs, use name-based positions
     if ((int)nalBonePositions.size() < 3) {
-        Log("ComputeNALBonePositions: offset_locs produced " + std::to_string(nalBonePositions.size()) + " bones, using name-based fallback");
         nalBonePositions.clear();
         nalMaxBoneIndex = -1;
 
@@ -2100,7 +2414,6 @@ void SpiderManTool::ComputeNALBonePositions() {
         }
     }
 
-    Log("ComputeNALBonePositions: " + std::to_string(nalBonePositions.size()) + " bones positioned");
 }
 
 void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
@@ -2142,7 +2455,6 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
                     skeletonBones[i].position[2] = skeletonBones[i].bindMatrix[14];
                     InvertMatrix(skeletonBones[i].bindMatrix, skeletonBones[i].invBindMatrix);
                 }
-                Log("PCM: " + std::to_string(boneCount) + " bind matrices loaded");
             }
         }
     }
@@ -2150,7 +2462,6 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
     // Compute NAL bone positions (the Python approach)
     ComputeNALBonePositions();
     if (nalBonePositions.empty()) {
-        Log("Skeleton: no NAL bone positions computed");
         return;
     }
 
@@ -2209,8 +2520,6 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
     glDisableVertexAttribArray(4);
     glBindVertexArray(0);
 
-    Log("Skeleton: " + std::to_string(skeletonBoneCount) + " NAL bones, " +
-        std::to_string(skeletonLineVertCount/2) + " hierarchy lines");
 }
 
 void SpiderManTool::RenderSkeletonOverlay() {
@@ -2509,7 +2818,10 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
         const auto& m = previewMeshes[i];
 
         if (m.skipPicking) continue;
-        if (m.isFakeShadow || m.isColorVolume) continue;
+        // Skip picking on the ghost overlay meshes so the user can click on
+        // the real geometry behind them.
+        if (m.isFakeShadow || m.isColorVolume || m.isShadowVolume ||
+            m.isDebugTransparent) continue;
 
         float bboxT;
         if (!RayIntersectAABB(rayOrigin, rayDir, m.bboxMin, m.bboxMax, bboxT)) continue;

@@ -322,13 +322,11 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::Text("Found %zu Packs", tool.foundPacks.size());
             ImGui::Separator();
 
-            if (ImGui::Selectable("Load World", false, ImGuiSelectableFlags_AllowDoubleClick)) {
-                if (ImGui::IsMouseDoubleClicked(0)) {
-                    tool.LoadAllWorldGeometries();
-                }
+            if (ImGui::Selectable("Load World", false)) {
+                tool.LoadAllWorldGeometries();
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Double-click to load all world areas");
+                ImGui::SetTooltip("Click to load all world areas");
             }
 
             if (ImGui::Selectable("Extract All World Meshes", false, ImGuiSelectableFlags_AllowDoubleClick)) {

@@ -17,12 +17,37 @@ struct NalAnimEntry;
 
 namespace fs = std::filesystem;
 
+// Authoritative blend mode enum from OpenUSM nglMaterialBase::m_blend_mode at +0x4C.
+// See Archive/OpenUSM/src/ngl.h:36-51 — drives D3D alpha test/blend state in
+// RenderState_t::setBlending (ngl_dx_state.cpp:207).
+enum NglBlendMode : uint32_t {
+    NGLBM_OPAQUE              = 0,  // alpha ignored
+    NGLBM_PUNCHTHROUGH        = 1,  // alpha test, no blend (cut-outs)
+    NGLBM_BLEND               = 2,  // src*A + dst*(1-A)
+    NGLBM_ADDITIVE            = 3,  // src*A + dst*1
+    NGLBM_SUBTRACTIVE         = 4,  // dst - src*A
+    NGLBM_CONST_BLEND         = 5,
+    NGLBM_CONST_ADDITIVE      = 6,
+    NGLBM_CONST_SUBTRACTIVE   = 7,
+    NGLBM_DESTALPHA_ADDITIVE  = 8,
+    NGLBM_MAX_BLEND_MODES_GUARD = 9,  // sentinel for range validation
+};
+
 struct MaterialDef {
     std::string meshName;
-    std::string alphaFlag;
+    std::string alphaFlag;     // shader-name string (heuristic only, kept for the analyze panel)
     std::string textureName;
     uint32_t shaderType = 0;
-    bool isTranslucent = false;
+    uint32_t blendMode = NGLBM_OPAQUE;  // m_blend_mode at +0x4C — the authoritative field
+    bool isTranslucent = false;          // blendMode >= NGLBM_BLEND
+    bool isAlphaTest = false;            // blendMode == NGLBM_PUNCHTHROUGH
+    // uscolorvol meshes (Archive/OpenUSM/src/ngl/shaders/us_colorvol.h) are
+    // input to a separate post-process pass (USColorVolShaderSpace::gUSColorVolScene)
+    // and are never rendered as visible geometry. Same for stencil shadow
+    // volumes (wds_render_manager::render_stencil_shadows). We tag them here
+    // so the renderer can skip them by default.
+    bool isColorVolume = false;
+    bool isShadowVolume = false;
 };
 
 struct FileEntry {
@@ -43,10 +68,23 @@ struct RenderMesh {
     int indexCount;
     GLenum mode;
     unsigned int textureId;
-    bool isTranslucent = false;
+    bool isTranslucent = false;   // blendMode >= NGLBM_BLEND — needs back-to-front sorted blend pass
+    bool isAlphaTest = false;     // blendMode == NGLBM_PUNCHTHROUGH — discard sub-threshold texels
+    uint32_t blendMode = NGLBM_OPAQUE;
     bool isFakeShadow = false;
     bool isColorVolume = false;
+    bool isShadowVolume = false;
     bool isHidden = false;
+    // Marks meshes the engine never draws as visible geometry: color volumes,
+    // stencil shadow volumes, physics collision proxies (*_COL, *_COLLISION),
+    // trigger / exclusion zones, and the GENERIC_WHITE/BLACK placeholder
+    // meshes. We still load them so they can be inspected, but render them as
+    // a translucent ghost overlay (see drawOne in Render.cpp).
+    bool isDebugTransparent = false;
+    // Water surfaces (oceanmesh, *_WATER_*, interior pools). Routes the mesh
+    // through the water shader path -- wave displacement in the vertex stage,
+    // fresnel tint + UV-scrolled caustic in the fragment stage.
+    bool isWater = false;
     bool skipPicking = false;
     uint32_t shaderType = 0;
 
@@ -58,6 +96,12 @@ struct RenderMesh {
     std::vector<float> positions;
     std::vector<float> normals;
     std::vector<float> uvs;
+    // Per-vertex RGBA in [0,1]. Sourced from the D3DCOLOR uint32 at +20 of
+    // each stride-24/32/60 PCM vertex (verified via Archive/pcmesh-blender-master).
+    // For stride-64 skinned vertices the engine has no color slot, so we
+    // default to white (1,1,1,1). Matches OpenUSM's us_pcuv pixel shader:
+    // `tex t0; mul r0, t0, v0` -- final color is texture * vertex color.
+    std::vector<float> colors;
     std::vector<uint16_t> indices;
     std::vector<uint16_t> bonePalette;
 
@@ -374,6 +418,7 @@ public:
 
     void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0);
     void AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0, const float* transform = nullptr, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
+    void AddMeshInstancesFromDataBatched(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const std::vector<std::array<float, 16>>& transforms, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
     void BatchWorldMeshesByType();
     void LoadBackgroundMeshes();
     void LoadSkybox();
@@ -401,7 +446,22 @@ public:
     std::string loadedSkeletonName;
     std::string loadedAnimName;
 
+    // All skeletons found in the current pack. Populated by
+    // LoadSkeletonForCurrentPack; loadedSkeleton is one entry from this list,
+    // chosen automatically by name match against the displayed mesh
+    // (SelectSkeletonForMesh). Exposing the full list lets the UI offer a
+    // dropdown when the auto-match picks the wrong one.
+    struct SkeletonCandidate {
+        std::shared_ptr<NalSkeletonData> data;
+        std::string name;            // skeleton's own name (from header)
+        int         entryIndex = -1; // index into entries[]
+    };
+    std::vector<SkeletonCandidate> skeletonCandidates;
+    int activeSkeletonCandidate = -1;
+
     void LoadSkeletonForCurrentPack();
+    void SelectSkeletonForMesh(const std::string& meshName);
+    void ActivateSkeletonCandidate(int candidateIndex);
     void LoadAnimationForCurrentPack();
     void UpdateAnimationPlayback(float deltaTime);
     int FindEntryBySignature(uint32_t sig) const;
