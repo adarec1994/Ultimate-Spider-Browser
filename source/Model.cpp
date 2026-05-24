@@ -4,6 +4,8 @@
 #include <sstream>
 #include <fstream>
 #include <cmath>
+#include <algorithm>
+#include <map>
 
 static constexpr int PREVIEW_MAX_BONES = 64;
 
@@ -88,28 +90,13 @@ MaterialDef SpiderManTool::ResolveMaterialByMeshOffset(uint32_t meshNameOffset) 
 
 
 static bool IsColorVolumeMesh(const std::string& meshName) {
-    std::string lower = StrToLower(meshName);
-
-
-    if (lower.find("col vol") != std::string::npos) return true;
-    if (lower.find("col_vol") != std::string::npos) return true;
-    if (lower.find("colvol") != std::string::npos) return true;
-    if (lower.find("color volume") != std::string::npos) return true;
-    if (lower.find("color_volume") != std::string::npos) return true;
-    if (lower.find("colorvolume") != std::string::npos) return true;
-    if (lower.find("colorvol") != std::string::npos) return true;
-    if (lower.find("cv_alley") != std::string::npos) return true;
-    if (lower.find("cv_") != std::string::npos) return true;
-
+    (void)meshName;
     return false;
 }
 
 
 static bool ShouldHideMesh(const std::string& meshName) {
-    std::string lower = StrToLower(meshName);
-
-    if (lower.find("gen_white") != std::string::npos) return true;
-
+    (void)meshName;
     return false;
 }
 
@@ -450,7 +437,249 @@ static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
     if (len > 0.0001f) { nx /= len; ny /= len; nz /= len; }
 }
 
-void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const float* transform) {
+void SpiderManTool::BatchWorldMeshesByType() {
+    if (!isWorldMode || previewMeshes.empty()) return;
+
+    struct BatchVertex {
+        float x, y, z;
+        float nx, ny, nz;
+        float u, v;
+        float boneIdx[4];
+        float boneWgt[4];
+    };
+
+    auto canBatch = [](const RenderMesh& m) {
+        return !m.isHidden &&
+               !m.skipPicking &&
+               !m.isFakeShadow &&
+               !m.isColorVolume &&
+               m.indexCount > 0 &&
+               !m.positions.empty() &&
+               !m.indices.empty();
+    };
+
+    auto makeKey = [](const RenderMesh& m) {
+        std::ostringstream ss;
+        ss << m.sourcePack << '|'
+           << m.sourceOffset << '|'
+           << m.sourceSize << '|'
+           << m.meshName << '|'
+           << m.textureId << '|'
+           << m.textureName << '|'
+           << m.textureHash << '|'
+           << m.shaderType << '|'
+           << m.isTranslucent;
+        return ss.str();
+    };
+
+    auto appendTriangles = [](const RenderMesh& m, std::vector<uint16_t>& out) {
+        size_t vertexCount = m.positions.size() / 3;
+        if (m.mode == GL_TRIANGLES) {
+            for (size_t i = 0; i + 2 < m.indices.size(); i += 3) {
+                uint16_t i0 = m.indices[i];
+                uint16_t i1 = m.indices[i + 1];
+                uint16_t i2 = m.indices[i + 2];
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) continue;
+                out.push_back(i0);
+                out.push_back(i1);
+                out.push_back(i2);
+            }
+        } else if (m.mode == GL_TRIANGLE_STRIP) {
+            for (size_t i = 0; i + 2 < m.indices.size(); i++) {
+                uint16_t i0 = m.indices[i];
+                uint16_t i1 = m.indices[i + 1];
+                uint16_t i2 = m.indices[i + 2];
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) continue;
+                if ((i & 1) == 0) {
+                    out.push_back(i0);
+                    out.push_back(i1);
+                    out.push_back(i2);
+                } else {
+                    out.push_back(i1);
+                    out.push_back(i0);
+                    out.push_back(i2);
+                }
+            }
+        }
+    };
+
+    std::map<std::string, std::vector<int>> groups;
+    for (int i = 0; i < (int)previewMeshes.size(); i++) {
+        if (canBatch(previewMeshes[i])) {
+            groups[makeKey(previewMeshes[i])].push_back(i);
+        }
+    }
+
+    std::vector<char> consumed(previewMeshes.size(), 0);
+    std::vector<RenderMesh> batchedMeshes;
+    int sourceMeshCount = 0;
+    int batchCount = 0;
+
+    auto uploadBatch = [&](const RenderMesh& proto,
+                           const std::vector<BatchVertex>& vertices,
+                           const std::vector<uint16_t>& indices,
+                           const float bboxMin[3],
+                           const float bboxMax[3],
+                           int mergedCount,
+                           int chunkIndex) {
+        if (vertices.empty() || indices.empty()) return;
+
+        RenderMesh mesh = proto;
+        mesh.vao = 0;
+        mesh.vbo = 0;
+        mesh.ebo = 0;
+        mesh.mode = GL_TRIANGLES;
+        mesh.indexCount = (int)indices.size();
+        mesh.bonePalette.clear();
+        mesh.positions.clear();
+        mesh.normals.clear();
+        mesh.uvs.clear();
+        mesh.indices.clear();
+        mesh.meshName = proto.meshName + " x" + std::to_string(mergedCount);
+        if (chunkIndex > 0) mesh.meshName += " #" + std::to_string(chunkIndex + 1);
+        for (int axis = 0; axis < 3; axis++) {
+            mesh.bboxMin[axis] = bboxMin[axis];
+            mesh.bboxMax[axis] = bboxMax[axis];
+        }
+
+        mesh.positions.reserve(vertices.size() * 3);
+        mesh.normals.reserve(vertices.size() * 3);
+        mesh.uvs.reserve(vertices.size() * 2);
+        for (const auto& v : vertices) {
+            mesh.positions.push_back(v.x);
+            mesh.positions.push_back(v.y);
+            mesh.positions.push_back(v.z);
+            mesh.normals.push_back(v.nx);
+            mesh.normals.push_back(v.ny);
+            mesh.normals.push_back(v.nz);
+            mesh.uvs.push_back(v.u);
+            mesh.uvs.push_back(v.v);
+        }
+        mesh.indices = indices;
+
+        glGenVertexArrays(1, &mesh.vao);
+        glGenBuffers(1, &mesh.vbo);
+        glGenBuffers(1, &mesh.ebo);
+        glBindVertexArray(mesh.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(BatchVertex), vertices.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(BatchVertex), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BatchVertex), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BatchVertex), (void*)(6 * sizeof(float)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(BatchVertex), (void*)(8 * sizeof(float)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(BatchVertex), (void*)(12 * sizeof(float)));
+        glEnableVertexAttribArray(4);
+        glBindVertexArray(0);
+
+        batchedMeshes.push_back(std::move(mesh));
+        batchCount++;
+    };
+
+    for (const auto& [key, indicesInGroup] : groups) {
+        if (indicesInGroup.size() < 2) continue;
+
+        const RenderMesh& proto = previewMeshes[indicesInGroup[0]];
+        std::vector<BatchVertex> vertices;
+        std::vector<uint16_t> indices;
+        int mergedInChunk = 0;
+        int chunkIndex = 0;
+        float bboxMin[3] = {1e30f, 1e30f, 1e30f};
+        float bboxMax[3] = {-1e30f, -1e30f, -1e30f};
+
+        auto flushChunk = [&]() {
+            uploadBatch(proto, vertices, indices, bboxMin, bboxMax, mergedInChunk, chunkIndex);
+            vertices.clear();
+            indices.clear();
+            mergedInChunk = 0;
+            chunkIndex++;
+            bboxMin[0] = bboxMin[1] = bboxMin[2] = 1e30f;
+            bboxMax[0] = bboxMax[1] = bboxMax[2] = -1e30f;
+        };
+
+        for (int meshIdx : indicesInGroup) {
+            const RenderMesh& m = previewMeshes[meshIdx];
+            size_t vertexCount = m.positions.size() / 3;
+            if (vertexCount == 0 || vertexCount > 65535) continue;
+
+            std::vector<uint16_t> meshTriangles;
+            appendTriangles(m, meshTriangles);
+            if (meshTriangles.empty()) continue;
+
+            if (!vertices.empty() && vertices.size() + vertexCount > 65535) {
+                flushChunk();
+            }
+
+            uint16_t baseVertex = (uint16_t)vertices.size();
+            for (size_t v = 0; v < vertexCount; v++) {
+                BatchVertex bv{};
+                bv.x = m.positions[v * 3 + 0];
+                bv.y = m.positions[v * 3 + 1];
+                bv.z = m.positions[v * 3 + 2];
+                if (v * 3 + 2 < m.normals.size()) {
+                    bv.nx = m.normals[v * 3 + 0];
+                    bv.ny = m.normals[v * 3 + 1];
+                    bv.nz = m.normals[v * 3 + 2];
+                } else {
+                    bv.ny = 1.0f;
+                }
+                if (v * 2 + 1 < m.uvs.size()) {
+                    bv.u = m.uvs[v * 2 + 0];
+                    bv.v = m.uvs[v * 2 + 1];
+                }
+                vertices.push_back(bv);
+            }
+
+            for (uint16_t idx : meshTriangles) {
+                indices.push_back((uint16_t)(baseVertex + idx));
+            }
+
+            for (int axis = 0; axis < 3; axis++) {
+                bboxMin[axis] = std::min(bboxMin[axis], m.bboxMin[axis]);
+                bboxMax[axis] = std::max(bboxMax[axis], m.bboxMax[axis]);
+            }
+
+            consumed[meshIdx] = 1;
+            mergedInChunk++;
+            sourceMeshCount++;
+        }
+
+        if (mergedInChunk > 0) flushChunk();
+    }
+
+    if (sourceMeshCount == 0) return;
+
+    std::vector<RenderMesh> rebuilt;
+    rebuilt.reserve(previewMeshes.size() - sourceMeshCount + batchedMeshes.size());
+    for (size_t i = 0; i < previewMeshes.size(); i++) {
+        if (consumed[i]) {
+            if (previewMeshes[i].vao) glDeleteVertexArrays(1, &previewMeshes[i].vao);
+            if (previewMeshes[i].vbo) glDeleteBuffers(1, &previewMeshes[i].vbo);
+            if (previewMeshes[i].ebo) glDeleteBuffers(1, &previewMeshes[i].ebo);
+            continue;
+        }
+        rebuilt.push_back(std::move(previewMeshes[i]));
+    }
+    for (auto& mesh : batchedMeshes) {
+        rebuilt.push_back(std::move(mesh));
+    }
+
+    int oldCount = (int)previewMeshes.size();
+    previewMeshes = std::move(rebuilt);
+    selectedMeshIndex = -1;
+    Log("World batching: " + std::to_string(sourceMeshCount) + " repeated meshes -> "
+        + std::to_string(batchCount) + " batches (" + std::to_string(oldCount)
+        + " -> " + std::to_string(previewMeshes.size()) + " draw meshes)");
+}
+
+void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const float* transform, uint32_t onlyMeshOffset) {
     ParseMaterialEntries(pcmData);
 
     BinaryReader br(pcmData);
@@ -474,6 +703,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
     bool loadedFirstLod = false;
     for(auto& inf : infos) {
         if (inf.type != 512) continue;
+        if (onlyMeshOffset != 0xFFFFFFFFu && inf.offset != onlyMeshOffset) continue;
         if (!isWorldMode && loadedFirstLod) break;
         loadedFirstLod = true;
 

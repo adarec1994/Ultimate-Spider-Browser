@@ -1,4 +1,5 @@
 #include "SpiderManTool.h"
+#include <algorithm>
 #include <fstream>
 #include <cstring>
 #include <set>
@@ -129,58 +130,7 @@ static bool IsValidTransformMatrix(const float* m) {
 
 // ── Helper: check if a name looks like a non-renderable instance ──────────
 static bool IsNonRenderableName(const std::string& nameLower) {
-    // Check both the full name and the zone-stripped name
-    // This catches "jh_omni01", "ee_light01" etc. that have zone prefixes
-    std::string stripped = nameLower;
-    if (stripped.size() > 3 && std::isalpha((unsigned char)stripped[0]) &&
-        std::isalpha((unsigned char)stripped[1]) && stripped[2] == '_') {
-        stripped = stripped.substr(3);
-    }
-
-    // Substring checks (work on full name)
-    if (nameLower.find("fspot") != std::string::npos) return true;
-    if (nameLower.find("_colvol") != std::string::npos) return true;
-    if (nameLower.find("colvol") != std::string::npos) return true;
-    if (nameLower.find("_marker") != std::string::npos) return true;
-    if (nameLower.find("marker_") != std::string::npos) return true;
-    if (nameLower.find("light_ground") != std::string::npos) return true;
-    if (nameLower.find("skidmark") != std::string::npos) return true;
-    if (nameLower.find("spawn_pt") != std::string::npos) return true;
-    if (nameLower.find("_spawn") != std::string::npos) return true;
-    if (nameLower.find("elec_marker") != std::string::npos) return true;
-    if (nameLower.find("fx_shoreline") != std::string::npos) return true;
-    if (nameLower.find("fx_dcl_") != std::string::npos) return true;
-    if (nameLower.find("city_omni") != std::string::npos) return true;
-    if (nameLower.find("sml_omni") != std::string::npos) return true;
-    if (nameLower.find("small_omni") != std::string::npos) return true;
-    if (nameLower.find("tinyomni") != std::string::npos) return true;
-    if (nameLower.find("cyclemarker") != std::string::npos) return true;
-    if (nameLower.find("cslight") != std::string::npos) return true;
-
-    // Start-of-string checks (check both full name AND zone-stripped name)
-    auto startsCheck = [](const std::string& s) {
-        if (s.find("swing") == 0) return true;
-        if (s.find("light") == 0) return true;
-        if (s.find("omni") == 0) return true;
-        if (s.find("pedlight") == 0) return true;
-        if (s.find("spot") == 0 && s.find("fspot") != 0) return true;
-        if (s.find("fspot") == 0) return true;
-        // Car spawn points (zz_car01 etc.) are entity spawns, not PCM models
-        if (s.size() >= 4 && s.find("car") == 0 && std::isdigit((unsigned char)s[3])) return true;
-        if (s.find("lightcast") == 0) return true;
-        if (s.find("litecast") == 0) return true;
-        if (s.find("shadow") == 0) return true;
-        if (s.find("glow") == 0) return true;
-        if (s.find("blink") == 0) return true;
-        if (s.find("bubbles") == 0) return true;
-        if (s.find("hang") == 0) return true;
-        if (s.find("platform") == 0) return true;
-        if (s.find("rubble") == 0) return true;
-        return false;
-    };
-
-    if (startsCheck(nameLower)) return true;
-    if (startsCheck(stripped)) return true;
+    (void)nameLower;
     return false;
 }
 
@@ -190,6 +140,39 @@ struct PCMModelRef {
     uint32_t absOffset;
     uint32_t size;
 };
+
+struct PackMeshFileResource {
+    uint32_t hash = 0;
+    uint32_t absOffset = 0;
+    uint32_t size = 0;
+};
+
+struct PackTlResourceLocation {
+    uint32_t hash = 0;
+    uint32_t type = 0;
+    uint32_t absOffset = 0;
+    uint32_t size = 0;
+};
+
+struct MeshLocationBinding {
+    uint32_t pcmHash = 0;
+    uint32_t meshHash = 0;
+    uint32_t meshOffsetInPcm = 0xFFFFFFFFu;
+};
+
+// The 0x20 records after scene data carry world positions, but their tail
+// fields also encode grid/cell bounds. Treating f14 as a PCM index makes
+// fences/props resolve to unrelated models such as trees.
+static constexpr bool kEnableGuessedOrphanPlacementRecords = false;
+
+static uint32_t HashString33(const std::string& str) {
+    uint32_t result = 0;
+    for (unsigned char c : str) {
+        if (std::isalpha(c)) c = (unsigned char)std::tolower(c);
+        result = c + 33u * result;
+    }
+    return result;
+}
 
 // ── Helper: try all name variants to find a PCM match ─────────────────────
 //    Given a base name, tries: as-is, abbreviation-expanded, zone-stripped,
@@ -207,7 +190,7 @@ static uint32_t TryResolveName(const std::string& base,
     const std::string* candidates[] = { &base, &expanded, &noZone, &noZoneEx };
     for (auto* cand : candidates) {
         if (cand->empty()) continue;
-        uint32_t h = CalculateCRC32(*cand);
+        uint32_t h = HashString33(*cand);
         if (pcmIndex.count(h)) return h;
         if (pcmNameToHash.count(*cand)) return pcmNameToHash.at(*cand);
     }
@@ -228,6 +211,723 @@ static size_t FindTocStart(const std::vector<uint8_t>& header, size_t headerSize
         }
     }
     return 0;
+}
+
+static uint16_t ReadU16LE(const std::vector<uint8_t>& data, size_t offset) {
+    uint16_t v = 0;
+    if (offset + sizeof(v) <= data.size()) memcpy(&v, data.data() + offset, sizeof(v));
+    return v;
+}
+
+static uint32_t ReadU32LE(const std::vector<uint8_t>& data, size_t offset) {
+    uint32_t v = 0;
+    if (offset + sizeof(v) <= data.size()) memcpy(&v, data.data() + offset, sizeof(v));
+    return v;
+}
+
+static float ReadF32LE(const std::vector<uint8_t>& data, size_t offset) {
+    float v = 0.0f;
+    if (offset + sizeof(v) <= data.size()) memcpy(&v, data.data() + offset, sizeof(v));
+    return v;
+}
+
+static size_t AlignUp(size_t value, size_t alignment) {
+    size_t mask = alignment - 1;
+    return (value + mask) & ~mask;
+}
+
+static bool AdvanceMashVectorData(const std::vector<uint8_t>& data,
+                                  size_t objectBase,
+                                  size_t vectorOffset,
+                                  size_t elementSize,
+                                  size_t firstAlign,
+                                  size_t& cursor,
+                                  size_t* arrayOffset = nullptr,
+                                  uint16_t* countOut = nullptr) {
+    if (objectBase + vectorOffset + 8 > data.size()) return false;
+
+    uint16_t count = ReadU16LE(data, objectBase + vectorOffset + 4);
+    uint8_t isShared = data[objectBase + vectorOffset + 6];
+    uint8_t fromMash = data[objectBase + vectorOffset + 7];
+    if (isShared || !fromMash) return false;
+
+    cursor = AlignUp(cursor, firstAlign);
+    cursor = AlignUp(cursor, 4);
+    if (cursor > data.size()) return false;
+
+    size_t bytes = (size_t)count * elementSize;
+    if (cursor + bytes > data.size()) return false;
+
+    if (arrayOffset) *arrayOffset = cursor;
+    if (countOut) *countOut = count;
+
+    cursor += bytes;
+    cursor = AlignUp(cursor, 4);
+    return cursor <= data.size();
+}
+
+static std::vector<PackMeshFileResource> ReadPackMeshFileResources(const std::string& packPath) {
+    std::vector<PackMeshFileResource> resources;
+
+    std::ifstream file(packPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return resources;
+
+    size_t fileSize = (size_t)file.tellg();
+    if (fileSize < 0x30) return resources;
+
+    std::vector<uint8_t> packHeader(0x30);
+    file.seekg(0);
+    file.read((char*)packHeader.data(), packHeader.size());
+    if (!file.good()) return resources;
+
+    uint32_t directoryOffset = ReadU32LE(packHeader, 0x18);
+    uint32_t resourceBaseOffset = ReadU32LE(packHeader, 0x1C);
+    if (directoryOffset == 0 || resourceBaseOffset == 0) return resources;
+    if ((size_t)resourceBaseOffset > fileSize) return resources;
+
+    std::vector<uint8_t> headerData(resourceBaseOffset);
+    file.clear();
+    file.seekg(0);
+    file.read((char*)headerData.data(), headerData.size());
+    if (!file.good()) return resources;
+
+    constexpr size_t kGenericMashHeaderSize = 0x10;
+    constexpr size_t kResourceDirectorySize = 0x2BC;
+    size_t objectBase = (size_t)directoryOffset + kGenericMashHeaderSize;
+    size_t cursor = objectBase + kResourceDirectorySize;
+    if (cursor > headerData.size()) return resources;
+
+    // resource_directory::un_mash_start walks these vectors in this order.
+    cursor = AlignUp(cursor, 8);
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x00, 4, 4, cursor)) return resources;   // parents
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x08, 16, 8, cursor)) return resources;  // resource_locations
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x10, 12, 8, cursor)) return resources;  // texture_locations
+
+    size_t meshFileArrayOffset = 0;
+    uint16_t meshFileCount = 0;
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x18, 12, 8, cursor,
+                               &meshFileArrayOffset, &meshFileCount)) {
+        return resources;
+    }
+
+    for (uint16_t i = 0; i < meshFileCount; i++) {
+        size_t entryOffset = meshFileArrayOffset + (size_t)i * 12;
+        uint32_t hash = ReadU32LE(headerData, entryOffset);
+        uint32_t typeAndSize = ReadU32LE(headerData, entryOffset + 4);
+        uint32_t relativeOffset = ReadU32LE(headerData, entryOffset + 8);
+        uint32_t type = typeAndSize & 0xFF;
+        uint32_t size = typeAndSize >> 8;
+        uint32_t absOffset = resourceBaseOffset + relativeOffset;
+
+        if (type != 2 || size <= 4) continue;
+        if ((size_t)absOffset + size > fileSize) continue;
+
+        uint32_t sig = 0;
+        size_t savePos = (size_t)file.tellg();
+        file.clear();
+        file.seekg(absOffset);
+        file.read((char*)&sig, 4);
+        file.clear();
+        file.seekg(savePos);
+        if (sig != 0x204D4350) continue;
+
+        resources.push_back({hash, absOffset, size});
+    }
+
+    return resources;
+}
+
+static std::vector<PackTlResourceLocation> ReadPackMeshLocations(const std::string& packPath) {
+    std::vector<PackTlResourceLocation> meshLocations;
+
+    std::ifstream file(packPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return meshLocations;
+
+    size_t fileSize = (size_t)file.tellg();
+    if (fileSize < 0x30) return meshLocations;
+
+    std::vector<uint8_t> packHeader(0x30);
+    file.seekg(0);
+    file.read((char*)packHeader.data(), packHeader.size());
+    if (!file.good()) return meshLocations;
+
+    uint32_t directoryOffset = ReadU32LE(packHeader, 0x18);
+    uint32_t resourceBaseOffset = ReadU32LE(packHeader, 0x1C);
+    if (directoryOffset == 0 || resourceBaseOffset == 0) return meshLocations;
+    if ((size_t)resourceBaseOffset > fileSize) return meshLocations;
+
+    std::vector<uint8_t> headerData(resourceBaseOffset);
+    file.clear();
+    file.seekg(0);
+    file.read((char*)headerData.data(), headerData.size());
+    if (!file.good()) return meshLocations;
+
+    constexpr size_t kGenericMashHeaderSize = 0x10;
+    constexpr size_t kResourceDirectorySize = 0x2BC;
+    size_t objectBase = (size_t)directoryOffset + kGenericMashHeaderSize;
+    size_t cursor = objectBase + kResourceDirectorySize;
+    if (cursor > headerData.size()) return meshLocations;
+
+    // resource_directory::un_mash_start walks these vectors in this order.
+    cursor = AlignUp(cursor, 8);
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x00, 4, 4, cursor)) return meshLocations;   // parents
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x08, 16, 8, cursor)) return meshLocations;  // resource_locations
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x10, 12, 8, cursor)) return meshLocations;  // texture_locations
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x18, 12, 8, cursor)) return meshLocations;  // mesh_file_locations
+
+    size_t meshArrayOffset = 0;
+    uint16_t meshCount = 0;
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x20, 12, 8, cursor,
+                               &meshArrayOffset, &meshCount)) {
+        return meshLocations;
+    }
+
+    meshLocations.reserve(meshCount);
+    for (uint16_t i = 0; i < meshCount; i++) {
+        size_t entryOffset = meshArrayOffset + (size_t)i * 12;
+        uint32_t hash = ReadU32LE(headerData, entryOffset);
+        uint32_t typeAndSize = ReadU32LE(headerData, entryOffset + 4);
+        uint32_t relativeOffset = ReadU32LE(headerData, entryOffset + 8);
+        uint32_t type = typeAndSize & 0xFF;
+        uint32_t size = typeAndSize >> 8;
+        uint32_t absOffset = resourceBaseOffset + relativeOffset;
+        if (type == 3) meshLocations.push_back({hash, type, absOffset, size});
+    }
+
+    return meshLocations;
+}
+
+static std::vector<uint32_t> ExtractPcmMeshHashes(const std::vector<uint8_t>& pcmData) {
+    std::vector<uint32_t> meshHashes;
+    if (pcmData.size() < 16 || ReadU32LE(pcmData, 0) != 0x204D4350) return meshHashes;
+
+    uint32_t numEntries = ReadU32LE(pcmData, 8);
+    uint32_t entriesOffset = ReadU32LE(pcmData, 12);
+    if (numEntries > 1000 || entriesOffset >= pcmData.size()) return meshHashes;
+
+    for (uint32_t i = 0; i < numEntries; i++) {
+        size_t entryOffset = (size_t)entriesOffset + (size_t)i * 12;
+        if (entryOffset + 12 > pcmData.size()) break;
+        uint16_t entryType = ReadU16LE(pcmData, entryOffset + 2);
+        if (entryType != 512) continue;
+
+        uint32_t meshOffset = ReadU32LE(pcmData, entryOffset + 4);
+        if ((size_t)meshOffset + 4 > pcmData.size()) continue;
+
+        uint32_t meshNameOffset = ReadU32LE(pcmData, meshOffset);
+        if (meshNameOffset != 0 && (size_t)meshNameOffset + 4 <= pcmData.size()) {
+            meshHashes.push_back(ReadU32LE(pcmData, meshNameOffset));
+        }
+    }
+
+    return meshHashes;
+}
+
+static std::vector<MeshLocationBinding> BuildMeshLocationBindings(const std::string& packPath) {
+    std::vector<PackTlResourceLocation> meshLocations = ReadPackMeshLocations(packPath);
+    std::vector<MeshLocationBinding> bindings(meshLocations.size());
+    for (size_t i = 0; i < meshLocations.size(); i++) {
+        bindings[i].meshHash = meshLocations[i].hash;
+    }
+    if (meshLocations.empty()) return bindings;
+
+    std::vector<PackMeshFileResource> meshFiles = ReadPackMeshFileResources(packPath);
+    if (!meshFiles.empty()) {
+        std::sort(meshFiles.begin(), meshFiles.end(),
+                  [](const PackMeshFileResource& a, const PackMeshFileResource& b) {
+                      return a.absOffset < b.absOffset;
+                  });
+
+        // OpenUSM's tlresource_location for TLRESOURCE_TYPE_MESH points at the
+        // mesh struct inside the PCM. Resolve by containing PCM range first;
+        // name-hash fallback below is only for malformed or unusual packs.
+        for (size_t i = 0; i < meshLocations.size(); i++) {
+            uint32_t meshOffset = meshLocations[i].absOffset;
+            for (const auto& meshFile : meshFiles) {
+                uint64_t start = meshFile.absOffset;
+                uint64_t end = start + meshFile.size;
+                if ((uint64_t)meshOffset >= start && (uint64_t)meshOffset < end) {
+                    bindings[i].pcmHash = meshFile.hash;
+                    bindings[i].meshOffsetInPcm = meshOffset - meshFile.absOffset;
+                    break;
+                }
+                if ((uint64_t)meshOffset < start) break;
+            }
+        }
+    }
+
+    std::map<uint32_t, uint32_t> meshHashToPcmHash;
+    std::ifstream file(packPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return bindings;
+
+    size_t fileSize = (size_t)file.tellg();
+    for (const auto& meshRes : meshFiles) {
+        if ((size_t)meshRes.absOffset + meshRes.size > fileSize) continue;
+
+        std::vector<uint8_t> pcmData(meshRes.size);
+        file.clear();
+        file.seekg(meshRes.absOffset);
+        file.read((char*)pcmData.data(), pcmData.size());
+        if (!file.good()) continue;
+
+        for (uint32_t meshHash : ExtractPcmMeshHashes(pcmData)) {
+            if (!meshHashToPcmHash.count(meshHash)) {
+                meshHashToPcmHash[meshHash] = meshRes.hash;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < meshLocations.size(); i++) {
+        if (bindings[i].pcmHash != 0) continue;
+        auto it = meshHashToPcmHash.find(meshLocations[i].hash);
+        if (it != meshHashToPcmHash.end()) bindings[i].pcmHash = it->second;
+    }
+
+    return bindings;
+}
+
+static void AddMeshHashBindingsFromPack(const std::string& packPath,
+                                        std::map<uint32_t, MeshLocationBinding>& out,
+                                        bool overwriteExisting) {
+    for (const auto& binding : BuildMeshLocationBindings(packPath)) {
+        if (binding.meshHash == 0 || binding.pcmHash == 0) continue;
+        if (overwriteExisting || !out.count(binding.meshHash)) {
+            out[binding.meshHash] = binding;
+        }
+    }
+}
+
+static bool IsShortWorldBaseName(const std::string& nameLower) {
+    if (nameLower.empty() || nameLower.size() > 3) return false;
+    for (char c : nameLower) {
+        if (!std::isalpha((unsigned char)c)) return false;
+    }
+    return true;
+}
+
+static bool ShouldSkipLegoPcmName(const std::string& nameLower, const std::string& packStem) {
+    if (nameLower.empty()) return false;
+    if (IsShortWorldBaseName(nameLower)) return true;
+    if (nameLower == packStem || nameLower == packStem + "c") return true;
+    return false;
+}
+
+static bool SkipSceneEntitySection(const std::vector<uint8_t>& data, size_t& cursor) {
+    if (cursor + 8 > data.size()) return false;
+    cursor += 4; // field_3C
+    uint32_t groupCount = ReadU32LE(data, cursor);
+    cursor += 4;
+    if (groupCount > 10000) return false;
+
+    for (uint32_t groupIdx = 0; groupIdx < groupCount; groupIdx++) {
+        if (cursor + 4 > data.size()) return false;
+        uint32_t entityCount = ReadU32LE(data, cursor);
+        cursor += 4;
+        if (entityCount > 100000) return false;
+
+        for (uint32_t entityIdx = 0; entityIdx < entityCount; entityIdx++) {
+            if (cursor + 4 > data.size()) return false;
+            uint32_t entityMashSize = ReadU32LE(data, cursor);
+            cursor += 4;
+            cursor = AlignUp(cursor, 16);
+            if (entityMashSize > data.size() || cursor + entityMashSize > data.size()) return false;
+            cursor += entityMashSize;
+            cursor = AlignUp(cursor, 4);
+
+            if (cursor + 4 > data.size()) return false;
+            uint32_t regionStringCount = ReadU32LE(data, cursor);
+            cursor += 4;
+            if (regionStringCount > 100000) return false;
+            cursor = AlignUp(cursor, 8);
+            // OpenUSM uses fixedstring<8> here, which is 8 dwords (32 bytes),
+            // not an 8-byte string. Using 8 desyncs the later parse codes and
+            // makes lego maps disappear or get found at the wrong offset.
+            if (cursor + (size_t)regionStringCount * 32 > data.size()) return false;
+            cursor += (size_t)regionStringCount * 32;
+        }
+    }
+
+    return cursor <= data.size();
+}
+
+static bool SkipScenePayload(const std::vector<uint8_t>& data, uint32_t parseCode, size_t& cursor) {
+    switch (parseCode) {
+    case 0:
+        return SkipSceneEntitySection(data, cursor);
+    case 3: {
+        size_t rootOffset = AlignUp(cursor, 0x40);
+        if (rootOffset + 0x64 > data.size()) return false;
+        uint32_t usedSize = ReadU32LE(data, rootOffset + 0x60);
+        if (usedSize == 0 || usedSize > data.size() - cursor) return false;
+        cursor += usedSize;
+        return cursor <= data.size();
+    }
+    case 6: {
+        if (cursor + 4 > data.size()) return false;
+        uint32_t triggerCount = ReadU32LE(data, cursor);
+        if (triggerCount > 100000) return false;
+        size_t bytes = 4 + (size_t)triggerCount * (8 + 4 + 0x78 + 12);
+        if (cursor + bytes > data.size()) return false;
+        cursor += bytes;
+        return true;
+    }
+    case 9: {
+        if (cursor + 8 > data.size()) return false;
+        uint32_t frameMapCount = ReadU32LE(data, cursor);
+        if (frameMapCount == 0 || frameMapCount > 10000) return false;
+        size_t pos = cursor + 8 + (size_t)frameMapCount * 4;
+        if (pos > data.size()) return false;
+        for (uint32_t i = 0; i < frameMapCount; i++) {
+            if (pos + 0x2C > data.size()) return false;
+            uint32_t textureCount = ReadU32LE(data, pos + 0x28);
+            if (textureCount > 10000) return false;
+            pos += 0x30 + (size_t)textureCount * 0x24;
+            if (pos > data.size()) return false;
+        }
+        cursor = pos;
+        return true;
+    }
+    case 14:
+    case 17: {
+        if (cursor + 4 > data.size()) return false;
+        uint32_t blobSize = ReadU32LE(data, cursor);
+        cursor += 4;
+        if (blobSize > data.size() || cursor + blobSize > data.size()) return false;
+        cursor += blobSize;
+        cursor = AlignUp(cursor, 4);
+        return cursor <= data.size();
+    }
+    case 15: {
+        if (cursor + 4 > data.size()) return false;
+        uint32_t fadeGroupCount = ReadU32LE(data, cursor);
+        if (fadeGroupCount >= 255) return false;
+        cursor += 4;
+        if (fadeGroupCount > 0) {
+            if (cursor + (size_t)fadeGroupCount * 4 > data.size()) return false;
+            cursor += (size_t)fadeGroupCount * 4;
+            cursor = AlignUp(cursor, 16);
+            if (cursor + (size_t)fadeGroupCount * 16 > data.size()) return false;
+            cursor += (size_t)fadeGroupCount * 16;
+        }
+        return cursor <= data.size();
+    }
+    default:
+        return false;
+    }
+}
+
+static bool FindLegoMapDataStart(const std::vector<uint8_t>& data, size_t& legoStart) {
+    size_t cursor = 0;
+    if (cursor + 4 > data.size()) return false;
+
+    uint32_t parseCode = ReadU32LE(data, cursor);
+    cursor += 4;
+    if (parseCode == 18) return false;
+
+    if (parseCode == 13) {
+        if (cursor + 4 > data.size()) return false;
+        uint32_t vobbCount = ReadU32LE(data, cursor);
+        cursor += 4;
+        if (vobbCount > 100000) return false;
+        cursor = AlignUp(cursor, 16);
+        if (cursor + (size_t)vobbCount * 0x30 > data.size()) return false;
+        cursor += (size_t)vobbCount * 0x30;
+        if (cursor + 4 > data.size()) return false;
+        parseCode = ReadU32LE(data, cursor);
+        cursor += 4;
+    }
+
+    while (cursor <= data.size()) {
+        if (parseCode == 11) {
+            legoStart = AlignUp(cursor, 8);
+            return legoStart < data.size();
+        }
+        if (!SkipScenePayload(data, parseCode, cursor)) return false;
+        if (cursor + 4 > data.size()) return false;
+        parseCode = ReadU32LE(data, cursor);
+        cursor += 4;
+        if (parseCode == 18) return false;
+    }
+
+    return false;
+}
+
+struct LegoPlacementRecord {
+    uint32_t meshHash = 0;
+    uint16_t headingIndex = 0;
+    uint16_t meshArrayIndex = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+struct SceneEntityMashRecord {
+    size_t mashStart = 0;
+    size_t mashSize = 0;
+};
+
+struct EntityMeshRef {
+    uint32_t pcmHash = 0;
+    uint32_t meshOffsetInPcm = 0xFFFFFFFFu;
+    std::string meshName;
+};
+
+static bool IsValidPlacementMatrix(const float* candidate) {
+    if (std::fabs(candidate[3]) > 0.01f ||
+        std::fabs(candidate[7]) > 0.01f ||
+        std::fabs(candidate[11]) > 0.01f) return false;
+    if (std::fabs(candidate[15] - 1.0f) > 0.1f) return false;
+
+    for (int r = 0; r < 3; r++) {
+        float len2 = 0.0f;
+        for (int c = 0; c < 3; c++) {
+            len2 += candidate[r * 4 + c] * candidate[r * 4 + c];
+        }
+        float len = std::sqrt(len2);
+        if (len < 0.9f || len > 1.1f) return false;
+    }
+
+    if (std::fabs(candidate[12]) < 0.01f &&
+        std::fabs(candidate[13]) < 0.01f &&
+        std::fabs(candidate[14]) < 0.01f) {
+        return false;
+    }
+
+    if (std::fabs(candidate[12]) > 100000.0f ||
+        std::fabs(candidate[13]) > 100000.0f ||
+        std::fabs(candidate[14]) > 100000.0f) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool FindPlacementMatrixInRange(const std::vector<uint8_t>& data,
+                                       size_t start,
+                                       size_t end,
+                                       float* matrixOut) {
+    end = std::min(end, data.size());
+    for (size_t scanOfs = start; scanOfs + 64 <= end; scanOfs += 4) {
+        float candidate[16];
+        memcpy(candidate, data.data() + scanOfs, 64);
+        if (!IsValidPlacementMatrix(candidate)) continue;
+        memcpy(matrixOut, candidate, 64);
+        return true;
+    }
+    return false;
+}
+
+static bool TryReadTlFixedString(const std::vector<uint8_t>& data,
+                                 size_t offset,
+                                 uint32_t& hashOut,
+                                 std::string& nameOut) {
+    if (offset + 32 > data.size()) return false;
+
+    uint32_t hash = ReadU32LE(data, offset);
+    const char* chars = (const char*)data.data() + offset + 4;
+    size_t len = 0;
+    while (len < 28 && chars[len] != '\0') {
+        unsigned char c = (unsigned char)chars[len];
+        if (c < 0x20 || c > 0x7E) return false;
+        len++;
+    }
+    if (len == 0 || len >= 28) return false;
+
+    std::string name(chars, len);
+    if (HashString33(name) != hash) return false;
+
+    hashOut = hash;
+    nameOut = StrToLower(name);
+    return true;
+}
+
+static std::vector<SceneEntityMashRecord> FindSceneEntityMashRecords(const std::vector<uint8_t>& blockData) {
+    std::vector<SceneEntityMashRecord> records;
+    size_t cursor = 0;
+    if (cursor + 4 > blockData.size()) return records;
+
+    uint32_t parseCode = ReadU32LE(blockData, cursor);
+    cursor += 4;
+    if (parseCode == 13) {
+        if (cursor + 4 > blockData.size()) return records;
+        uint32_t vobbCount = ReadU32LE(blockData, cursor);
+        cursor += 4;
+        if (vobbCount > 100000) return records;
+        cursor = AlignUp(cursor, 16);
+        if (cursor + (size_t)vobbCount * 0x30 > blockData.size()) return records;
+        cursor += (size_t)vobbCount * 0x30;
+        if (cursor + 4 > blockData.size()) return records;
+        parseCode = ReadU32LE(blockData, cursor);
+        cursor += 4;
+    }
+
+    if (parseCode != 0 || cursor + 8 > blockData.size()) return records;
+
+    cursor += 4; // field_3C
+    uint32_t groupCount = ReadU32LE(blockData, cursor);
+    cursor += 4;
+    if (groupCount > 10000) return {};
+
+    for (uint32_t groupIdx = 0; groupIdx < groupCount; groupIdx++) {
+        if (cursor + 4 > blockData.size()) return {};
+        uint32_t entityCount = ReadU32LE(blockData, cursor);
+        cursor += 4;
+        if (entityCount > 100000) return {};
+
+        for (uint32_t entityIdx = 0; entityIdx < entityCount; entityIdx++) {
+            if (cursor + 4 > blockData.size()) return {};
+            uint32_t entityMashSize = ReadU32LE(blockData, cursor);
+            cursor += 4;
+            cursor = AlignUp(cursor, 16);
+            if (entityMashSize == 0 || entityMashSize > blockData.size() ||
+                cursor + entityMashSize > blockData.size()) {
+                return {};
+            }
+
+            records.push_back({cursor, entityMashSize});
+            cursor += entityMashSize;
+            cursor = AlignUp(cursor, 4);
+
+            if (cursor + 4 > blockData.size()) return {};
+            uint32_t regionStringCount = ReadU32LE(blockData, cursor);
+            cursor += 4;
+            if (regionStringCount > 100000) return {};
+            cursor = AlignUp(cursor, 8);
+            if (cursor + (size_t)regionStringCount * 32 > blockData.size()) return {};
+            cursor += (size_t)regionStringCount * 32;
+        }
+    }
+
+    return records;
+}
+
+static EntityMeshRef FindEntityMeshRef(
+    const std::vector<uint8_t>& blockData,
+    const SceneEntityMashRecord& rec,
+    const std::map<uint32_t, MeshLocationBinding>& meshHashBindings,
+    const std::map<uint32_t, PCMModelRef>& pcmIndex,
+    const std::map<std::string, uint32_t>& pcmNameToHash) {
+    EntityMeshRef result;
+    size_t scanEnd = std::min(rec.mashStart + rec.mashSize, blockData.size());
+    auto scanRange = [&](size_t scanStart, EntityMeshRef& out) -> bool {
+        for (size_t off = AlignUp(scanStart, 4); off + 32 <= scanEnd; off += 4) {
+            uint32_t hash = 0;
+            std::string name;
+            if (!TryReadTlFixedString(blockData, off, hash, name)) continue;
+
+            auto bindingIt = meshHashBindings.find(hash);
+            if (bindingIt != meshHashBindings.end() && bindingIt->second.pcmHash != 0) {
+                out.pcmHash = bindingIt->second.pcmHash;
+                out.meshOffsetInPcm = bindingIt->second.meshOffsetInPcm;
+                out.meshName = name;
+                return true;
+            }
+
+            if (pcmIndex.count(hash)) {
+                out.pcmHash = hash;
+                out.meshName = name;
+                return true;
+            }
+
+            auto nameIt = pcmNameToHash.find(name);
+            if (nameIt != pcmNameToHash.end()) {
+                out.pcmHash = nameIt->second;
+                out.meshName = name;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    size_t sharedStart = rec.mashStart;
+    bool hasSharedStart = false;
+    if (rec.mashSize >= 16) {
+        uint32_t sharedOffset = ReadU32LE(blockData, rec.mashStart + 8);
+        if (sharedOffset >= 16 && (size_t)sharedOffset < rec.mashSize) {
+            sharedStart = rec.mashStart + sharedOffset;
+            hasSharedStart = true;
+        }
+    }
+
+    if (hasSharedStart && scanRange(sharedStart, result)) return result;
+    if (scanRange(rec.mashStart, result)) return result;
+
+    return result;
+}
+
+static std::vector<LegoPlacementRecord> FindLegoPlacementRecords(
+    const std::vector<uint8_t>& blockData,
+    size_t legoStart) {
+    std::vector<LegoPlacementRecord> records;
+    if (legoStart + 24 > blockData.size()) return records;
+
+    // Matches lego_map_root_node::un_mash at 0x54E5A0:
+    //   mesh handles start at align(root + 31, 8)
+    //   material handles follow
+    //   32-byte lego nodes follow
+    //   node + 24 is a uint16 mesh-array index before the game resolves it.
+    const uint16_t meshCount = ReadU16LE(blockData, legoStart + 16);
+    const uint16_t materialCount = ReadU16LE(blockData, legoStart + 18);
+    const uint16_t nodeCount = ReadU16LE(blockData, legoStart + 20);
+    const uint16_t consumedSize = ReadU16LE(blockData, legoStart + 22);
+    if (meshCount == 0 || nodeCount == 0) return records;
+    if (meshCount > 4096 || materialCount > 4096 || nodeCount > 20000) return records;
+
+    const size_t meshArrayOffset = (legoStart + 31) & ~(size_t)7;
+    const size_t materialArrayOffset = meshArrayOffset + (size_t)meshCount * 4;
+    const size_t nodeArrayOffset = AlignUp(materialArrayOffset + (size_t)materialCount * 4, 4);
+    const size_t nodeArrayEnd = nodeArrayOffset + (size_t)nodeCount * 0x20;
+    if (meshArrayOffset + (size_t)meshCount * 4 > blockData.size()) return {};
+    if (nodeArrayEnd > blockData.size()) return {};
+    if (consumedSize != 0 && legoStart + consumedSize <= nodeArrayOffset) return {};
+
+    records.reserve(nodeCount);
+    for (uint16_t i = 0; i < nodeCount; i++) {
+        const size_t nodeOffset = nodeArrayOffset + (size_t)i * 0x20;
+        const uint8_t flags = blockData[nodeOffset + 16];
+        if ((flags & 0x10) != 0) continue;
+
+        const uint16_t meshArrayIndex = ReadU16LE(blockData, nodeOffset + 24);
+        if (meshArrayIndex >= meshCount) continue;
+
+        const uint32_t meshHash = ReadU32LE(blockData, meshArrayOffset + (size_t)meshArrayIndex * 4);
+        if (meshHash == 0) continue;
+
+        const float x = ReadF32LE(blockData, nodeOffset + 4);
+        const float y = ReadF32LE(blockData, nodeOffset + 8);
+        const float z = ReadF32LE(blockData, nodeOffset + 12);
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+        if (std::fabs(x) > 100000.0f || std::fabs(y) > 100000.0f ||
+            std::fabs(z) > 100000.0f) {
+            continue;
+        }
+
+        LegoPlacementRecord record;
+        record.meshHash = meshHash;
+        record.headingIndex = ReadU16LE(blockData, nodeOffset + 2);
+        record.meshArrayIndex = meshArrayIndex;
+        record.x = x;
+        record.y = y;
+        record.z = z;
+        records.push_back(record);
+    }
+
+    return records;
+}
+
+static int DecodePlacementPcmIndex(uint16_t rawIndex, int meshCount) {
+    int idx = (int)rawIndex;
+    if (idx >= 0 && idx < meshCount) return idx;
+
+    if (idx >= meshCount && idx < 2 * meshCount) {
+        int mirrored = idx - meshCount + 1;
+        if (mirrored >= 0 && mirrored < meshCount) return mirrored;
+    }
+
+    int lowByte = (int)(rawIndex & 0xFF);
+    if ((rawIndex >> 8) != 0 && lowByte >= 0 && lowByte < meshCount) return lowByte;
+
+    return -1;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -280,6 +980,19 @@ void SpiderManTool::LoadAllWorldGeometries() {
         file.read((char*)&headerSize, 4);
         file.read((char*)&packDataOffset, 4);
         if (!file.good()) { file.close(); continue; }
+
+        for (const auto& meshRes : ReadPackMeshFileResources(path.string())) {
+            PCMModelRef ref;
+            ref.packPath = path.string();
+            ref.absOffset = meshRes.absOffset;
+            ref.size = meshRes.size;
+            pcmIndex[meshRes.hash] = ref;
+
+            if (dictionary.count(meshRes.hash)) {
+                std::string nameLower = StrToLower(dictionary[meshRes.hash]);
+                pcmNameToHash[nameLower] = meshRes.hash;
+            }
+        }
 
         size_t headerReadSize = std::min((size_t)500000, fileSize);
         std::vector<uint8_t> tempHeader(headerReadSize);
@@ -425,15 +1138,25 @@ void SpiderManTool::LoadAllWorldGeometries() {
     for (const auto& path : foundPacks) {
         std::string stem = StrToLower(path.stem().string());
         if (!IsWorldPack(stem)) continue;
-        uint32_t zoneHash = CalculateCRC32(stem);
+        uint32_t zoneHash = HashString33(stem);
         zoneBaseHashes.insert(zoneHash);
     }
+
+    std::map<uint32_t, MeshLocationBinding> globalMeshHashBindings;
+    for (const auto& path : foundPacks) {
+        AddMeshHashBindingsFromPack(path.string(), globalMeshHashBindings, false);
+    }
+    Log("Mesh location index: " + std::to_string(globalMeshHashBindings.size()) + " mesh hashes");
 
     int totalInstances = 0;
     int loadedInstances = 0;
     int skippedNoModel = 0;
     int skippedNonRenderable = 0;
     int skippedNoTransform = 0;
+    int totalLegoRecords = 0;
+    int loadedLegoRecords = 0;
+    int skippedLegoNoModel = 0;
+    int skippedLegoFiltered = 0;
 
     // Block info: offset, size, tocHash, tocType
     struct InstanceBlockInfo {
@@ -496,6 +1219,13 @@ void SpiderManTool::LoadAllWorldGeometries() {
         }
 
         // Process each instance block
+        std::vector<MeshLocationBinding> meshLocationBindings = BuildMeshLocationBindings(path.string());
+        std::map<uint32_t, MeshLocationBinding> meshHashBindings = globalMeshHashBindings;
+        for (const auto& binding : meshLocationBindings) {
+            if (binding.meshHash != 0 && binding.pcmHash != 0) {
+                meshHashBindings[binding.meshHash] = binding;
+            }
+        }
         for (const auto& blockInfo : instanceBlocks) {
             std::vector<uint8_t> blockData(blockInfo.size);
             file.clear();
@@ -505,6 +1235,95 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
             const uint32_t blockSize = blockInfo.size;
 
+            bool usedSceneEntityRecords = false;
+            if (blockInfo.tocType == 0x0A) {
+                std::vector<SceneEntityMashRecord> sceneRecords = FindSceneEntityMashRecords(blockData);
+                if (!sceneRecords.empty()) {
+                    usedSceneEntityRecords = true;
+                    int placedSceneEntities = 0;
+
+                    for (const auto& rec : sceneRecords) {
+                        totalInstances++;
+                        if (rec.mashStart + 0x24 > blockData.size()) continue;
+
+                        uint32_t instanceHash = ReadU32LE(blockData, rec.mashStart + 0x20);
+                        if (instanceHash == 0 || zoneBaseHashes.count(instanceHash)) continue;
+
+                        std::string instanceName = dictionary.count(instanceHash)
+                            ? StrToLower(dictionary[instanceHash])
+                            : "";
+                        if (!instanceName.empty() && IsNonRenderableName(instanceName)) {
+                            skippedNonRenderable++;
+                            continue;
+                        }
+
+                        EntityMeshRef meshRef = FindEntityMeshRef(
+                            blockData, rec, meshHashBindings, pcmIndex, pcmNameToHash);
+                        uint32_t pcmHash = meshRef.pcmHash;
+                        if (pcmHash == 0 || !pcmIndex.count(pcmHash) || zoneBaseHashes.count(pcmHash)) {
+                            skippedNoModel++;
+                            continue;
+                        }
+
+                        std::string pcmName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "";
+                        if (ShouldSkipLegoPcmName(pcmName, stem) ||
+                            (!meshRef.meshName.empty() && IsNonRenderableName(meshRef.meshName))) {
+                            skippedNonRenderable++;
+                            continue;
+                        }
+
+                        float instanceMatrix[16];
+                        size_t transformStart = rec.mashStart + 0x10 + 0x44;
+                        size_t transformEnd = rec.mashStart + rec.mashSize;
+                        if (!FindPlacementMatrixInRange(blockData, transformStart, transformEnd, instanceMatrix)) {
+                            skippedNoTransform++;
+                            continue;
+                        }
+
+                        float combinedTransform[16];
+                        MultiplyMatrix4x4(instanceMatrix, baseTransform, combinedTransform);
+
+                        if (!pcmDataCache.count(pcmHash)) {
+                            const auto& ref = pcmIndex[pcmHash];
+                            std::ifstream pcmFile(ref.packPath, std::ios::binary);
+                            if (!pcmFile.is_open()) {
+                                skippedNoModel++;
+                                continue;
+                            }
+                            pcmDataCache[pcmHash].resize(ref.size);
+                            pcmFile.seekg(ref.absOffset);
+                            pcmFile.read((char*)pcmDataCache[pcmHash].data(), ref.size);
+                            pcmFile.close();
+
+                            if (pcmDataCache[pcmHash].size() < 16) {
+                                pcmDataCache.erase(pcmHash);
+                                skippedNoModel++;
+                                continue;
+                            }
+                        }
+
+                        const auto& ref = pcmIndex[pcmHash];
+                        std::string modelName = !meshRef.meshName.empty()
+                            ? meshRef.meshName
+                            : (!instanceName.empty()
+                                ? instanceName
+                                : (pcmName.empty() ? "scene_entity" : pcmName));
+
+                        AddMeshFromDataWithTransform(pcmDataCache[pcmHash], modelName, nullptr,
+                                                     ref.packPath, ref.absOffset, combinedTransform,
+                                                     meshRef.meshOffsetInPcm);
+                        loadedInstances++;
+                        placedSceneEntities++;
+                    }
+
+                    if (placedSceneEntities > 0) {
+                        Log("  Scene entities: " + std::to_string(sceneRecords.size()) + " parsed, "
+                            + std::to_string(placedSceneEntities) + " mesh refs placed");
+                    }
+                }
+            }
+
+            if (!usedSceneEntityRecords) {
             // Scan for all marker positions (aligned to 4 bytes)
             const uint32_t MARKER_ACE  = 0x7ACE5BAD;
 
@@ -585,7 +1404,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
                     std::string noPrefix = StripZonePrefix(instanceName);
                     std::string base = StripNumericSuffix(noPrefix);
                     std::string refName = "ref_" + base;
-                    uint32_t h = CalculateCRC32(refName);
+                    uint32_t h = HashString33(refName);
                     if (pcmIndex.count(h)) pcmHash = h;
                     if (pcmHash == 0 && pcmNameToHash.count(refName))
                         pcmHash = pcmNameToHash[refName];
@@ -750,7 +1569,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
                     base = ExpandAbbreviations(base);
                     for (char d = '1'; d <= '9' && pcmHash == 0; d++) {
                         std::string numPrefixed = std::string(1, d) + base;
-                        uint32_t h = CalculateCRC32(numPrefixed);
+                        uint32_t h = HashString33(numPrefixed);
                         if (pcmIndex.count(h)) { pcmHash = h; break; }
                         if (pcmNameToHash.count(numPrefixed)) { pcmHash = pcmNameToHash[numPrefixed]; break; }
                     }
@@ -829,24 +1648,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
                     continue;
                 }
 
-                // Also filter by resolved model name (for type 0x04 where
-                // instanceName is _entid_xx but model might be non-renderable)
-                if (pcmHash != 0 && dictionary.count(pcmHash)) {
-                    std::string modelName = StrToLower(dictionary[pcmHash]);
-                    if (modelName == "nullo" || modelName == "marker" || modelName == "tool_marker" ||
-                        modelName == "oceanmesh" || modelName == "_gen_building" ||
-                        modelName == "checkercab_phys" || modelName == "tokens" ||
-                        modelName.find("_lod") != std::string::npos ||
-                        modelName.find("sky_") == 0 ||
-                        modelName.find("ped_") == 0 ||
-                        modelName.find("fx_") == 0 ||
-                        modelName.find("decal") != std::string::npos ||
-                        modelName.find("shadow") == 0) {
-                        skippedNonRenderable++;
-                        continue;
-                    }
-                }
-
                 // ── Find transform ────────────────────────────────
                 // Find transform: scan forward for valid po matrix.
                 // Each entity (including conglom members) has a world-space po
@@ -923,12 +1724,89 @@ void SpiderManTool::LoadAllWorldGeometries() {
                                              combinedTransform);
                 loadedInstances++;
             } // end instance record loop
+            }
 
             // ── PASS 2: Placement records for orphan PCMs ────────
             // Some PCMs (bushes, trees, lamps, walls, gates) are placed via
             // stride-0x20 records embedded after the last entity in the 0x0A block.
             // Format per record: pad(4) type(2) angle(2) X(4) Y(4) Z(4) f14(2) f16(2) f18(4) group(4)
-            if (blockInfo.tocType == 0x0A) {
+            // OpenUSM's parse code 11 is the lego/static-prop map. Its
+            // placement records reference resource_directory.mesh_locations,
+            // not PCM order, so resolve mesh -> owning PCM before loading.
+            if (blockInfo.tocType == 0x0A && !meshHashBindings.empty()) {
+                size_t legoStart = 0;
+                if (FindLegoMapDataStart(blockData, legoStart)) {
+                    std::vector<LegoPlacementRecord> legoRecords =
+                        FindLegoPlacementRecords(blockData, legoStart);
+                    totalLegoRecords += (int)legoRecords.size();
+
+                    int loadedFromThisBlock = 0;
+                    for (const auto& rec : legoRecords) {
+                        auto bindingIt = meshHashBindings.find(rec.meshHash);
+                        if (bindingIt == meshHashBindings.end()) {
+                            skippedLegoNoModel++;
+                            continue;
+                        }
+                        const MeshLocationBinding& binding = bindingIt->second;
+                        uint32_t pcmHash = binding.pcmHash;
+                        if (pcmHash == 0 || !pcmIndex.count(pcmHash) || zoneBaseHashes.count(pcmHash)) {
+                            skippedLegoNoModel++;
+                            continue;
+                        }
+
+                        std::string pcmName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "";
+                        if (ShouldSkipLegoPcmName(pcmName, stem)) {
+                            skippedLegoFiltered++;
+                            continue;
+                        }
+
+                        if (!pcmDataCache.count(pcmHash)) {
+                            const auto& legoRef = pcmIndex[pcmHash];
+                            std::ifstream pcmFile(legoRef.packPath, std::ios::binary);
+                            if (!pcmFile.is_open()) {
+                                skippedLegoNoModel++;
+                                continue;
+                            }
+                            pcmDataCache[pcmHash].resize(legoRef.size);
+                            pcmFile.seekg(legoRef.absOffset);
+                            pcmFile.read((char*)pcmDataCache[pcmHash].data(), legoRef.size);
+                            pcmFile.close();
+
+                            if (pcmDataCache[pcmHash].size() < 16) {
+                                pcmDataCache.erase(pcmHash);
+                                skippedLegoNoModel++;
+                                continue;
+                            }
+                        }
+
+                        float yawRad = (float)rec.headingIndex * (3.14159265f / 180.0f);
+                        float cy = std::cos(yawRad), sy = std::sin(yawRad);
+                        float mat[16] = {
+                            cy,  0, sy, 0,
+                            0,   1,  0, 0,
+                            -sy, 0, cy, 0,
+                            rec.x, rec.y, rec.z, 1
+                        };
+                        float combined[16];
+                        MultiplyMatrix4x4(mat, baseTransform, combined);
+
+                        const auto& legoRef = pcmIndex[pcmHash];
+                        std::string legoName = pcmName.empty() ? "lego_prop" : pcmName;
+                        AddMeshFromDataWithTransform(pcmDataCache[pcmHash], legoName, nullptr,
+                                                     legoRef.packPath, legoRef.absOffset, combined,
+                                                     binding.meshOffsetInPcm);
+                        loadedLegoRecords++;
+                        loadedFromThisBlock++;
+                    }
+
+                    if (loadedFromThisBlock > 0) {
+                        Log("  Lego map: " + std::to_string(legoRecords.size()) + " records, "
+                            + std::to_string(loadedFromThisBlock) + " props loaded");
+                    }
+                }
+            }
+
+            if (kEnableGuessedOrphanPlacementRecords && blockInfo.tocType == 0x0A) {
                 // Find contiguous type=9 records by scanning
                 size_t recStart = 0;
                 int recCount = 0;
@@ -964,8 +1842,13 @@ void SpiderManTool::LoadAllWorldGeometries() {
                 }
 
                 if (recCount > 0) {
-                    // f14 is a DIRECT INDEX into the type 0x15 PCM list (sorted by hash)
+                    // OpenUSM loads mesh files from resource_directory.mesh_file_locations.
+                    // The placement index follows that order; TOC order is only a fallback.
                     std::vector<uint32_t> pcm15Hashes;
+                    for (const auto& meshRes : ReadPackMeshFileResources(path.string())) {
+                        pcm15Hashes.push_back(meshRes.hash);
+                    }
+                    if (pcm15Hashes.empty())
                     {
                         file.clear();
                         file.seekg(tocStart);
@@ -1042,10 +1925,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
                         uint16_t f14;
                         memcpy(&f14, &blockData[ro + 20], 2);
 
-                        int pcmIdx = (int)(f14 & 0xFF); // low byte = mesh index, high byte = variant
-                        // f14 in [N, 2N) wraps via 0x33 mirror, skipping zone base
-                        if (pcmIdx >= numPcm15 && pcmIdx < 2 * numPcm15)
-                            pcmIdx = pcmIdx - numPcm15 + 1; // +1 skips zone base at [0]
+                        int pcmIdx = DecodePlacementPcmIndex(f14, numPcm15);
                         if (pcmIdx < 0 || pcmIdx >= numPcm15) continue;
 
                         uint32_t pcmH = pcm15Hashes[pcmIdx];
@@ -1120,8 +2000,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
                         for (int ri2 = 0; ri2 < recCount; ri2++) {
                             size_t ro2 = recStart + ri2 * 0x20;
                             uint16_t rf14; memcpy(&rf14, &blockData[ro2 + 20], 2);
-                            int ridx = (int)(rf14 & 0xFF);
-                            if (ridx >= numPcm15 && ridx < 2 * numPcm15) ridx = ridx - numPcm15 + 1;
+                            int ridx = DecodePlacementPcmIndex(rf14, numPcm15);
                             if (ridx < 0 || ridx >= numPcm15) continue;
                             { // use ALL records for zone center
                                 float rx, ry, rz;
@@ -1157,10 +2036,15 @@ void SpiderManTool::LoadAllWorldGeometries() {
         + std::to_string(skippedNoModel) + " unresolved, "
         + std::to_string(skippedNonRenderable) + " non-renderable, "
         + std::to_string(skippedNoTransform) + " no transform");
+    Log("Lego map scan: " + std::to_string(totalLegoRecords) + " records, "
+        + std::to_string(loadedLegoRecords) + " props loaded, "
+        + std::to_string(skippedLegoNoModel) + " unresolved, "
+        + std::to_string(skippedLegoFiltered) + " filtered/base");
 
     pcmDataCache.clear();
 
     LoadSkybox();
+    BatchWorldMeshesByType();
 
     isModelLoaded = true;
     Log("World loaded. Total meshes: " + std::to_string(previewMeshes.size()));
@@ -1297,10 +2181,12 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
     // ── Identify zone base hash ──
     // The zone base mesh (e.g., IGC for IG.PCPACK) is the largest type 0x15 entry.
     // Also match by name: stem + "c" (e.g., "igc" for "ig").
+    std::vector<PackMeshFileResource> packMeshResources = ReadPackMeshFileResources(packFilePath);
+
     fs::path pp(packFilePath);
     std::string stem = StrToLower(pp.stem().string());
     std::string zoneBaseName = stem + "c";
-    uint32_t zoneBaseHash = CalculateCRC32(zoneBaseName);
+    uint32_t zoneBaseHash = HashString33(zoneBaseName);
     // Also find by dictionary name match and by largest size
     uint32_t largestPcmHash = 0;
     uint32_t largestPcmSize = 0;
@@ -1316,13 +2202,34 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
     }
 
     // ── Build local PCM index ──
+    for (const auto& meshRes : packMeshResources) {
+        if (meshRes.size > largestPcmSize) {
+            largestPcmSize = meshRes.size;
+            largestPcmHash = meshRes.hash;
+        }
+        if (dictionary.count(meshRes.hash)) {
+            std::string n = StrToLower(dictionary[meshRes.hash]);
+            if (n == zoneBaseName) zoneBaseHash = meshRes.hash;
+        }
+    }
+
     struct LocalPcm { uint32_t hash; uint32_t absOffset; uint32_t size; std::string name; };
     std::vector<LocalPcm> localPcms;
-    for (auto& te : toc) {
-        if (te.type == 0x15 && te.size > 64 &&
-            te.hash != zoneBaseHash && te.hash != largestPcmHash) {
-            std::string n = dictionary.count(te.hash) ? StrToLower(dictionary[te.hash]) : "";
-            localPcms.push_back({te.hash, te.absOffset, te.size, n});
+    if (!packMeshResources.empty()) {
+        for (const auto& meshRes : packMeshResources) {
+            if (meshRes.size > 64 &&
+                meshRes.hash != zoneBaseHash && meshRes.hash != largestPcmHash) {
+                std::string n = dictionary.count(meshRes.hash) ? StrToLower(dictionary[meshRes.hash]) : "";
+                localPcms.push_back({meshRes.hash, meshRes.absOffset, meshRes.size, n});
+            }
+        }
+    } else {
+        for (auto& te : toc) {
+            if (te.type == 0x15 && te.size > 64 &&
+                te.hash != zoneBaseHash && te.hash != largestPcmHash) {
+                std::string n = dictionary.count(te.hash) ? StrToLower(dictionary[te.hash]) : "";
+                localPcms.push_back({te.hash, te.absOffset, te.size, n});
+            }
         }
     }
 
@@ -1377,7 +2284,7 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
                 caFile.seekg(0);
                 caFile.read((char*)caHdr.data(), hdrRead);
 
-                uint32_t caTocStart = 0;
+                size_t caTocStart = 0;
                 for (size_t ci = 0; ci + 8 < hdrRead; ci += 4) {
                     uint32_t v; memcpy(&v, &caHdr[ci], 4);
                     if (v != 0xE3E3E3E3) continue;
@@ -1414,6 +2321,11 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
                     caFile.read((char*)pcmCache[ce.hash].data(), ce.size);
                     std::string cn = dictionary.count(ce.hash) ? StrToLower(dictionary[ce.hash]) : "";
                     if (!cn.empty()) nameToHash[cn] = ce.hash;
+                    PCMModelRef ref;
+                    ref.packPath = caPath.string();
+                    ref.absOffset = ce.absOffset;
+                    ref.size = ce.size;
+                    localPcmIndex[ce.hash] = ref;
                     caLoaded++;
                 }
                 caFile.close();
@@ -1424,7 +2336,25 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
     }
 
     // ── Process 0x0A block: entity instances + orphan placement records ──
-    int placedEntities = 0, placedOrphans = 0;
+    int placedEntities = 0, placedOrphans = 0, placedLegos = 0;
+    int skippedLegoNoModel = 0, skippedLegoFiltered = 0;
+    std::vector<MeshLocationBinding> meshLocationBindings = BuildMeshLocationBindings(packFilePath);
+    std::map<uint32_t, MeshLocationBinding> meshHashBindings;
+    fs::path packDirForBindings = fs::path(packFilePath).parent_path();
+    if (!packDirForBindings.empty() && fs::exists(packDirForBindings)) {
+        for (const auto& entry : fs::directory_iterator(packDirForBindings)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = StrToLower(entry.path().extension().string());
+            if (ext == ".pcpack") {
+                AddMeshHashBindingsFromPack(entry.path().string(), meshHashBindings, false);
+            }
+        }
+    }
+    for (const auto& binding : meshLocationBindings) {
+        if (binding.meshHash != 0 && binding.pcmHash != 0) {
+            meshHashBindings[binding.meshHash] = binding;
+        }
+    }
 
     for (auto& te : toc) {
         if (te.type != 0x0A) continue;
@@ -1436,6 +2366,80 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
         if (!file.good()) continue;
         uint32_t blockSize = te.size;
 
+        bool usedSceneEntityRecords = false;
+        std::vector<SceneEntityMashRecord> sceneRecords = FindSceneEntityMashRecords(blockData);
+        if (!sceneRecords.empty()) {
+            usedSceneEntityRecords = true;
+            int placedFromScene = 0;
+
+            for (const auto& rec : sceneRecords) {
+                if (rec.mashStart + 0x24 > blockData.size()) continue;
+                uint32_t instanceHash = ReadU32LE(blockData, rec.mashStart + 0x20);
+                if (instanceHash == 0 || instanceHash == zoneBaseHash) continue;
+
+                std::string instanceName = dictionary.count(instanceHash)
+                    ? StrToLower(dictionary[instanceHash])
+                    : "";
+                if (!instanceName.empty() && IsNonRenderableName(instanceName)) continue;
+
+                EntityMeshRef meshRef = FindEntityMeshRef(
+                    blockData, rec, meshHashBindings, localPcmIndex, nameToHash);
+                uint32_t pcmHash = meshRef.pcmHash;
+                if (pcmHash == 0 || pcmHash == zoneBaseHash || pcmHash == largestPcmHash) continue;
+
+                std::string pcmName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "";
+                if (ShouldSkipLegoPcmName(pcmName, stem) ||
+                    (!meshRef.meshName.empty() && IsNonRenderableName(meshRef.meshName))) {
+                    continue;
+                }
+
+                if (!pcmCache.count(pcmHash)) {
+                    auto refIt = localPcmIndex.find(pcmHash);
+                    if (refIt == localPcmIndex.end()) continue;
+                    const auto& ref = refIt->second;
+                    std::ifstream pcmFile(ref.packPath, std::ios::binary);
+                    if (!pcmFile.is_open()) continue;
+                    pcmCache[pcmHash].resize(ref.size);
+                    pcmFile.seekg(ref.absOffset);
+                    pcmFile.read((char*)pcmCache[pcmHash].data(), ref.size);
+                    pcmFile.close();
+                    if (pcmCache[pcmHash].size() < 16) {
+                        pcmCache.erase(pcmHash);
+                        continue;
+                    }
+                }
+
+                float mat[16];
+                if (!FindPlacementMatrixInRange(blockData,
+                                                rec.mashStart + 0x10 + 0x44,
+                                                rec.mashStart + rec.mashSize,
+                                                mat)) {
+                    continue;
+                }
+
+                float combined[16];
+                MultiplyMatrix4x4(mat, baseTransform, combined);
+
+                auto refIt = localPcmIndex.find(pcmHash);
+                const std::string& srcPack = (refIt != localPcmIndex.end()) ? refIt->second.packPath : packFilePath;
+                uint32_t srcOffset = (refIt != localPcmIndex.end()) ? refIt->second.absOffset : 0;
+                std::string modelName = !meshRef.meshName.empty()
+                    ? meshRef.meshName
+                    : (!instanceName.empty() ? instanceName : (pcmName.empty() ? "scene_entity" : pcmName));
+                AddMeshFromDataWithTransform(pcmCache[pcmHash], modelName, nullptr,
+                                             srcPack, srcOffset, combined,
+                                             meshRef.meshOffsetInPcm);
+                placedEntities++;
+                placedFromScene++;
+            }
+
+            if (placedFromScene > 0) {
+                Log("  Scene entities: " + std::to_string(sceneRecords.size()) + " parsed, "
+                    + std::to_string(placedFromScene) + " mesh refs placed");
+            }
+        }
+
+        if (!usedSceneEntityRecords) {
         // Find all 7ACE5BAD markers
         const uint32_t MARKER = 0x7ACE5BAD;
         std::vector<size_t> acePositions;
@@ -1568,8 +2572,11 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
 
             float combined[16];
             MultiplyMatrix4x4(mat, baseTransform, combined);
+            auto refIt = localPcmIndex.find(pcmHash);
+            const std::string& srcPack = (refIt != localPcmIndex.end()) ? refIt->second.packPath : packFilePath;
+            uint32_t srcOffset = (refIt != localPcmIndex.end()) ? refIt->second.absOffset : 0;
             AddMeshFromDataWithTransform(pcmCache[pcmHash], instanceName, nullptr,
-                                         packFilePath, 0, combined);
+                                         srcPack, srcOffset, combined);
             placedEntities++;
         }
         Log("  Entities: " + std::to_string(acePositions.size()) + " total, "
@@ -1577,9 +2584,89 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
             + std::to_string(noNameCount) + " unknown hash, "
             + std::to_string(filteredCount) + " filtered, "
             + std::to_string(placedEntities) + " placed");
+        }
+
+        if (!meshHashBindings.empty()) {
+            size_t legoStart = 0;
+            if (FindLegoMapDataStart(blockData, legoStart)) {
+                std::vector<LegoPlacementRecord> legoRecords =
+                    FindLegoPlacementRecords(blockData, legoStart);
+
+                int placedFromThisBlock = 0;
+                for (const auto& rec : legoRecords) {
+                    auto bindingIt = meshHashBindings.find(rec.meshHash);
+                    if (bindingIt == meshHashBindings.end()) {
+                        skippedLegoNoModel++;
+                        continue;
+                    }
+                    const MeshLocationBinding& binding = bindingIt->second;
+                    uint32_t pcmHash = binding.pcmHash;
+                    if (pcmHash == 0 || pcmHash == zoneBaseHash || pcmHash == largestPcmHash) {
+                        skippedLegoNoModel++;
+                        continue;
+                    }
+
+                    std::string pcmName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "";
+                    if (ShouldSkipLegoPcmName(pcmName, stem)) {
+                        skippedLegoFiltered++;
+                        continue;
+                    }
+
+                    if (!pcmCache.count(pcmHash)) {
+                        auto refIt = localPcmIndex.find(pcmHash);
+                        if (refIt == localPcmIndex.end()) {
+                            skippedLegoNoModel++;
+                            continue;
+                        }
+
+                        const auto& ref = refIt->second;
+                        std::ifstream pcmFile(ref.packPath, std::ios::binary);
+                        if (!pcmFile.is_open()) {
+                            skippedLegoNoModel++;
+                            continue;
+                        }
+                        pcmCache[pcmHash].resize(ref.size);
+                        pcmFile.seekg(ref.absOffset);
+                        pcmFile.read((char*)pcmCache[pcmHash].data(), ref.size);
+                        pcmFile.close();
+                        if (pcmCache[pcmHash].size() < 16) {
+                            pcmCache.erase(pcmHash);
+                            skippedLegoNoModel++;
+                            continue;
+                        }
+                    }
+
+                    float yawRad = (float)rec.headingIndex * (3.14159265f / 180.0f);
+                    float cy = std::cos(yawRad), sy = std::sin(yawRad);
+                    float mat[16] = {
+                        cy,  0, sy, 0,
+                        0,   1,  0, 0,
+                        -sy, 0, cy, 0,
+                        rec.x, rec.y, rec.z, 1
+                    };
+                    float combined[16];
+                    MultiplyMatrix4x4(mat, baseTransform, combined);
+
+                    auto refIt = localPcmIndex.find(pcmHash);
+                    const std::string& srcPack = (refIt != localPcmIndex.end()) ? refIt->second.packPath : packFilePath;
+                    uint32_t srcOffset = (refIt != localPcmIndex.end()) ? refIt->second.absOffset : 0;
+                    std::string modelName = pcmName.empty() ? "lego_prop" : pcmName;
+                    AddMeshFromDataWithTransform(pcmCache[pcmHash], modelName, nullptr,
+                                                 srcPack, srcOffset, combined,
+                                                 binding.meshOffsetInPcm);
+                    placedLegos++;
+                    placedFromThisBlock++;
+                }
+
+                if (placedFromThisBlock > 0) {
+                    Log("  Lego map: " + std::to_string(legoRecords.size()) + " records, "
+                        + std::to_string(placedFromThisBlock) + " props placed");
+                }
+            }
+        }
 
         // ── Pass 2: Placement records (stride-0x20, type=9) with f14 = PCM index ──
-        {
+        if (kEnableGuessedOrphanPlacementRecords) {
             // Find contiguous type=9 records
             size_t recStart = 0;
             int recCount = 0;
@@ -1606,10 +2693,15 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
             }
 
             if (recCount > 0) {
-                // Build sorted type 0x15 hash list for f14 indexing
+                // OpenUSM uses resource_directory.mesh_file_locations order here.
                 std::vector<uint32_t> pcm15Hashes;
-                for (auto& t2 : toc) {
-                    if (t2.type == 0x15) pcm15Hashes.push_back(t2.hash);
+                for (const auto& meshRes : packMeshResources) {
+                    pcm15Hashes.push_back(meshRes.hash);
+                }
+                if (pcm15Hashes.empty()) {
+                    for (auto& t2 : toc) {
+                        if (t2.type == 0x15) pcm15Hashes.push_back(t2.hash);
+                    }
                 }
                 int numPcm15 = (int)pcm15Hashes.size();
 
@@ -1678,9 +2770,7 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
                     size_t ro = recStart + ri * 0x20;
                     uint16_t f14; memcpy(&f14, &blockData[ro + 20], 2);
 
-                    int pcmIdx = (int)(f14 & 0xFF); // low byte = mesh index, high byte = variant
-                    if (pcmIdx >= numPcm15 && pcmIdx < 2 * numPcm15)
-                        pcmIdx = pcmIdx - numPcm15 + 1; // +1 skips zone base at [0]
+                    int pcmIdx = DecodePlacementPcmIndex(f14, numPcm15);
                     if (pcmIdx < 0 || pcmIdx >= numPcm15) { meshSkipReason[f14] = "out of range"; continue; }
 
                     uint32_t pcmH = pcm15Hashes[pcmIdx];
@@ -1755,8 +2845,7 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
                         for (int ri2 = 0; ri2 < recCount; ri2++) {
                             size_t ro2 = recStart + ri2 * 0x20;
                             uint16_t rf14; memcpy(&rf14, &blockData[ro2 + 20], 2);
-                            int ridx = (int)(rf14 & 0xFF);
-                            if (ridx >= numPcm15 && ridx < 2 * numPcm15) ridx = ridx - numPcm15 + 1;
+                            int ridx = DecodePlacementPcmIndex(rf14, numPcm15);
                             if (ridx < 0 || ridx >= numPcm15) continue;
                             { // use ALL records for zone center
                                 float rx, ry, rz;
@@ -1789,8 +2878,12 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
     }
 
     file.close();
+    BatchWorldMeshesByType();
     Log("Pack entities: " + std::to_string(placedEntities) + " instances, "
-        + std::to_string(placedOrphans) + " orphan placements from " + stem);
+        + std::to_string(placedLegos) + " lego props, "
+        + std::to_string(placedOrphans) + " guessed orphan placements, "
+        + std::to_string(skippedLegoFiltered) + " lego filtered/base, "
+        + std::to_string(skippedLegoNoModel) + " lego unresolved from " + stem);
 }
 
 static void DecodeDXT1Block(const uint8_t* src, uint8_t out[4][4][4]) {
@@ -2020,7 +3113,7 @@ void SpiderManTool::ExtractAllWorldMeshes() {
         uint32_t zoneBaseHash = 0;
         if (!isCityArena) {
             std::string zoneBaseName = stemLower + "c";
-            zoneBaseHash = CalculateCRC32(zoneBaseName);
+            zoneBaseHash = HashString33(zoneBaseName);
             uint32_t largestHash = 0, largestSize = 0;
             for (auto& te : toc) {
                 if (te.type == 0x15 && te.size > largestSize) {

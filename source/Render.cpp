@@ -982,7 +982,7 @@ void SpiderManTool::RenderModelPreview() {
     }
 
     // Compute and upload bone matrices if animation is selected
-    if (loadedAnimFile && loadedSkeleton && selectedAnimIndex >= 0 &&
+    if (!isWorldMode && loadedAnimFile && loadedSkeleton && selectedAnimIndex >= 0 &&
         selectedAnimIndex < (int)loadedAnimFile->animations.size() &&
         pcmBoneCount > 0) {
 
@@ -1868,7 +1868,7 @@ void SpiderManTool::RenderModelPreview() {
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
         if (m.isHidden) continue;
-        if (m.indexCount > 0 && !m.isFakeShadow && !m.isColorVolume) {
+        if (m.indexCount > 0) {
             if (!isInFrustum(m.bboxMin, m.bboxMax)) continue;
 
             if (m.textureId != 0) {
