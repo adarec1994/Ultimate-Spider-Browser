@@ -220,6 +220,9 @@ static void RecordWorldOriginPlacementDebug(const std::string& category,
                                             const std::string& sourcePack,
                                             uint32_t sourceOffset,
                                             const float* transform) {
+    // Direct world-space meshes use an identity transform by design; only
+    // placement-driven categories are useful for "why did this spawn at 0,0".
+    if (category == "zone chunks" || category == "interiors" || category == "unique pcms") return;
     if (!IsWorldOriginTransform(transform)) return;
 
     WorldOriginPlacementDebugKey key;

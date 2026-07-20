@@ -7,6 +7,31 @@ static bool IsInteriorScenePackName(const std::string& stem) {
     return lower.size() >= 6 && lower.substr(2, 4) == "_int";
 }
 
+static bool IsInteriorSceneMeshName(const std::string& name) {
+    std::string lower = StrToLower(name);
+    size_t intPos = lower.find("_int_");
+    if (intPos == std::string::npos) return false;
+
+    std::string tail = lower.substr(intPos + 5);
+    size_t lastSep = tail.find_last_of('_');
+    std::string last = (lastSep == std::string::npos) ? tail : tail.substr(lastSep + 1);
+
+    if (last.size() == 2 &&
+        std::isalpha((unsigned char)last[0]) &&
+        (last[1] == 'c' || last[1] == 'r')) {
+        return true;
+    }
+
+    if (last.size() == 3 &&
+        last[0] == 'v' &&
+        std::isdigit((unsigned char)last[1]) &&
+        (last[2] == 'c' || last[2] == 'r')) {
+        return true;
+    }
+
+    return false;
+}
+
 static int LoadWorldInteriorMeshes(SpiderManTool& tool, const float* baseTransform) {
     int loaded = 0;
 
@@ -29,6 +54,7 @@ static int LoadWorldInteriorMeshes(SpiderManTool& tool, const float* baseTransfo
                 ss << "0x" << std::hex << meshRes.hash;
                 entryName = ss.str();
             }
+            if (!IsInteriorSceneMeshName(entryName)) continue;
 
             std::vector<uint8_t> pcmData(meshRes.size);
             file.clear();

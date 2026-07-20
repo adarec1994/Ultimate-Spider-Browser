@@ -373,7 +373,7 @@ static int LoadWorldOceanMesh(SpiderManTool& tool, const float* baseTransform) {
             if (type >= 0x1000 || type == 0) break;
             if (size <= 4) continue;
 
-            if (hash != oceanMeshHash) continue;
+            if (hash != oceanMeshHash || type != 0x15) continue;
 
             uint32_t absOffset = packDataOffset + offset;
             if ((size_t)absOffset + size > fileSize) continue;

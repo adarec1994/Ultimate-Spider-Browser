@@ -406,15 +406,22 @@ void RenderUI(SpiderManTool& tool) {
                     for (int ai = 0; ai < (int)tool.loadedAnimFile->animations.size(); ai++) {
                         const auto& a = tool.loadedAnimFile->animations[ai];
                         bool isSelected = (tool.selectedAnimIndex == ai);
+                        // Flag anims bound to a different skeleton than the
+                        // active one -- they decode fine but won't fit this rig.
+                        bool skelMismatch = a.skeleton && tool.loadedSkeleton &&
+                            !nal_skeleton_pose_compatible(a.skeleton.get(), tool.loadedSkeleton.get());
                         char label[256];
-                        snprintf(label, sizeof(label), "[%d] %s (%d frames%s%s)",
+                        snprintf(label, sizeof(label), "[%d] %s (%d frames%s%s%s%s)",
                             ai, a.name.c_str(), a.frame_count,
                             a.is_looping() ? ", loop" : "",
-                            a.is_scene_anim() ? ", scene" : "");
+                            a.is_scene_anim() ? ", scene" : "",
+                            a.skeleton_name.empty() ? "" : (", skel: " + a.skeleton_name).c_str(),
+                            skelMismatch ? " [other rig]" : "");
 
                         if (ImGui::Selectable(label, isSelected)) {
                             tool.selectedAnimIndex = ai;
                             tool.currentAnimFrame = 0;
+                            tool.animFrameFraction = 0.f;
                             tool.animPlaybackTime = 0.f;
                             tool.isAnimPlaying = true;
                         }
@@ -428,19 +435,32 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::Text("Selected: %s", selAnim.name.c_str());
                     int playbackFrameCount = selAnim.playback_frame_count();
                     float playbackDuration = selAnim.playback_duration();
-                    ImGui::Text("  Frames: %d  Header duration: %.3fs  Preview: %.3fs",
-                        playbackFrameCount, selAnim.duration, playbackDuration);
-                    ImGui::Text("  T_scale: %.6f", selAnim.t_scale);
+                    ImGui::Text("  Frames: %d  Duration: %.3fs", playbackFrameCount, playbackDuration);
+                    ImGui::Text("  Header +0x30: %.6f (preserved)  T_scale: %.6f",
+                        selAnim.header_float_30, selAnim.t_scale);
                     ImGui::Text("  Decoded comps: %d", (int)selAnim.components.size());
+                    if (!selAnim.skeleton_name.empty()) {
+                        bool mismatch = selAnim.skeleton && tool.loadedSkeleton &&
+                            !nal_skeleton_pose_compatible(selAnim.skeleton.get(), tool.loadedSkeleton.get());
+                        ImGui::Text("  Skeleton: %s%s", selAnim.skeleton_name.c_str(),
+                                    mismatch ? "  (differs from active mesh skeleton!)" : "");
+                    }
 
                     // Frame scrubber
                     int maxFrame = std::max(0, playbackFrameCount - 1);
-                    ImGui::SliderInt("Frame", &tool.currentAnimFrame, 0, maxFrame);
+                    if (ImGui::SliderInt("Frame", &tool.currentAnimFrame, 0, maxFrame)) {
+                        tool.animFrameFraction = 0.f;
+                        tool.animPlaybackTime = (float)tool.currentAnimFrame / NAL_PREVIEW_FPS;
+                    }
 
                     if (tool.isAnimPlaying) {
                         if (ImGui::Button("Pause")) tool.isAnimPlaying = false;
                     } else {
                         if (ImGui::Button("Play")) {
+                            if (!selAnim.is_looping() && tool.currentAnimFrame >= maxFrame) {
+                                tool.currentAnimFrame = 0;
+                                tool.animFrameFraction = 0.f;
+                            }
                             tool.isAnimPlaying = true;
                             tool.animPlaybackTime = (float)tool.currentAnimFrame / NAL_PREVIEW_FPS;
                         }
@@ -448,6 +468,7 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::SameLine();
                     if (ImGui::Button("Reset")) {
                         tool.currentAnimFrame = 0;
+                        tool.animFrameFraction = 0.f;
                         tool.animPlaybackTime = 0.f;
                         tool.isAnimPlaying = false;
                     }

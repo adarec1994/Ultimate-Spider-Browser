@@ -1,5 +1,7 @@
 #pragma once
 #include "Helpers.h"
+#include "PackDirectory.h"
+#include "EntityBoneMapping.h"
 #include <filesystem>
 #include <map>
 #include <array>
@@ -279,6 +281,9 @@ public:
     std::vector<FileEntry> entries;
     std::string loadedPCPackPath;
     std::vector<uint8_t> pcPackData;
+    // Parsed resource directory of the currently open pack (typed resource
+    // tables incl. skeleton/anim-file locations). See PackDirectory.h.
+    PackDirectory currentDir;
     uint32_t dataOffset = 0;
     std::string logBuffer;
 
@@ -441,6 +446,7 @@ public:
     std::shared_ptr<NalAnimFile>     loadedAnimFile;
     int selectedAnimIndex = -1;
     int currentAnimFrame  = 0;
+    float animFrameFraction = 0.f;
     bool isAnimPlaying    = false;
     float animPlaybackTime = 0.f;
     std::string loadedSkeletonName;
@@ -454,13 +460,34 @@ public:
     struct SkeletonCandidate {
         std::shared_ptr<NalSkeletonData> data;
         std::string name;            // skeleton's own name (from header)
+        uint32_t    hash = 0;        // tlresource string_hash (matches anim-file skeleton table)
         int         entryIndex = -1; // index into entries[]
     };
     std::vector<SkeletonCandidate> skeletonCandidates;
     int activeSkeletonCandidate = -1;
 
+    // Cross-pack skeleton resolution. Anim files may reference skeletons that
+    // live in another pack (e.g. ultimate_spiderman in GAME.PCPACK) -- the
+    // engine resolves these through its global skeleton directory. The index
+    // maps tlresource hash -> pack location and is built lazily on first miss.
+    struct SkeletonLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
+    std::map<uint32_t, SkeletonLocation> globalSkeletonIndex;
+    bool globalSkeletonIndexBuilt = false;
+    void BuildGlobalSkeletonIndex();
+    std::shared_ptr<NalSkeletonData> LoadSkeletonFromLocation(const SkeletonLocation& loc);
+
+    // Cooked conglomerate ENTITY resources define the exact permutation from
+    // NAL logical all_model_po indices to PCM/ngl mesh-bone indices.
+    struct EntityLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
+    std::map<uint32_t, std::vector<EntityLocation>> globalEntityIndex;
+    bool globalEntityIndexBuilt = false;
+    EntityBoneMapping activeBoneMapping;
+    uint32_t activeBoneMappingHash = 0;
+    void BuildGlobalEntityIndex();
+    bool SelectBoneMappingForMesh(uint32_t meshHash);
+
     void LoadSkeletonForCurrentPack();
-    void SelectSkeletonForMesh(const std::string& meshName);
+    void SelectSkeletonForMesh(const std::string& meshName, uint32_t meshHash = 0);
     void ActivateSkeletonCandidate(int candidateIndex);
     void LoadAnimationForCurrentPack();
     void UpdateAnimationPlayback(float deltaTime);

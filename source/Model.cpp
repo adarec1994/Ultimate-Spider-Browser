@@ -6,6 +6,9 @@
 #include <cmath>
 #include <algorithm>
 #include <map>
+#include <functional>
+#include <cctype>
+#include "stb_image_write.h"
 
 static constexpr int PREVIEW_MAX_BONES = 64;
 
@@ -331,6 +334,2051 @@ static bool IsColorVolumeMesh(const std::string& meshName) {
 static bool ShouldHideMesh(const std::string& meshName) {
     (void)meshName;
     return false;
+}
+
+static void GlbDecodeDXT1Block(const uint8_t* src, uint8_t out[4][4][4]) {
+    uint16_t c0 = src[0] | (src[1] << 8);
+    uint16_t c1 = src[2] | (src[3] << 8);
+    uint8_t palette[4][4];
+
+    auto unpack565 = [](uint16_t c, uint8_t* rgba) {
+        rgba[0] = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
+        rgba[1] = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
+        rgba[2] = (uint8_t)((c & 0x1F) * 255 / 31);
+        rgba[3] = 255;
+    };
+
+    unpack565(c0, palette[0]);
+    unpack565(c1, palette[1]);
+    if (c0 > c1) {
+        for (int i = 0; i < 3; ++i) {
+            palette[2][i] = (uint8_t)((2 * palette[0][i] + palette[1][i]) / 3);
+            palette[3][i] = (uint8_t)((palette[0][i] + 2 * palette[1][i]) / 3);
+        }
+        palette[2][3] = palette[3][3] = 255;
+    } else {
+        for (int i = 0; i < 3; ++i) palette[2][i] = (uint8_t)((palette[0][i] + palette[1][i]) / 2);
+        palette[2][3] = 255;
+        palette[3][0] = palette[3][1] = palette[3][2] = 0;
+        palette[3][3] = 0;
+    }
+
+    uint32_t bits = src[4] | (src[5] << 8) | (src[6] << 16) | (src[7] << 24);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            int idx = (bits >> ((y * 4 + x) * 2)) & 3;
+            memcpy(out[y][x], palette[idx], 4);
+        }
+    }
+}
+
+static bool GlbDecodeDDSToRGBA(const std::vector<uint8_t>& dds, std::vector<uint8_t>& rgba, int& width, int& height) {
+    if (dds.size() < 128) return false;
+    uint32_t magic = 0;
+    memcpy(&magic, dds.data(), 4);
+    if (magic != 0x20534444) return false;
+
+    struct DDSHdr {
+        uint32_t sz, fl, h, w, pitch, dep, mip, rsv[11];
+        struct { uint32_t sz, fl, fourcc, bits, rM, gM, bM, aM; } pf;
+        uint32_t caps[4], rsv2;
+    };
+    const DDSHdr* hdr = reinterpret_cast<const DDSHdr*>(dds.data() + 4);
+    width = (int)hdr->w;
+    height = (int)hdr->h;
+    if (width < 1 || height < 1 || width > 8192 || height > 8192) return false;
+
+    const uint8_t* px = dds.data() + 128;
+    size_t pxSize = dds.size() - 128;
+    rgba.assign((size_t)width * (size_t)height * 4, 0);
+
+    if (hdr->pf.fl & 0x4) {
+        uint32_t fourCC = hdr->pf.fourcc;
+        int blockSize = (fourCC == 0x31545844) ? 8 : 16; // DXT1 else DXT3/DXT5
+        int bw = (width + 3) / 4;
+        int bh = (height + 3) / 4;
+        if ((size_t)bw * (size_t)bh * (size_t)blockSize > pxSize) return false;
+
+        for (int by = 0; by < bh; ++by) {
+            for (int bx = 0; bx < bw; ++bx) {
+                const uint8_t* block = px + ((size_t)by * (size_t)bw + (size_t)bx) * (size_t)blockSize;
+                uint8_t decoded[4][4][4];
+
+                if (fourCC == 0x31545844) { // DXT1
+                    GlbDecodeDXT1Block(block, decoded);
+                } else if (fourCC == 0x33545844) { // DXT3
+                    uint64_t alpha = 0;
+                    memcpy(&alpha, block, 8);
+                    GlbDecodeDXT1Block(block + 8, decoded);
+                    for (int y = 0; y < 4; ++y) {
+                        for (int x = 0; x < 4; ++x) {
+                            decoded[y][x][3] = (uint8_t)(((alpha >> ((y * 4 + x) * 4)) & 0xF) * 17);
+                        }
+                    }
+                } else if (fourCC == 0x35545844) { // DXT5
+                    uint8_t a0 = block[0], a1 = block[1];
+                    uint8_t aPal[8];
+                    aPal[0] = a0;
+                    aPal[1] = a1;
+                    if (a0 > a1) {
+                        for (int i = 1; i < 7; ++i) aPal[i + 1] = (uint8_t)(((7 - i) * a0 + i * a1) / 7);
+                    } else {
+                        for (int i = 1; i < 5; ++i) aPal[i + 1] = (uint8_t)(((5 - i) * a0 + i * a1) / 5);
+                        aPal[6] = 0;
+                        aPal[7] = 255;
+                    }
+                    uint64_t aBits = 0;
+                    for (int i = 2; i < 8; ++i) aBits |= (uint64_t)block[i] << ((i - 2) * 8);
+                    GlbDecodeDXT1Block(block + 8, decoded);
+                    for (int y = 0; y < 4; ++y) {
+                        for (int x = 0; x < 4; ++x) {
+                            decoded[y][x][3] = aPal[(aBits >> ((y * 4 + x) * 3)) & 7];
+                        }
+                    }
+                } else {
+                    return false;
+                }
+
+                for (int y = 0; y < 4; ++y) {
+                    for (int x = 0; x < 4; ++x) {
+                        int dstX = bx * 4 + x;
+                        int dstY = by * 4 + y;
+                        if (dstX < width && dstY < height) {
+                            memcpy(&rgba[((size_t)dstY * (size_t)width + (size_t)dstX) * 4], decoded[y][x], 4);
+                        }
+                    }
+                }
+            }
+        }
+    } else if (hdr->pf.fl & 0x40) {
+        if (hdr->pf.bits == 32) {
+            for (int i = 0; i < width * height && (size_t)i * 4 + 3 < pxSize; ++i) {
+                rgba[i * 4 + 0] = px[i * 4 + 2];
+                rgba[i * 4 + 1] = px[i * 4 + 1];
+                rgba[i * 4 + 2] = px[i * 4 + 0];
+                rgba[i * 4 + 3] = hdr->pf.aM ? px[i * 4 + 3] : 255;
+            }
+        } else if (hdr->pf.bits == 24) {
+            for (int i = 0; i < width * height && (size_t)i * 3 + 2 < pxSize; ++i) {
+                rgba[i * 4 + 0] = px[i * 3 + 2];
+                rgba[i * 4 + 1] = px[i * 3 + 1];
+                rgba[i * 4 + 2] = px[i * 3 + 0];
+                rgba[i * 4 + 3] = 255;
+            }
+        } else {
+            return false;
+        }
+    } else if (hdr->pf.fl & 0x20000) {
+        if (hdr->pf.bits == 8) {
+            for (int i = 0; i < width * height && (size_t)i < pxSize; ++i) {
+                rgba[i * 4 + 0] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = px[i];
+                rgba[i * 4 + 3] = 255;
+            }
+        } else if (hdr->pf.bits == 16) {
+            for (int i = 0; i < width * height && (size_t)i * 2 + 1 < pxSize; ++i) {
+                rgba[i * 4 + 0] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = px[i * 2];
+                rgba[i * 4 + 3] = px[i * 2 + 1];
+            }
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
+static void GlbPNGWriteCallback(void* context, void* data, int size) {
+    if (!context || !data || size <= 0) return;
+    auto* out = reinterpret_cast<std::vector<uint8_t>*>(context);
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
+    out->insert(out->end(), bytes, bytes + size);
+}
+
+static bool GlbEncodePNG(const std::vector<uint8_t>& rgba, int width, int height, std::vector<uint8_t>& png) {
+    if (rgba.empty() || width <= 0 || height <= 0) return false;
+    png.clear();
+    return stbi_write_png_to_func(GlbPNGWriteCallback, &png, width, height, 4, rgba.data(), width * 4) != 0 && !png.empty();
+}
+
+static bool GlbRGBAHasAlpha(const std::vector<uint8_t>& rgba) {
+    for (size_t i = 3; i < rgba.size(); i += 4) {
+        if (rgba[i] < 250) return true;
+    }
+    return false;
+}
+
+static bool GlbRGBAFullyTransparent(const std::vector<uint8_t>& rgba) {
+    if (rgba.empty()) return false;
+    for (size_t i = 3; i < rgba.size(); i += 4) {
+        if (rgba[i] >= 8) return false;
+    }
+    return true;
+}
+
+static std::string GlbSanitizeTextureKey(std::string name) {
+    name = StrToLower(name);
+    size_t slash = name.find_last_of("/\\");
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+
+    const char* extensions[] = { ".dds", ".tga", ".png", ".bmp", ".dat" };
+    bool stripped = true;
+    while (stripped) {
+        stripped = false;
+        for (const char* ext : extensions) {
+            size_t extLen = strlen(ext);
+            if (name.size() > extLen && name.substr(name.size() - extLen) == ext) {
+                name.resize(name.size() - extLen);
+                stripped = true;
+                break;
+            }
+        }
+    }
+    return name;
+}
+
+static std::vector<std::string> GlbExtractTextureListNames(const std::vector<uint8_t>& data) {
+    std::string text;
+    text.reserve(data.size());
+    size_t printable = 0;
+    for (uint8_t byte : data) {
+        if (byte == 0) continue;
+        if (byte == '\r' || byte == '\n' || byte == '\t' || byte == ' ') {
+            text.push_back(' ');
+            printable++;
+        } else if (byte >= 32 && byte < 127) {
+            text.push_back((char)byte);
+            printable++;
+        }
+    }
+    if (data.empty() || printable * 2 < data.size()) return {};
+
+    std::vector<std::string> names;
+    std::stringstream ss(text);
+    std::string token;
+    while (ss >> token) {
+        while (!token.empty() && ispunct((unsigned char)token.back()) && token.back() != '.') {
+            token.pop_back();
+        }
+
+        std::string lower = StrToLower(token);
+        if (lower.find(".dds") == std::string::npos &&
+            lower.find(".tga") == std::string::npos &&
+            lower.find(".png") == std::string::npos &&
+            lower.find(".bmp") == std::string::npos) {
+            continue;
+        }
+
+        std::string key = GlbSanitizeTextureKey(lower);
+        if (key.empty()) continue;
+        if (std::find(names.begin(), names.end(), key) == names.end()) {
+            names.push_back(key);
+        }
+    }
+    return names;
+}
+
+struct GlbExportQuat {
+    float w = 1.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+static void GlbMat4Identity(float* m) {
+    memset(m, 0, sizeof(float) * 16);
+    m[0] = 1.0f;
+    m[5] = 1.0f;
+    m[10] = 1.0f;
+    m[15] = 1.0f;
+}
+
+static void GlbMat4Multiply(const float* a, const float* b, float* out) {
+    float r[16];
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            r[col * 4 + row] =
+                a[0 * 4 + row] * b[col * 4 + 0] +
+                a[1 * 4 + row] * b[col * 4 + 1] +
+                a[2 * 4 + row] * b[col * 4 + 2] +
+                a[3 * 4 + row] * b[col * 4 + 3];
+        }
+    }
+    memcpy(out, r, sizeof(r));
+}
+
+static GlbExportQuat GlbQuatNormalize(GlbExportQuat q) {
+    float len2 = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
+    if (len2 <= 1e-20f) return {};
+    float inv = 1.0f / sqrtf(len2);
+    q.w *= inv;
+    q.x *= inv;
+    q.y *= inv;
+    q.z *= inv;
+    return q;
+}
+
+static GlbExportQuat GlbQuatFromXYZ(float x, float y, float z) {
+    float w2 = 1.0f - (x * x + y * y + z * z);
+    return GlbQuatNormalize({sqrtf(fabsf(w2)), x, y, z});
+}
+
+static GlbExportQuat GlbQuatFromNal(const NalQuat& q) {
+    return GlbQuatNormalize({q.w, q.x, q.y, q.z});
+}
+
+static GlbExportQuat GlbQuatInverse(GlbExportQuat q) {
+    q = GlbQuatNormalize(q);
+    return {q.w, -q.x, -q.y, -q.z};
+}
+
+static GlbExportQuat GlbQuatMul(GlbExportQuat a, GlbExportQuat b) {
+    a = GlbQuatNormalize(a);
+    b = GlbQuatNormalize(b);
+    return GlbQuatNormalize({
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+    });
+}
+
+static GlbExportQuat GlbQuatAxisAngle(int axis, float angle) {
+    float half = angle * 0.5f;
+    float s = sinf(half);
+    float c = cosf(half);
+    if (axis == 0) return GlbQuatNormalize({c, s, 0.0f, 0.0f});
+    if (axis == 1) return GlbQuatNormalize({c, 0.0f, s, 0.0f});
+    return GlbQuatNormalize({c, 0.0f, 0.0f, s});
+}
+
+static GlbExportQuat GlbQuatFromYZAngles(float yAngle, float zAngle) {
+    return GlbQuatMul(GlbQuatAxisAngle(1, yAngle), GlbQuatAxisAngle(2, zAngle));
+}
+
+static float GlbFingerTipHingeAngle(float angle, bool isThumb) {
+    if (!isThumb) return angle;
+    float tip = 2.0f * angle;
+    float halfPi = 1.57079632679f;
+    if (tip > halfPi) return halfPi;
+    if (tip < -halfPi) return -halfPi;
+    return tip;
+}
+
+static void GlbVec3Sub(const float* a, const float* b, float* out) {
+    out[0] = a[0] - b[0];
+    out[1] = a[1] - b[1];
+    out[2] = a[2] - b[2];
+}
+
+static void GlbVec3Scale(const float* a, float s, float* out) {
+    out[0] = a[0] * s;
+    out[1] = a[1] * s;
+    out[2] = a[2] * s;
+}
+
+static float GlbVec3Len(const float* v) {
+    return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+static void GlbVec3Normalize(float* v) {
+    float len = GlbVec3Len(v);
+    if (len <= 1e-12f) {
+        v[0] = v[1] = v[2] = 0.0f;
+        return;
+    }
+    float inv = 1.0f / len;
+    v[0] *= inv;
+    v[1] *= inv;
+    v[2] *= inv;
+}
+
+static float GlbVec3Dot(const float* a, const float* b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void GlbVec3Cross(const float* a, const float* b, float* out) {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static void GlbMat4ComposeBasis(const float* xAxis, const float* yAxis, const float* zAxis,
+                                const float* pos, float* out) {
+    GlbMat4Identity(out);
+    out[0] = xAxis[0]; out[1] = xAxis[1]; out[2] = xAxis[2];
+    out[4] = yAxis[0]; out[5] = yAxis[1]; out[6] = yAxis[2];
+    out[8] = zAxis[0]; out[9] = zAxis[1]; out[10] = zAxis[2];
+    out[12] = pos[0]; out[13] = pos[1]; out[14] = pos[2];
+}
+
+static void GlbMat4AxisVec(const float* m, int axis, float* out) {
+    const int base = axis * 4;
+    out[0] = m[base + 0];
+    out[1] = m[base + 1];
+    out[2] = m[base + 2];
+}
+
+static void GlbMat4ProjectPointOntoXform(const float* point, const float* xform, float* out) {
+    out[0] = xform[12] + point[0] * xform[0] + point[1] * xform[4] + point[2] * xform[8];
+    out[1] = xform[13] + point[0] * xform[1] + point[1] * xform[5] + point[2] * xform[9];
+    out[2] = xform[14] + point[0] * xform[2] + point[1] * xform[6] + point[2] * xform[10];
+}
+
+static void GlbMat4BuildTwistLineXform(const std::array<float, 3>& pos, float angle, float* m) {
+    float s = sinf(angle);
+    float c = cosf(angle);
+    GlbMat4Identity(m);
+    // USM.exe sub_5F2FD0: ordinary local-X rotation, stored here using the
+    // viewer/exporter's transposed (column-major) engine-matrix convention.
+    m[5] = c;
+    m[6] = -s;
+    m[9] = s;
+    m[10] = c;
+    m[12] = pos[0];
+    m[13] = pos[1];
+    m[14] = pos[2];
+}
+
+static float GlbWrapPi(float angle) {
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTau = 2.0f * kPi;
+    while (angle > kPi) angle -= kTau;
+    while (angle < -kPi) angle += kTau;
+    return angle;
+}
+
+static float GlbExtractForearmTwist(GlbExportQuat handQuat, bool left) {
+    // sub_5F4960 extracts hand twist around local X relative to a side-specific
+    // +/-90-degree reference. sub_5F7160/sub_5F7760 apply 0.33 to each twist.
+    handQuat = GlbQuatNormalize(handQuat);
+    float axial = 2.0f * atan2f(handQuat.x, handQuat.w);
+    float reference = left ? -1.57079632679f : 1.57079632679f;
+    return GlbWrapPi(axial - reference);
+}
+
+static void GlbMat4Fing52HingeLocal(float angle, const std::array<float, 3>& pos, float* m) {
+    float s = sinf(angle);
+    float c = cosf(angle);
+    GlbMat4Identity(m);
+    m[0] = c;
+    m[2] = s;
+    m[8] = -s;
+    m[10] = c;
+    m[12] = pos[0];
+    m[13] = pos[1];
+    m[14] = pos[2];
+}
+
+static void GlbRemapNalIkRows(float* m) {
+    float x[3] = {m[0], m[1], m[2]};
+    float y[3] = {m[4], m[5], m[6]};
+    float z[3] = {m[8], m[9], m[10]};
+    m[0] = -x[0]; m[1] = -x[1]; m[2] = -x[2];
+    m[4] = -z[0]; m[5] = -z[1]; m[6] = -z[2];
+    m[8] = -y[0]; m[9] = -y[1]; m[10] = -y[2];
+}
+
+static void GlbMat4FromNalQuat(GlbExportQuat q, float* m) {
+    q = GlbQuatNormalize(q);
+    GlbMat4Identity(m);
+
+    float x = -q.x;
+    float y = -q.y;
+    float z = -q.z;
+    float xx = x * x;
+    float yy = y * y;
+    float zz = z * z;
+    float xy = x * y;
+    float xz = x * z;
+    float yz = y * z;
+    float wx = q.w * x;
+    float wy = q.w * y;
+    float wz = q.w * z;
+
+    m[0]  = 1.0f - 2.0f * (yy + zz);
+    m[1]  = 2.0f * (xy + wz);
+    m[2]  = 2.0f * (xz - wy);
+    m[4]  = 2.0f * (xy - wz);
+    m[5]  = 1.0f - 2.0f * (xx + zz);
+    m[6]  = 2.0f * (yz + wx);
+    m[8]  = 2.0f * (xz + wy);
+    m[9]  = 2.0f * (yz - wx);
+    m[10] = 1.0f - 2.0f * (xx + yy);
+}
+
+static void GlbSolveNalIk(const float* baseModelMatrix,
+                          const std::array<float, 3>& baseJoint,
+                          const float* targetModelMatrix,
+                          const NalIKData& ikData,
+                          float spinAngle,
+                          bool armPlaneCallback,
+                          bool mirrorArm,
+                          float* upperOut,
+                          float* lowerOut) {
+    float baseJointArr[3] = {baseJoint[0], baseJoint[1], baseJoint[2]};
+    float modelBaseJoint[3];
+    GlbMat4ProjectPointOntoXform(baseJointArr, baseModelMatrix, modelBaseJoint);
+
+    float targetPos[3] = {targetModelMatrix[12], targetModelMatrix[13], targetModelMatrix[14]};
+    float targetDir[3];
+    GlbVec3Sub(targetPos, modelBaseJoint, targetDir);
+    float dist = GlbVec3Len(targetDir);
+    if (dist <= 1e-12f) dist = 1e-12f;
+    GlbVec3Scale(targetDir, 1.0f / dist, targetDir);
+
+    float cosUpper = dist * ikData.fUpperIKc + (1.0f / dist) * ikData.fUpperIKInvc;
+    float cosLower = dist * ikData.fLowerIKc + (1.0f / dist) * ikData.fLowerIKInvc;
+    cosUpper = std::max(-1.0f, std::min(1.0f, cosUpper));
+    cosLower = std::max(-1.0f, std::min(1.0f, cosLower));
+    float sinUpper = sqrtf(std::max(0.0f, 1.0f - cosUpper * cosUpper));
+    float sinLower = sqrtf(std::max(0.0f, 1.0f - cosLower * cosLower));
+
+    float midDir[3];
+    if (!armPlaneCallback) {
+        float targetY[3];
+        GlbMat4AxisVec(targetModelMatrix, 1, targetY);
+        GlbVec3Cross(targetDir, targetY, midDir);
+    } else {
+        // Byte-exact algebra and ABI from USM.exe sub_5EEEE0/sub_5EF100,
+        // selected by sub_5F7760. sub_5F16E0 passes the clavicle matrix as
+        // callback parameter 2 and the hand target as parameter 3; the
+        // callbacks read parameter 2.
+        float row0[3], row1[3], row2[3];
+        GlbMat4AxisVec(baseModelMatrix, 0, row0);
+        GlbMat4AxisVec(baseModelMatrix, 1, row1);
+        GlbMat4AxisVec(baseModelMatrix, 2, row2);
+        if (mirrorArm) {
+            row1[0] = -row1[0]; row1[1] = -row1[1]; row1[2] = -row1[2];
+            GlbVec3Cross(row1, targetDir, midDir);
+        } else {
+            GlbVec3Cross(targetDir, row1, midDir);
+        }
+        float sign = GlbVec3Dot(targetDir, row1);
+        float adjusted[3];
+        if (sign < 0.0f) {
+            float negSum[3] = {-row0[0] - row2[0], -row0[1] - row2[1], -row0[2] - row2[2]};
+            adjusted[0] = midDir[0] * (sign + 1.0f) + negSum[0] * (-sign);
+            adjusted[1] = midDir[1] * (sign + 1.0f) + negSum[1] * (-sign);
+            adjusted[2] = midDir[2] * (sign + 1.0f) + negSum[2] * (-sign);
+        } else {
+            float diff[3] = {row2[0] - row0[0], row2[1] - row0[1], row2[2] - row0[2]};
+            adjusted[0] = midDir[0] * (1.0f - sign) + diff[0] * sign;
+            adjusted[1] = midDir[1] * (1.0f - sign) + diff[1] * sign;
+            adjusted[2] = midDir[2] * (1.0f - sign) + diff[2] * sign;
+        }
+        memcpy(midDir, adjusted, sizeof(adjusted));
+    }
+
+    float zAxis[3], yAxis[3], xAxis[3] = {targetDir[0], targetDir[1], targetDir[2]};
+    GlbVec3Cross(targetDir, midDir, zAxis);
+    GlbVec3Normalize(zAxis);
+    GlbVec3Cross(zAxis, targetDir, yAxis);
+    float basis[16];
+    GlbMat4ComposeBasis(xAxis, yAxis, zAxis, modelBaseJoint, basis);
+
+    float sinTwist = sinf(spinAngle);
+    float cosTwist = cosf(spinAngle);
+    float zero[3] = {0.0f, 0.0f, 0.0f};
+    float upperX[3] = {cosUpper, sinUpper * cosTwist, sinUpper * sinTwist};
+    float upperY[3] = {-sinUpper, cosUpper * cosTwist, cosUpper * sinTwist};
+    float upperZ[3] = {0.0f, -sinTwist, cosTwist};
+    float upperLocal[16];
+    GlbMat4ComposeBasis(upperX, upperY, upperZ, zero, upperLocal);
+    GlbMat4Multiply(basis, upperLocal, upperOut);
+
+    float lowerPos[3] = {
+        ikData.fUpperArmLength * cosUpper,
+        cosTwist * (ikData.fUpperArmLength * sinUpper),
+        sinTwist * (ikData.fUpperArmLength * sinUpper)
+    };
+    float lowerX[3] = {cosLower, -(sinLower * cosTwist), -(sinLower * sinTwist)};
+    float lowerY[3] = {sinLower, cosLower * cosTwist, cosLower * sinTwist};
+    float lowerZ[3] = {0.0f, -sinTwist, cosTwist};
+    float lowerLocal[16];
+    GlbMat4ComposeBasis(lowerX, lowerY, lowerZ, lowerPos, lowerLocal);
+    GlbMat4Multiply(basis, lowerLocal, lowerOut);
+
+    GlbRemapNalIkRows(upperOut);
+    GlbRemapNalIkRows(lowerOut);
+}
+
+static GlbExportQuat GlbQuatFromMat4Internal(const float* m, bool nalConjugate) {
+    float m00 = m[0],  m01 = m[4],  m02 = m[8];
+    float m10 = m[1],  m11 = m[5],  m12 = m[9];
+    float m20 = m[2],  m21 = m[6],  m22 = m[10];
+
+    GlbExportQuat q;
+    float trace = m00 + m11 + m22;
+    if (trace > 0.0f) {
+        float s = sqrtf(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        float s = sqrtf(std::max(1e-20f, 1.0f + m00 - m11 - m22)) * 2.0f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        float s = sqrtf(std::max(1e-20f, 1.0f + m11 - m00 - m22)) * 2.0f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        float s = sqrtf(std::max(1e-20f, 1.0f + m22 - m00 - m11)) * 2.0f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+
+    if (nalConjugate) {
+        q.x = -q.x;
+        q.y = -q.y;
+        q.z = -q.z;
+    }
+    return GlbQuatNormalize(q);
+}
+
+static GlbExportQuat GlbQuatFromMat4Nal(const float* m) {
+    return GlbQuatFromMat4Internal(m, true);
+}
+
+static GlbExportQuat GlbQuatFromMat4Gltf(const float* m) {
+    return GlbQuatFromMat4Internal(m, false);
+}
+
+static void GlbMatrixToTRS(const float* m, float translation[3], float rotation[4]) {
+    translation[0] = m[12];
+    translation[1] = m[13];
+    translation[2] = m[14];
+    GlbExportQuat q = GlbQuatFromMat4Gltf(m);
+    rotation[0] = q.x;
+    rotation[1] = q.y;
+    rotation[2] = q.z;
+    rotation[3] = q.w;
+}
+
+static bool GlbGetDefaultQuat(const NalComponentData* comp, int index, GlbExportQuat& out) {
+    if (!comp || index < 0 || index >= (int)comp->default_pose.quats.size()) return false;
+    out = GlbQuatFromNal(comp->default_pose.quats[index]);
+    return true;
+}
+
+static int GlbParentOf(const NalSkeletonData* skel, int idx, int boneCount) {
+    if (!skel) return -1;
+    auto it = skel->parent_map.find(idx);
+    if (it == skel->parent_map.end()) return -1;
+    int parent = it->second;
+    return (parent >= 0 && parent < boneCount && parent != idx) ? parent : -1;
+}
+
+static int GlbFindRootBone(const NalSkeletonData* skel, int boneCount) {
+    for (int i = 0; i < boneCount; ++i) {
+        if (GlbParentOf(skel, i, boneCount) < 0) return i;
+    }
+    return boneCount > 0 ? 0 : -1;
+}
+
+static void GlbBuildRestLocalMatrices(
+    const std::vector<std::array<float, 16>>& bindMatrices,
+    const NalSkeletonData* skel,
+    std::vector<std::array<float, 16>>& restLocal,
+    std::vector<GlbExportQuat>& restLocalQuatNal)
+{
+    int boneCount = (int)bindMatrices.size();
+    restLocal.resize(boneCount);
+    restLocalQuatNal.resize(boneCount);
+
+    for (int i = 0; i < boneCount; ++i) {
+        int parent = GlbParentOf(skel, i, boneCount);
+        if (parent >= 0) {
+            float invParent[16];
+            if (InvertMatrix(bindMatrices[parent].data(), invParent)) {
+                GlbMat4Multiply(invParent, bindMatrices[i].data(), restLocal[i].data());
+            } else {
+                memcpy(restLocal[i].data(), bindMatrices[i].data(), sizeof(float) * 16);
+            }
+        } else {
+            memcpy(restLocal[i].data(), bindMatrices[i].data(), sizeof(float) * 16);
+        }
+        restLocalQuatNal[i] = GlbQuatFromMat4Nal(restLocal[i].data());
+    }
+}
+
+struct GlbBonePoseDelta {
+    GlbExportQuat rot;
+    bool hasRot = false;
+    std::array<float, 3> translationDelta = {0.0f, 0.0f, 0.0f};
+    bool hasTranslationDelta = false;
+    std::array<float, 3> translationAbs = {0.0f, 0.0f, 0.0f};
+    bool hasTranslationAbs = false;
+};
+
+static void GlbBuildAnimationLocalMatricesForFrame(
+    const NalAnimEntry& anim,
+    const NalSkeletonData& skel,
+    const std::vector<std::array<float, 16>>& restLocal,
+    const std::vector<GlbExportQuat>& restLocalQuatNal,
+    int frame,
+    std::vector<std::array<float, 16>>& outLocal)
+{
+    int boneCount = (int)restLocal.size();
+    outLocal = restLocal;
+    if (boneCount <= 0) return;
+
+    std::vector<GlbBonePoseDelta> poseDeltas(boneCount);
+    int rootBone = GlbFindRootBone(&skel, boneCount);
+
+    auto findComponentForAnim = [&](const NalAnimComponent& comp) -> const NalComponentData* {
+        if (comp.slot_ix >= 0 && comp.slot_ix < (int)skel.components.size()) {
+            const auto& bySlot = skel.components[comp.slot_ix];
+            if (nal_type_to_comp_id(bySlot.type_id) == comp.comp_ix) return &bySlot;
+        }
+        for (const auto& sc : skel.components) {
+            if (nal_type_to_comp_id(sc.type_id) == comp.comp_ix) return &sc;
+        }
+        return nullptr;
+    };
+
+    auto setBoneDeltaQuat = [&](int boneIdx, GlbExportQuat delta) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        auto& dst = poseDeltas[boneIdx];
+        dst.rot = dst.hasRot ? GlbQuatMul(dst.rot, delta) : GlbQuatNormalize(delta);
+        dst.hasRot = true;
+    };
+
+    auto setAbsoluteTrackQuat = [&](int boneIdx, GlbExportQuat q, bool hasDefault, GlbExportQuat defaultQ) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        if (boneIdx < (int)restLocalQuatNal.size()) {
+            defaultQ = restLocalQuatNal[boneIdx];
+            hasDefault = true;
+        }
+        GlbExportQuat delta = hasDefault ? GlbQuatMul(GlbQuatInverse(defaultQ), q) : q;
+        setBoneDeltaQuat(boneIdx, delta);
+    };
+
+    auto setTrackXYZ = [&](int boneIdx, float x, float y, float z, const NalComponentData* sc, int defaultIdx) {
+        GlbExportQuat defaultQ;
+        bool hasDefault = GlbGetDefaultQuat(sc, defaultIdx, defaultQ);
+        setAbsoluteTrackQuat(boneIdx, GlbQuatFromXYZ(x, y, z), hasDefault, defaultQ);
+    };
+
+    auto addTranslationDelta = [&](int boneIdx, float x, float y, float z) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        auto& dst = poseDeltas[boneIdx];
+        dst.translationDelta[0] += x;
+        dst.translationDelta[1] += y;
+        dst.translationDelta[2] += z;
+        dst.hasTranslationDelta = true;
+    };
+
+    auto setTranslationAbs = [&](int boneIdx, const std::array<float, 3>& pos) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        auto& dst = poseDeltas[boneIdx];
+        dst.translationAbs = pos;
+        dst.hasTranslationAbs = true;
+    };
+
+    auto consumeXYZ = [](const std::vector<float>& values, int& cursor, float out[3]) -> bool {
+        if (cursor + 2 >= (int)values.size()) return false;
+        out[0] = values[cursor++];
+        out[1] = values[cursor++];
+        out[2] = values[cursor++];
+        return true;
+    };
+
+    auto defaultQuatOrIdentity = [&](const NalComponentData* compData, int index) -> GlbExportQuat {
+        GlbExportQuat q;
+        return GlbGetDefaultQuat(compData, index, q) ? q : GlbExportQuat{};
+    };
+
+    bool animHasStdLegs = false;
+    bool animHasStdArms = false;
+    for (const auto& comp : anim.components) {
+        if (!comp.decoded.frames.empty()) {
+            animHasStdLegs = animHasStdLegs || comp.comp_ix == NalComp::LEGS;
+            animHasStdArms = animHasStdArms || comp.comp_ix == NalComp::ARMS;
+        }
+    }
+
+    std::vector<const NalAnimComponent*> sortedComponents;
+    sortedComponents.reserve(anim.components.size());
+    for (const auto& comp : anim.components) sortedComponents.push_back(&comp);
+    std::sort(sortedComponents.begin(), sortedComponents.end(),
+        [](const NalAnimComponent* a, const NalAnimComponent* b) {
+            int as = (a->slot_ix >= 0) ? a->slot_ix : (1 << 30);
+            int bs = (b->slot_ix >= 0) ? b->slot_ix : (1 << 30);
+            if (as != bs) return as < bs;
+            return a->comp_ix < b->comp_ix;
+        });
+
+    for (const NalAnimComponent* compPtr : sortedComponents) {
+        const NalAnimComponent& comp = *compPtr;
+        if (frame < 0 || frame >= (int)comp.decoded.frames.size()) continue;
+        const auto& fv = comp.decoded.frames[frame];
+        const NalComponentData* sc = findComponentForAnim(comp);
+        if (!sc) continue;
+        if (comp.comp_ix == NalComp::LEGS_IK && animHasStdLegs) continue;
+        if (comp.comp_ix == NalComp::ARMS_IK && animHasStdArms) continue;
+
+        int cursor = 0;
+        if (comp.comp_ix == NalComp::TORSO_HEAD || comp.comp_ix == NalComp::TORSO_HEAD_STD) {
+            if (sc->bone_indices.size() < TorsoBone::COUNT) continue;
+            int roles[] = {TorsoBone::SPINE, TorsoBone::SPINE1, TorsoBone::SPINE2, TorsoBone::NECK, TorsoBone::HEAD};
+            for (int bit = 0; bit < 5; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[roles[bit]], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+            if (comp.mask & 0x20) {
+                float xyz[3];
+                if (consumeXYZ(fv, cursor, xyz)) {
+                    setTrackXYZ(sc->bone_indices[TorsoBone::PELVIS], xyz[0], xyz[1], xyz[2], sc, 5);
+                }
+                float loc[3];
+                if (consumeXYZ(fv, cursor, loc)) {
+                    addTranslationDelta(sc->bone_indices[TorsoBone::PELVIS],
+                        loc[0] - sc->default_pose.pelvis_pos[0],
+                        loc[1] - sc->default_pose.pelvis_pos[1],
+                        loc[2] - sc->default_pose.pelvis_pos[2]);
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::LEGS) {
+            if (sc->bone_indices.size() < LegStdBone::COUNT) continue;
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+        }
+        else if (comp.comp_ix == NalComp::ARMS) {
+            if (sc->bone_indices.size() < ArmBone::COUNT) continue;
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+        }
+        else if (comp.comp_ix == NalComp::LEGS_IK) {
+            if (sc->bone_indices.size() < LegBone::COUNT) continue;
+            for (int bit = 0; bit < 2; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+            for (int bit = 2; bit < 4; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+                cursor += 4; // foot position xyz + knee spin are IK solver inputs.
+            }
+        }
+        else if (comp.comp_ix == NalComp::ARMS_IK) {
+            if (sc->bone_indices.size() < ArmIKBone::COUNT) continue;
+            for (int bit = 0; bit < 2; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+            for (int bit = 2; bit < 4; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                int side = bit - 2;
+                GlbExportQuat defaultQ = side < (int)sc->default_pose.hand_quats.size()
+                    ? GlbQuatFromNal(sc->default_pose.hand_quats[side])
+                    : GlbExportQuat{};
+                setAbsoluteTrackQuat(sc->bone_indices[bit], GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]), true, defaultQ);
+                cursor += 4; // hand position xyz + elbow spin are IK solver inputs.
+            }
+        }
+        else if (comp.comp_ix == NalComp::FAKEROOT_STD) {
+            if (rootBone < 0) continue;
+            if (comp.mask & 0x1) {
+                float qxyz[3] = {0.0f, 0.0f, 0.0f};
+                if (cursor + 2 < (int)fv.size()) {
+                    qxyz[0] = fv[cursor++];
+                    qxyz[1] = fv[cursor++];
+                    qxyz[2] = fv[cursor++];
+                    setBoneDeltaQuat(rootBone, GlbQuatFromXYZ(qxyz[0], qxyz[1], qxyz[2]));
+                }
+                if (cursor + 2 < (int)fv.size()) {
+                    float dx = fv[cursor++] - sc->default_pose.pelvis_pos[0];
+                    float dy = fv[cursor++] - sc->default_pose.pelvis_pos[1];
+                    float dz = fv[cursor++] - sc->default_pose.pelvis_pos[2];
+                    addTranslationDelta(rootBone, dx, dy, dz);
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::ARBITRARY_PO) {
+            int quatCount = std::max(0, sc->default_pose.quat_count);
+            int posCount = std::max(0, sc->default_pose.position_count);
+            int channelCount = quatCount + posCount;
+            std::vector<GlbExportQuat> arbStateQuats(quatCount, GlbExportQuat{});
+            std::vector<std::array<float, 3>> arbStatePositions(posCount, {0.0f, 0.0f, 0.0f});
+            for (int i = 0; i < quatCount && i < (int)sc->default_pose.quats.size(); ++i)
+                arbStateQuats[i] = GlbQuatFromNal(sc->default_pose.quats[i]);
+            for (int i = 0; i < posCount && i < (int)sc->default_pose.positions.size(); ++i)
+                arbStatePositions[i] = sc->default_pose.positions[i];
+
+            for (int channel = 0; channel < channelCount; ++channel) {
+                if (!comp.channel_enabled(channel)) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                if (channel < quatCount) arbStateQuats[channel] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                else arbStatePositions[channel - quatCount] = {xyz[0], xyz[1], xyz[2]};
+            }
+
+            for (const auto& node : sc->arb_nodes) {
+                int bid = node.my_matrix_ix;
+                if (bid < 0 || bid >= boneCount) continue;
+                if (node.is_quat_anim && node.quat_ix < arbStateQuats.size()) {
+                    setAbsoluteTrackQuat(bid, arbStateQuats[node.quat_ix], false, GlbExportQuat{});
+                } else if (node.quat_ix < sc->arb_skel_quats.size()) {
+                    setAbsoluteTrackQuat(bid, GlbQuatFromNal(sc->arb_skel_quats[node.quat_ix]), false, GlbExportQuat{});
+                }
+                if (node.is_pos_anim && node.pos_ix < arbStatePositions.size()) {
+                    setTranslationAbs(bid, arbStatePositions[node.pos_ix]);
+                } else if (node.pos_ix < sc->arb_skel_positions.size()) {
+                    setTranslationAbs(bid, sc->arb_skel_positions[node.pos_ix]);
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING5) {
+            if (sc->bone_indices.size() < 30) continue;
+            for (int bit = 0; bit < 30; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING5_REDUCED) {
+            if (sc->bone_indices.size() < 30) continue;
+            float baseY[8] = {};
+            float baseZ[8] = {};
+            float midHinge[10] = {};
+            float tipHinge[10] = {};
+            float defaultBaseY[8] = {};
+            float defaultBaseZ[8] = {};
+            float defaultMidHinge[10] = {};
+            float defaultTipHinge[10] = {};
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_y_tracks.size(); ++i)
+                baseY[i] = defaultBaseY[i] = sc->default_pose.base_y_tracks[i];
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_z_tracks.size(); ++i)
+                baseZ[i] = defaultBaseZ[i] = sc->default_pose.base_z_tracks[i];
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.hinge_tracks.size(); ++i)
+                midHinge[i] = defaultMidHinge[i] = sc->default_pose.hinge_tracks[i];
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.other_tracks.size(); ++i)
+                tipHinge[i] = defaultTipHinge[i] = sc->default_pose.other_tracks[i];
+            GlbExportQuat thumb[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+
+            for (int bit = 0; bit < 30; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                if (bit < 2) {
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    thumb[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                } else if (bit < 10) {
+                    if (cursor + 1 >= (int)fv.size()) break;
+                    baseZ[bit - 2] = fv[cursor++];
+                    baseY[bit - 2] = fv[cursor++];
+                } else if (bit < 20) {
+                    if (cursor >= (int)fv.size()) break;
+                    midHinge[bit - 10] = fv[cursor++];
+                } else {
+                    if (cursor >= (int)fv.size()) break;
+                    tipHinge[bit - 20] = fv[cursor++];
+                }
+            }
+
+            for (int base = 0; base < 10; ++base) {
+                if (base < 2) {
+                    GlbExportQuat def;
+                    bool hasDef = GlbGetDefaultQuat(sc, base, def);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                } else {
+                    setAbsoluteTrackQuat(sc->bone_indices[base],
+                        GlbQuatFromYZAngles(baseY[base - 2], baseZ[base - 2]), true,
+                        GlbQuatFromYZAngles(defaultBaseY[base - 2], defaultBaseZ[base - 2]));
+                }
+                setBoneDeltaQuat(sc->bone_indices[10 + base],
+                    GlbQuatAxisAngle(0, midHinge[base] - defaultMidHinge[base]));
+                setBoneDeltaQuat(sc->bone_indices[20 + base],
+                    GlbQuatAxisAngle(0, tipHinge[base] - defaultTipHinge[base]));
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING5_CURL) {
+            if (sc->bone_indices.size() < 30) continue;
+            float baseZ[8] = {};
+            float hinge[10] = {};
+            float defaultHinge[10] = {};
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.finger_curl.size(); ++i)
+                hinge[i] = defaultHinge[i] = sc->default_pose.finger_curl[i];
+            GlbExportQuat thumb[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+
+            for (int bit = 0; bit < 10; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                if (bit < 2) {
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    thumb[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    if (cursor < (int)fv.size()) hinge[bit] = fv[cursor++];
+                } else {
+                    if (cursor + 1 >= (int)fv.size()) break;
+                    baseZ[bit - 2] = fv[cursor++];
+                    hinge[bit] = fv[cursor++];
+                }
+            }
+
+            for (int base = 0; base < 10; ++base) {
+                if (base < 2) {
+                    GlbExportQuat def;
+                    bool hasDef = GlbGetDefaultQuat(sc, base, def);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                } else {
+                    GlbExportQuat def = GlbQuatFromYZAngles(defaultHinge[base], 0.0f);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], GlbQuatFromYZAngles(hinge[base], baseZ[base - 2]), true, def);
+                }
+                setBoneDeltaQuat(sc->bone_indices[10 + base], GlbQuatAxisAngle(0, hinge[base] - defaultHinge[base]));
+                setBoneDeltaQuat(sc->bone_indices[20 + base], GlbQuatAxisAngle(0,
+                    GlbFingerTipHingeAngle(hinge[base], base < 2) - GlbFingerTipHingeAngle(defaultHinge[base], base < 2)));
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING52) {
+            if (sc->bone_indices.size() < 30) continue;
+            GlbExportQuat thumb[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+            float baseY[8] = {};
+            float baseZ[8] = {};
+            float hinge[10] = {};
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_y_tracks.size(); ++i)
+                baseY[i] = sc->default_pose.base_y_tracks[i];
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_z_tracks.size(); ++i)
+                baseZ[i] = sc->default_pose.base_z_tracks[i];
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.hinge_tracks.size(); ++i)
+                hinge[i] = sc->default_pose.hinge_tracks[i];
+
+            for (int bit = 0; bit < 20; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                if (bit < 2) {
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    thumb[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                } else if (bit < 10) {
+                    if (cursor + 1 >= (int)fv.size()) break;
+                    baseY[bit - 2] = fv[cursor++];
+                    baseZ[bit - 2] = fv[cursor++];
+                } else {
+                    if (cursor >= (int)fv.size()) break;
+                    hinge[bit - 10] = fv[cursor++];
+                }
+            }
+
+            for (int base = 0; base < 10; ++base) {
+                if (base < 2) {
+                    GlbExportQuat def;
+                    bool hasDef = GlbGetDefaultQuat(sc, base, def);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                } else {
+                    GlbExportQuat def = GlbQuatFromYZAngles(
+                        (base - 2 < (int)sc->default_pose.base_y_tracks.size()) ? sc->default_pose.base_y_tracks[base - 2] : 0.0f,
+                        (base - 2 < (int)sc->default_pose.base_z_tracks.size()) ? sc->default_pose.base_z_tracks[base - 2] : 0.0f);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], GlbQuatFromYZAngles(baseY[base - 2], baseZ[base - 2]), true, def);
+                }
+                float defHinge = (base < (int)sc->default_pose.hinge_tracks.size()) ? sc->default_pose.hinge_tracks[base] : 0.0f;
+                setBoneDeltaQuat(sc->bone_indices[10 + base], GlbQuatAxisAngle(0, hinge[base] - defHinge));
+                setBoneDeltaQuat(sc->bone_indices[20 + base], GlbQuatAxisAngle(0,
+                    GlbFingerTipHingeAngle(hinge[base], base < 2) - GlbFingerTipHingeAngle(defHinge, base < 2)));
+            }
+        }
+    }
+
+    for (int i = 0; i < boneCount; ++i) {
+        if (poseDeltas[i].hasRot) {
+            float rot[16];
+            GlbMat4FromNalQuat(poseDeltas[i].rot, rot);
+            GlbMat4Multiply(restLocal[i].data(), rot, outLocal[i].data());
+        }
+        if (poseDeltas[i].hasTranslationAbs) {
+            outLocal[i][12] = poseDeltas[i].translationAbs[0];
+            outLocal[i][13] = poseDeltas[i].translationAbs[1];
+            outLocal[i][14] = poseDeltas[i].translationAbs[2];
+        }
+        if (poseDeltas[i].hasTranslationDelta) {
+            outLocal[i][12] += poseDeltas[i].translationDelta[0];
+            outLocal[i][13] += poseDeltas[i].translationDelta[1];
+            outLocal[i][14] += poseDeltas[i].translationDelta[2];
+        }
+    }
+}
+
+static void GlbBuildAnimationWorldMatricesForFrame(
+    const NalAnimEntry& anim,
+    const NalSkeletonData& skel,
+    const std::vector<std::array<float, 16>>& bindMatrices,
+    const std::vector<std::array<float, 16>>& restLocal,
+    const std::vector<GlbExportQuat>& restLocalQuatNal,
+    int frame,
+    std::vector<std::array<float, 16>>& outWorld)
+{
+    int boneCount = (int)bindMatrices.size();
+    outWorld.resize(boneCount);
+    if (boneCount <= 0) return;
+
+    std::vector<GlbBonePoseDelta> poseDeltas(boneCount);
+    std::vector<std::array<float, 16>> animLocal(boneCount);
+    for (int i = 0; i < boneCount; ++i) {
+        GlbMat4Identity(animLocal[i].data());
+        memcpy(outWorld[i].data(), bindMatrices[i].data(), sizeof(float) * 16);
+    }
+
+    float rootOffset[3] = {0.0f, 0.0f, 0.0f};
+    float rootRotMat[16];
+    GlbMat4Identity(rootRotMat);
+    bool hasRootRot = false;
+    std::map<int, std::array<float, 16>> runtimeWorld;
+
+    auto parentOf = [&](int idx) -> int {
+        return GlbParentOf(&skel, idx, boneCount);
+    };
+
+    auto findComponentForAnim = [&](const NalAnimComponent& comp) -> const NalComponentData* {
+        if (comp.slot_ix >= 0 && comp.slot_ix < (int)skel.components.size()) {
+            const auto& bySlot = skel.components[comp.slot_ix];
+            if (nal_type_to_comp_id(bySlot.type_id) == comp.comp_ix) return &bySlot;
+        }
+        for (const auto& sc : skel.components) {
+            if (nal_type_to_comp_id(sc.type_id) == comp.comp_ix) return &sc;
+        }
+        return nullptr;
+    };
+
+    auto setBoneDeltaQuat = [&](int boneIdx, GlbExportQuat delta) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        auto& dst = poseDeltas[boneIdx];
+        dst.rot = dst.hasRot ? GlbQuatMul(dst.rot, delta) : GlbQuatNormalize(delta);
+        dst.hasRot = true;
+    };
+
+    auto setAbsoluteTrackQuat = [&](int boneIdx, GlbExportQuat q, bool hasDefault, GlbExportQuat defaultQ) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        if (boneIdx < (int)restLocalQuatNal.size()) {
+            defaultQ = restLocalQuatNal[boneIdx];
+            hasDefault = true;
+        }
+        GlbExportQuat delta = hasDefault ? GlbQuatMul(GlbQuatInverse(defaultQ), q) : q;
+        setBoneDeltaQuat(boneIdx, delta);
+    };
+
+    auto setTrackXYZ = [&](int boneIdx, float x, float y, float z, const NalComponentData* sc, int defaultIdx) {
+        GlbExportQuat defaultQ;
+        bool hasDefault = GlbGetDefaultQuat(sc, defaultIdx, defaultQ);
+        setAbsoluteTrackQuat(boneIdx, GlbQuatFromXYZ(x, y, z), hasDefault, defaultQ);
+    };
+
+    auto consumeXYZ = [](const std::vector<float>& values, int& cursor, float out[3]) -> bool {
+        if (cursor + 2 >= (int)values.size()) return false;
+        out[0] = values[cursor++];
+        out[1] = values[cursor++];
+        out[2] = values[cursor++];
+        return true;
+    };
+
+    auto defaultQuatOrIdentity = [&](const NalComponentData* compData, int index) -> GlbExportQuat {
+        GlbExportQuat q;
+        return GlbGetDefaultQuat(compData, index, q) ? q : GlbExportQuat{};
+    };
+
+    auto matFromQuatPos = [&](GlbExportQuat q, const std::array<float, 3>& pos, float* out) {
+        GlbMat4FromNalQuat(q, out);
+        out[12] = pos[0];
+        out[13] = pos[1];
+        out[14] = pos[2];
+    };
+
+    auto storeRuntimeWorld = [&](int boneIdx, const float* m) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        if (runtimeWorld.count(boneIdx)) return;
+        memcpy(runtimeWorld[boneIdx].data(), m, sizeof(float) * 16);
+    };
+
+    auto getRuntimeWorld = [&](int boneIdx, float* out) -> bool {
+        auto it = runtimeWorld.find(boneIdx);
+        if (it == runtimeWorld.end()) return false;
+        memcpy(out, it->second.data(), sizeof(float) * 16);
+        return true;
+    };
+
+    auto localToRuntimeParent = [&](const float* local, int parentBoneIdx, float* out) {
+        float parent[16];
+        if (getRuntimeWorld(parentBoneIdx, parent)) {
+            GlbMat4Multiply(parent, local, out);
+        } else if (parentBoneIdx >= 0 && parentBoneIdx < boneCount) {
+            GlbMat4Multiply(bindMatrices[parentBoneIdx].data(), local, out);
+        } else {
+            memcpy(out, local, sizeof(float) * 16);
+        }
+    };
+
+    bool animHasStdLegs = false;
+    bool animHasStdArms = false;
+    for (const auto& comp : anim.components) {
+        if (!comp.decoded.frames.empty()) {
+            animHasStdLegs = animHasStdLegs || comp.comp_ix == NalComp::LEGS;
+            animHasStdArms = animHasStdArms || comp.comp_ix == NalComp::ARMS;
+        }
+    }
+    bool solveLegsIk = !animHasStdLegs;
+    bool solveArmsIk = !animHasStdArms;
+
+    std::vector<const NalAnimComponent*> sortedComponents;
+    sortedComponents.reserve(anim.components.size());
+    for (const auto& comp : anim.components) sortedComponents.push_back(&comp);
+    std::sort(sortedComponents.begin(), sortedComponents.end(),
+        [](const NalAnimComponent* a, const NalAnimComponent* b) {
+            int as = (a->slot_ix >= 0) ? a->slot_ix : (1 << 30);
+            int bs = (b->slot_ix >= 0) ? b->slot_ix : (1 << 30);
+            if (as != bs) return as < bs;
+            return a->comp_ix < b->comp_ix;
+        });
+
+    for (const NalAnimComponent* compPtr : sortedComponents) {
+        const NalAnimComponent& comp = *compPtr;
+        if (frame < 0 || frame >= (int)comp.decoded.frames.size()) continue;
+        const auto& fv = comp.decoded.frames[frame];
+        const NalComponentData* sc = findComponentForAnim(comp);
+        if (!sc) continue;
+        if (comp.comp_ix == NalComp::LEGS_IK && animHasStdLegs) continue;
+        if (comp.comp_ix == NalComp::ARMS_IK && animHasStdArms) continue;
+
+        int cursor = 0;
+        if (comp.comp_ix == NalComp::TORSO_HEAD || comp.comp_ix == NalComp::TORSO_HEAD_STD) {
+            if (sc->bone_indices.size() < TorsoBone::COUNT) continue;
+            int roles[] = {TorsoBone::SPINE, TorsoBone::SPINE1, TorsoBone::SPINE2, TorsoBone::NECK, TorsoBone::HEAD};
+            GlbExportQuat torsoState[6];
+            for (int i = 0; i < 6; ++i) torsoState[i] = defaultQuatOrIdentity(sc, i);
+            std::array<float, 3> pelvisPos = sc->default_pose.pelvis_pos;
+
+            for (int bit = 0; bit < 5; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                torsoState[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                setAbsoluteTrackQuat(sc->bone_indices[roles[bit]], torsoState[bit], true, defaultQuatOrIdentity(sc, bit));
+            }
+            if (comp.mask & 0x20) {
+                float xyz[3];
+                if (consumeXYZ(fv, cursor, xyz)) {
+                    torsoState[5] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    setAbsoluteTrackQuat(sc->bone_indices[TorsoBone::PELVIS], torsoState[5], true, defaultQuatOrIdentity(sc, 5));
+                }
+                float loc[3];
+                if (consumeXYZ(fv, cursor, loc)) {
+                    pelvisPos = {loc[0], loc[1], loc[2]};
+                    rootOffset[0] += loc[0] - sc->default_pose.pelvis_pos[0];
+                    rootOffset[1] += loc[1] - sc->default_pose.pelvis_pos[1];
+                    rootOffset[2] += loc[2] - sc->default_pose.pelvis_pos[2];
+                }
+            }
+
+            if (sc->offset_locs.size() >= 5) {
+                float local[16];
+                float world[16];
+                int pelvis = sc->bone_indices[TorsoBone::PELVIS];
+                matFromQuatPos(torsoState[5], pelvisPos, world);
+                storeRuntimeWorld(pelvis, world);
+
+                for (int i = 0; i < 5; ++i) {
+                    int childRole = roles[i];
+                    int child = sc->bone_indices[childRole];
+                    int parent = sc->bone_indices[childRole - 1];
+                    matFromQuatPos(torsoState[i], sc->offset_locs[i], local);
+                    localToRuntimeParent(local, parent, world);
+                    storeRuntimeWorld(child, world);
+                }
+
+                if (sc->type_id == NalCompType::TorsoHead_TwoNeck &&
+                    sc->bone_indices.size() > TorsoBone::NECK_AUX) {
+                    int neckAux = sc->bone_indices[TorsoBone::NECK_AUX];
+                    GlbExportQuat emptyQ = GlbQuatNormalize({
+                        sc->empty_neck_orient[3],
+                        sc->empty_neck_orient[0],
+                        sc->empty_neck_orient[1],
+                        sc->empty_neck_orient[2]
+                    });
+                    matFromQuatPos(emptyQ, sc->empty_neck_pos, local);
+                    localToRuntimeParent(local, sc->bone_indices[TorsoBone::SPINE2], world);
+                    storeRuntimeWorld(neckAux, world);
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::LEGS) {
+            if (sc->bone_indices.size() < LegStdBone::COUNT) continue;
+            GlbExportQuat legState[8];
+            for (int i = 0; i < 8; ++i) legState[i] = defaultQuatOrIdentity(sc, i);
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                legState[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                setAbsoluteTrackQuat(sc->bone_indices[bit], legState[bit], true, defaultQuatOrIdentity(sc, bit));
+            }
+
+            if (sc->offset_locs.size() >= 8) {
+                int parentRole[8] = {-1, LegStdBone::L_THIGH, LegStdBone::L_CALF, LegStdBone::L_FOOT,
+                                     -1, LegStdBone::R_THIGH, LegStdBone::R_CALF, LegStdBone::R_FOOT};
+                int anchor = sc->bone_indices[LegStdBone::ROOT];
+                float local[16];
+                float world[16];
+                for (int role = 0; role < 8; ++role) {
+                    int bone = sc->bone_indices[role];
+                    matFromQuatPos(legState[role], sc->offset_locs[role], local);
+                    int parent = parentRole[role] >= 0 ? sc->bone_indices[parentRole[role]] : anchor;
+                    localToRuntimeParent(local, parent, world);
+                    storeRuntimeWorld(bone, world);
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::ARMS) {
+            if (sc->bone_indices.size() < ArmBone::COUNT) continue;
+            GlbExportQuat armState[8];
+            for (int i = 0; i < 8; ++i) armState[i] = defaultQuatOrIdentity(sc, i);
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                armState[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                setAbsoluteTrackQuat(sc->bone_indices[bit], armState[bit], true, defaultQuatOrIdentity(sc, bit));
+            }
+
+            if (sc->offset_locs.size() >= 8) {
+                int anchor = sc->bone_indices[ArmBone::NECK_PARENT];
+                int order[8] = {ArmBone::L_CLAV, ArmBone::L_UPPER, ArmBone::L_FORE, ArmBone::L_HAND,
+                                ArmBone::R_CLAV, ArmBone::R_UPPER, ArmBone::R_FORE, ArmBone::R_HAND};
+                float local[16];
+                float world[16];
+                for (int oi = 0; oi < 8; ++oi) {
+                    int role = order[oi];
+                    int bone = sc->bone_indices[role];
+                    matFromQuatPos(armState[role], sc->offset_locs[role], local);
+                    int parent = (role == ArmBone::L_CLAV || role == ArmBone::R_CLAV)
+                        ? anchor
+                        : sc->bone_indices[role - 1];
+                    localToRuntimeParent(local, parent, world);
+                    storeRuntimeWorld(bone, world);
+                }
+
+                if (sc->fore_twist_locs.size() >= 4 && sc->bone_indices.size() > ArmBone::R_TWIST1) {
+                    int twistBones[4] = {ArmBone::L_TWIST0, ArmBone::L_TWIST1, ArmBone::R_TWIST0, ArmBone::R_TWIST1};
+                    int twistParents[4] = {ArmBone::L_FORE, ArmBone::L_TWIST0, ArmBone::R_FORE, ArmBone::R_TWIST0};
+                    for (int i = 0; i < 4; ++i) {
+                        int bone = sc->bone_indices[twistBones[i]];
+                        int parent = sc->bone_indices[twistParents[i]];
+                        float local[16];
+                        float world[16];
+                        // Normal sub_5F7160 evaluation has byte_959561 clear
+                        // and constructs both forearm-twist nodes at angle 0.
+                        GlbMat4BuildTwistLineXform(sc->fore_twist_locs[i], 0.0f, local);
+                        localToRuntimeParent(local, parent, world);
+                        storeRuntimeWorld(bone, world);
+                    }
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::LEGS_IK) {
+            if (sc->bone_indices.size() < LegBone::COUNT) continue;
+            GlbExportQuat toeState[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+            GlbExportQuat footState[2] = {defaultQuatOrIdentity(sc, 2), defaultQuatOrIdentity(sc, 3)};
+            std::array<float, 3> footPos[2] = {sc->default_pose.foot_pos[0], sc->default_pose.foot_pos[1]};
+            float kneeSpin[2] = {sc->default_pose.knee_spin[0], sc->default_pose.knee_spin[1]};
+
+            for (int bit = 0; bit < 2; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                toeState[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                setAbsoluteTrackQuat(sc->bone_indices[bit], toeState[bit], true, defaultQuatOrIdentity(sc, bit));
+            }
+            for (int bit = 2; bit < 4; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                int side = bit - 2;
+                footState[side] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                setAbsoluteTrackQuat(sc->bone_indices[bit], footState[side], true, defaultQuatOrIdentity(sc, bit));
+
+                float pos[3];
+                if (consumeXYZ(fv, cursor, pos)) footPos[side] = {pos[0], pos[1], pos[2]};
+                if (cursor < (int)fv.size()) kneeSpin[side] = fv[cursor++];
+            }
+
+            int anchor = sc->bone_indices[LegBone::PELVIS];
+            float identity[16];
+            GlbMat4Identity(identity);
+            float local[16], world[16];
+            for (int side = 0; side < 2; ++side) {
+                int footRole = side == 0 ? LegBone::L_FOOT : LegBone::R_FOOT;
+                int toeRole = side == 0 ? LegBone::L_TOE : LegBone::R_TOE;
+                int thighRole = side == 0 ? LegBone::L_THIGH : LegBone::R_THIGH;
+                int calfRole = side == 0 ? LegBone::L_CALF : LegBone::R_CALF;
+                int foot = sc->bone_indices[footRole];
+                int toe = sc->bone_indices[toeRole];
+
+                matFromQuatPos(footState[side], footPos[side], local);
+                if (solveLegsIk && sc->has_ik && sc->offset_locs.size() > (size_t)thighRole) {
+                    float upperLocal[16], lowerLocal[16];
+                    GlbSolveNalIk(identity, sc->offset_locs[thighRole], local, sc->ik_data[side],
+                                  kneeSpin[side], false, false, upperLocal, lowerLocal);
+                    localToRuntimeParent(upperLocal, anchor, world);
+                    storeRuntimeWorld(sc->bone_indices[thighRole], world);
+                    localToRuntimeParent(lowerLocal, anchor, world);
+                    storeRuntimeWorld(sc->bone_indices[calfRole], world);
+                }
+
+                localToRuntimeParent(local, anchor, world);
+                storeRuntimeWorld(foot, world);
+
+                std::array<float, 3> toeOff = (sc->offset_locs.size() > (size_t)toeRole)
+                    ? sc->offset_locs[toeRole]
+                    : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+                matFromQuatPos(toeState[side], toeOff, local);
+                localToRuntimeParent(local, foot, world);
+                storeRuntimeWorld(toe, world);
+            }
+        }
+        else if (comp.comp_ix == NalComp::ARMS_IK) {
+            if (sc->bone_indices.size() < ArmIKBone::COUNT) continue;
+            GlbExportQuat clavState[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+            GlbExportQuat handState[2] = {GlbExportQuat{}, GlbExportQuat{}};
+            for (int i = 0; i < 2; ++i) {
+                if (i < (int)sc->default_pose.hand_quats.size()) handState[i] = GlbQuatFromNal(sc->default_pose.hand_quats[i]);
+            }
+            std::array<float, 3> handPos[2] = {sc->default_pose.hand_pos[0], sc->default_pose.hand_pos[1]};
+            float elbowSpin[2] = {sc->default_pose.elbow_spin[0], sc->default_pose.elbow_spin[1]};
+
+            for (int bit = 0; bit < 2; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                clavState[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                setAbsoluteTrackQuat(sc->bone_indices[bit], clavState[bit], true, defaultQuatOrIdentity(sc, bit));
+            }
+            for (int bit = 2; bit < 4; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                int side = bit - 2;
+                handState[side] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                GlbExportQuat defaultQ = side < (int)sc->default_pose.hand_quats.size()
+                    ? GlbQuatFromNal(sc->default_pose.hand_quats[side])
+                    : GlbExportQuat{};
+                setAbsoluteTrackQuat(sc->bone_indices[bit], handState[side], true, defaultQ);
+
+                float pos[3];
+                if (consumeXYZ(fv, cursor, pos)) handPos[side] = {pos[0], pos[1], pos[2]};
+                if (cursor < (int)fv.size()) elbowSpin[side] = fv[cursor++];
+            }
+
+            if (sc->offset_locs.size() >= 2) {
+                int anchor = sc->bone_indices[ArmIKBone::NECK_PARENT];
+                int handAnchor = (sc->bone_indices.size() > ArmIKBone::PELVIS && sc->bone_indices[ArmIKBone::PELVIS] >= 0)
+                    ? sc->bone_indices[ArmIKBone::PELVIS]
+                    : anchor;
+                float local[16], world[16];
+
+                int clavRoles[2] = {ArmIKBone::L_CLAV, ArmIKBone::R_CLAV};
+                int handRoles[2] = {ArmIKBone::L_HAND, ArmIKBone::R_HAND};
+                for (int side = 0; side < 2; ++side) {
+                    int clav = sc->bone_indices[clavRoles[side]];
+                    matFromQuatPos(clavState[side], sc->offset_locs[side], local);
+                    localToRuntimeParent(local, anchor, world);
+                    storeRuntimeWorld(clav, world);
+                    float clavWorld[16];
+                    memcpy(clavWorld, world, sizeof(clavWorld));
+
+                    int hand = sc->bone_indices[handRoles[side]];
+                    matFromQuatPos(handState[side], handPos[side], local);
+                    localToRuntimeParent(local, handAnchor, world);
+                    storeRuntimeWorld(hand, world);
+                    float handWorld[16];
+                    memcpy(handWorld, world, sizeof(handWorld));
+
+                    int upperRole = side == 0 ? ArmIKBone::L_UPPER : ArmIKBone::R_UPPER;
+                    int foreRole = side == 0 ? ArmIKBone::L_FORE : ArmIKBone::R_FORE;
+                    if (solveArmsIk && sc->has_ik && sc->offset_locs.size() > (size_t)upperRole) {
+                        float upperWorld[16], foreWorld[16];
+                        GlbSolveNalIk(clavWorld, sc->offset_locs[upperRole], handWorld, sc->ik_data[side],
+                                      elbowSpin[side], true, side == 1, upperWorld, foreWorld);
+                        storeRuntimeWorld(sc->bone_indices[upperRole], upperWorld);
+                        storeRuntimeWorld(sc->bone_indices[foreRole], foreWorld);
+                    }
+                }
+
+                // sub_5F7760 still evaluates and parents all four twist nodes
+                // when its special twist flag is clear; only their angle is
+                // zero.  Leaving these at a static world-space bind matrix
+                // stretches the sleeve as the solved forearm moves.
+                if (sc->fore_twist_locs.size() >= 4 &&
+                    sc->bone_indices.size() > ArmIKBone::R_TWIST1) {
+                    int twistBones[4] = {ArmIKBone::L_TWIST0, ArmIKBone::L_TWIST1,
+                                         ArmIKBone::R_TWIST0, ArmIKBone::R_TWIST1};
+                    int twistParents[4] = {ArmIKBone::L_FORE, ArmIKBone::L_TWIST0,
+                                           ArmIKBone::R_FORE, ArmIKBone::R_TWIST0};
+                    for (int i = 0; i < 4; ++i) {
+                        GlbMat4BuildTwistLineXform(sc->fore_twist_locs[i], 0.0f, local);
+                        localToRuntimeParent(local, sc->bone_indices[twistParents[i]], world);
+                        storeRuntimeWorld(sc->bone_indices[twistBones[i]], world);
+                    }
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::FAKEROOT_STD) {
+            int fc = 0;
+            if (comp.mask & 0x1) {
+                float qxyz[3] = {0.0f, 0.0f, 0.0f};
+                if (fc + 2 < (int)fv.size()) {
+                    qxyz[0] = fv[fc++];
+                    qxyz[1] = fv[fc++];
+                    qxyz[2] = fv[fc++];
+                }
+                GlbMat4FromNalQuat(GlbQuatFromXYZ(qxyz[0], qxyz[1], qxyz[2]), rootRotMat);
+                hasRootRot = true;
+
+                if (fc + 2 < (int)fv.size()) {
+                    rootOffset[0] += fv[fc] - sc->default_pose.pelvis_pos[0]; fc++;
+                    rootOffset[1] += fv[fc] - sc->default_pose.pelvis_pos[1]; fc++;
+                    rootOffset[2] += fv[fc] - sc->default_pose.pelvis_pos[2]; fc++;
+                }
+            }
+        }
+        else if (comp.comp_ix == NalComp::ARBITRARY_PO) {
+            int quatCount = std::max(0, sc->default_pose.quat_count);
+            int posCount = std::max(0, sc->default_pose.position_count);
+            int channelCount = quatCount + posCount;
+            std::vector<GlbExportQuat> arbStateQuats(quatCount, GlbExportQuat{});
+            std::vector<std::array<float, 3>> arbStatePositions(posCount, {0.0f, 0.0f, 0.0f});
+            for (int i = 0; i < quatCount && i < (int)sc->default_pose.quats.size(); ++i)
+                arbStateQuats[i] = GlbQuatFromNal(sc->default_pose.quats[i]);
+            for (int i = 0; i < posCount && i < (int)sc->default_pose.positions.size(); ++i)
+                arbStatePositions[i] = sc->default_pose.positions[i];
+
+            for (int channel = 0; channel < channelCount; ++channel) {
+                if (!comp.channel_enabled(channel)) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                if (channel < quatCount) arbStateQuats[channel] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                else arbStatePositions[channel - quatCount] = {xyz[0], xyz[1], xyz[2]};
+            }
+
+            for (size_t oi = 0; oi < sc->arb_eval_order.size(); ++oi) {
+                uint32_t nodeIndex = sc->arb_eval_order[oi];
+                if (nodeIndex >= sc->arb_nodes.size()) continue;
+                const auto& node = sc->arb_nodes[nodeIndex];
+                    int bid = node.my_matrix_ix;
+                    if (bid < 0 || bid >= boneCount) continue;
+
+                    GlbExportQuat quat = GlbExportQuat{};
+                    if (node.is_quat_anim && node.quat_ix < arbStateQuats.size()) {
+                        quat = arbStateQuats[node.quat_ix];
+                    } else if (node.quat_ix < sc->arb_skel_quats.size()) {
+                        quat = GlbQuatFromNal(sc->arb_skel_quats[node.quat_ix]);
+                    } else if (node.quat_ix < sc->default_pose.quats.size()) {
+                        quat = GlbQuatFromNal(sc->default_pose.quats[node.quat_ix]);
+                    }
+
+                    std::array<float, 3> pos = {0.0f, 0.0f, 0.0f};
+                    if (node.is_pos_anim && node.pos_ix < arbStatePositions.size()) {
+                        pos = arbStatePositions[node.pos_ix];
+                    } else if (node.pos_ix < sc->arb_skel_positions.size()) {
+                        pos = sc->arb_skel_positions[node.pos_ix];
+                    } else if (node.pos_ix < sc->default_pose.positions.size()) {
+                        pos = sc->default_pose.positions[node.pos_ix];
+                    }
+
+                    float local[16];
+                    matFromQuatPos(quat, pos, local);
+
+                    int parentId = node.parent_matrix_ix;
+                    float world[16];
+                    localToRuntimeParent(local, parentId, world);
+                    storeRuntimeWorld(bid, world);
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING5) {
+            if (sc->bone_indices.size() < 30) continue;
+            for (int bit = 0; bit < 30; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                float xyz[3];
+                if (!consumeXYZ(fv, cursor, xyz)) break;
+                setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING5_REDUCED) {
+            if (sc->bone_indices.size() < 30) continue;
+            float baseY[8] = {};
+            float baseZ[8] = {};
+            float midHinge[10] = {};
+            float tipHinge[10] = {};
+            float defaultBaseY[8] = {};
+            float defaultBaseZ[8] = {};
+            float defaultMidHinge[10] = {};
+            float defaultTipHinge[10] = {};
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_y_tracks.size(); ++i)
+                baseY[i] = defaultBaseY[i] = sc->default_pose.base_y_tracks[i];
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_z_tracks.size(); ++i)
+                baseZ[i] = defaultBaseZ[i] = sc->default_pose.base_z_tracks[i];
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.hinge_tracks.size(); ++i)
+                midHinge[i] = defaultMidHinge[i] = sc->default_pose.hinge_tracks[i];
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.other_tracks.size(); ++i)
+                tipHinge[i] = defaultTipHinge[i] = sc->default_pose.other_tracks[i];
+            GlbExportQuat thumb[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+
+            for (int bit = 0; bit < 30; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                if (bit < 2) {
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    thumb[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                } else if (bit < 10) {
+                    if (cursor + 1 >= (int)fv.size()) break;
+                    baseZ[bit - 2] = fv[cursor++];
+                    baseY[bit - 2] = fv[cursor++];
+                } else if (bit < 20) {
+                    if (cursor >= (int)fv.size()) break;
+                    midHinge[bit - 10] = fv[cursor++];
+                } else {
+                    if (cursor >= (int)fv.size()) break;
+                    tipHinge[bit - 20] = fv[cursor++];
+                }
+            }
+
+            for (int base = 0; base < 10; ++base) {
+                if (base < 2) {
+                    GlbExportQuat def;
+                    bool hasDef = GlbGetDefaultQuat(sc, base, def);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                } else {
+                    setAbsoluteTrackQuat(sc->bone_indices[base],
+                        GlbQuatFromYZAngles(baseY[base - 2], baseZ[base - 2]), true,
+                        GlbQuatFromYZAngles(defaultBaseY[base - 2], defaultBaseZ[base - 2]));
+                }
+                setBoneDeltaQuat(sc->bone_indices[10 + base],
+                    GlbQuatAxisAngle(0, midHinge[base] - defaultMidHinge[base]));
+                setBoneDeltaQuat(sc->bone_indices[20 + base],
+                    GlbQuatAxisAngle(0, tipHinge[base] - defaultTipHinge[base]));
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING5_CURL) {
+            if (sc->bone_indices.size() < 30) continue;
+            float baseZ[8] = {};
+            float hinge[10] = {};
+            float defaultHinge[10] = {};
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.finger_curl.size(); ++i)
+                hinge[i] = defaultHinge[i] = sc->default_pose.finger_curl[i];
+            GlbExportQuat thumb[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+
+            for (int bit = 0; bit < 10; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                if (bit < 2) {
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    thumb[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                    if (cursor < (int)fv.size()) hinge[bit] = fv[cursor++];
+                } else {
+                    if (cursor + 1 >= (int)fv.size()) break;
+                    baseZ[bit - 2] = fv[cursor++];
+                    hinge[bit] = fv[cursor++];
+                }
+            }
+
+            for (int base = 0; base < 10; ++base) {
+                if (base < 2) {
+                    GlbExportQuat def;
+                    bool hasDef = GlbGetDefaultQuat(sc, base, def);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                } else {
+                    GlbExportQuat def = GlbQuatFromYZAngles(defaultHinge[base], 0.0f);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], GlbQuatFromYZAngles(hinge[base], baseZ[base - 2]), true, def);
+                }
+                setBoneDeltaQuat(sc->bone_indices[10 + base], GlbQuatAxisAngle(0, hinge[base] - defaultHinge[base]));
+                setBoneDeltaQuat(sc->bone_indices[20 + base], GlbQuatAxisAngle(0,
+                    GlbFingerTipHingeAngle(hinge[base], base < 2) - GlbFingerTipHingeAngle(defaultHinge[base], base < 2)));
+            }
+        }
+        else if (comp.comp_ix == NalComp::FING52) {
+            if (sc->bone_indices.size() < 30) continue;
+            GlbExportQuat thumb[2] = {defaultQuatOrIdentity(sc, 0), defaultQuatOrIdentity(sc, 1)};
+            float baseY[8] = {};
+            float baseZ[8] = {};
+            float hinge[10] = {};
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_y_tracks.size(); ++i)
+                baseY[i] = sc->default_pose.base_y_tracks[i];
+            for (int i = 0; i < 8 && i < (int)sc->default_pose.base_z_tracks.size(); ++i)
+                baseZ[i] = sc->default_pose.base_z_tracks[i];
+            for (int i = 0; i < 10 && i < (int)sc->default_pose.hinge_tracks.size(); ++i)
+                hinge[i] = sc->default_pose.hinge_tracks[i];
+
+            for (int bit = 0; bit < 20; ++bit) {
+                if ((comp.mask & (1u << bit)) == 0) continue;
+                if (bit < 2) {
+                    float xyz[3];
+                    if (!consumeXYZ(fv, cursor, xyz)) break;
+                    thumb[bit] = GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]);
+                } else if (bit < 10) {
+                    if (cursor + 1 >= (int)fv.size()) break;
+                    baseY[bit - 2] = fv[cursor++];
+                    baseZ[bit - 2] = fv[cursor++];
+                } else {
+                    if (cursor >= (int)fv.size()) break;
+                    hinge[bit - 10] = fv[cursor++];
+                }
+            }
+
+            std::map<int, std::array<float, 16>> baseWorldByChain;
+            if (sc->offset_locs.size() >= 30) {
+                auto anchorIdForChain = [&](int chain) -> int {
+                    int slot = (chain == 1 || chain >= 6) ? 1 : 0;
+                    int idx = FingerBone::L_HAND_PARENT + slot;
+                    return (idx < (int)sc->bone_indices.size()) ? sc->bone_indices[idx] : -1;
+                };
+                auto loadAnchorWorld = [&](int anchorId, float* out) {
+                    if (anchorId >= 0 && getRuntimeWorld(anchorId, out)) return;
+                    if (anchorId >= 0 && anchorId < boneCount) {
+                        memcpy(out, bindMatrices[anchorId].data(), sizeof(float) * 16);
+                        return;
+                    }
+                    GlbMat4Identity(out);
+                };
+
+                float local[16], world[16], anchorWorld[16];
+                for (int base = 0; base < 10; ++base) {
+                    GlbExportQuat q = (base < 2)
+                        ? thumb[base]
+                        : GlbQuatFromYZAngles(baseY[base - 2], baseZ[base - 2]);
+                    matFromQuatPos(q, sc->offset_locs[base], local);
+                    loadAnchorWorld(anchorIdForChain(base), anchorWorld);
+                    GlbMat4Multiply(anchorWorld, local, world);
+
+                    std::array<float, 16> stored{};
+                    memcpy(stored.data(), world, sizeof(float) * 16);
+                    baseWorldByChain[base] = stored;
+                    storeRuntimeWorld(sc->bone_indices[base], world);
+                }
+
+                for (int chain = 0; chain < 10; ++chain) {
+                    auto baseIt = baseWorldByChain.find(chain);
+                    if (baseIt == baseWorldByChain.end()) continue;
+
+                    float midLocal[16], tipLocal[16], midWorld[16], tipWorld[16];
+                    GlbMat4Fing52HingeLocal(hinge[chain], sc->offset_locs[10 + chain], midLocal);
+                    GlbMat4Fing52HingeLocal(GlbFingerTipHingeAngle(hinge[chain], chain < 2), sc->offset_locs[20 + chain], tipLocal);
+                    GlbMat4Multiply(baseIt->second.data(), midLocal, midWorld);
+                    GlbMat4Multiply(midWorld, tipLocal, tipWorld);
+                    storeRuntimeWorld(sc->bone_indices[10 + chain], midWorld);
+                    storeRuntimeWorld(sc->bone_indices[20 + chain], tipWorld);
+                }
+            }
+
+            for (int base = 0; base < 10; ++base) {
+                if (base < 2) {
+                    GlbExportQuat def;
+                    bool hasDef = GlbGetDefaultQuat(sc, base, def);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], thumb[base], hasDef, def);
+                } else {
+                    GlbExportQuat def = GlbQuatFromYZAngles(
+                        (base - 2 < (int)sc->default_pose.base_y_tracks.size()) ? sc->default_pose.base_y_tracks[base - 2] : 0.0f,
+                        (base - 2 < (int)sc->default_pose.base_z_tracks.size()) ? sc->default_pose.base_z_tracks[base - 2] : 0.0f);
+                    setAbsoluteTrackQuat(sc->bone_indices[base], GlbQuatFromYZAngles(baseY[base - 2], baseZ[base - 2]), true, def);
+                }
+                float defHinge = (base < (int)sc->default_pose.hinge_tracks.size()) ? sc->default_pose.hinge_tracks[base] : 0.0f;
+                setBoneDeltaQuat(sc->bone_indices[10 + base], GlbQuatAxisAngle(0, hinge[base] - defHinge));
+                setBoneDeltaQuat(sc->bone_indices[20 + base], GlbQuatAxisAngle(0,
+                    GlbFingerTipHingeAngle(hinge[base], base < 2) - GlbFingerTipHingeAngle(defHinge, base < 2)));
+            }
+        }
+    }
+
+    for (int i = 0; i < boneCount; ++i) {
+        if (poseDeltas[i].hasRot) {
+            float rot[16];
+            GlbMat4FromNalQuat(poseDeltas[i].rot, rot);
+            GlbMat4Multiply(restLocal[i].data(), rot, animLocal[i].data());
+        } else if (i < (int)restLocal.size()) {
+            memcpy(animLocal[i].data(), restLocal[i].data(), sizeof(float) * 16);
+        } else {
+            GlbMat4Identity(animLocal[i].data());
+        }
+    }
+
+    std::vector<uint8_t> visitState(boneCount, 0);
+    std::function<void(int)> buildWorld = [&](int boneIdx) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        if (visitState[boneIdx] == 2) return;
+        if (visitState[boneIdx] == 1) {
+            memcpy(outWorld[boneIdx].data(), animLocal[boneIdx].data(), sizeof(float) * 16);
+            visitState[boneIdx] = 2;
+            return;
+        }
+        visitState[boneIdx] = 1;
+        auto runtimeIt = runtimeWorld.find(boneIdx);
+        if (runtimeIt != runtimeWorld.end()) {
+            memcpy(outWorld[boneIdx].data(), runtimeIt->second.data(), sizeof(float) * 16);
+        } else {
+            int parent = parentOf(boneIdx);
+            if (parent >= 0) {
+                buildWorld(parent);
+                GlbMat4Multiply(outWorld[parent].data(), animLocal[boneIdx].data(), outWorld[boneIdx].data());
+            } else {
+                memcpy(outWorld[boneIdx].data(), animLocal[boneIdx].data(), sizeof(float) * 16);
+            }
+        }
+        visitState[boneIdx] = 2;
+    };
+
+    for (int i = 0; i < boneCount; ++i) buildWorld(i);
+
+    if (hasRootRot) {
+        for (int i = 0; i < boneCount; ++i) {
+            float tmp[16];
+            GlbMat4Multiply(rootRotMat, outWorld[i].data(), tmp);
+            memcpy(outWorld[i].data(), tmp, sizeof(float) * 16);
+        }
+    }
+
+    if (runtimeWorld.empty()) {
+        for (int i = 0; i < boneCount; ++i) {
+            outWorld[i][12] += rootOffset[0];
+            outWorld[i][13] += rootOffset[1];
+            outWorld[i][14] += rootOffset[2];
+        }
+    }
+}
+
+static float GlbQuatDotXYZZ(const float* a, const float* b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+}
+
+static bool GlbRotationTrackChanged(const std::vector<float>& samples, const float base[4]) {
+    if (samples.empty()) return false;
+    for (size_t i = 0; i + 3 < samples.size(); i += 4) {
+        float q[4] = {samples[i], samples[i + 1], samples[i + 2], samples[i + 3]};
+        if (fabsf(1.0f - fabsf(GlbQuatDotXYZZ(q, base))) > 1e-5f) return true;
+        if (i >= 4) {
+            float prev[4] = {samples[i - 4], samples[i - 3], samples[i - 2], samples[i - 1]};
+            if (fabsf(1.0f - fabsf(GlbQuatDotXYZZ(q, prev))) > 1e-5f) return true;
+        }
+    }
+    return false;
+}
+
+static bool GlbTranslationTrackChanged(const std::vector<float>& samples, const float base[3]) {
+    if (samples.empty()) return false;
+    for (size_t i = 0; i + 2 < samples.size(); i += 3) {
+        float dx = samples[i] - base[0];
+        float dy = samples[i + 1] - base[1];
+        float dz = samples[i + 2] - base[2];
+        if (dx * dx + dy * dy + dz * dz > 1e-8f) return true;
+        if (i >= 3) {
+            dx = samples[i] - samples[i - 3];
+            dy = samples[i + 1] - samples[i - 2];
+            dz = samples[i + 2] - samples[i - 1];
+            if (dx * dx + dy * dy + dz * dz > 1e-8f) return true;
+        }
+    }
+    return false;
+}
+
+static void GlbBuildWorldFromLocal(
+    const std::vector<std::array<float, 16>>& localMatrices,
+    const NalSkeletonData& skel,
+    std::vector<std::array<float, 16>>& worldMatrices)
+{
+    int boneCount = (int)localMatrices.size();
+    worldMatrices.resize(boneCount);
+    std::vector<uint8_t> visitState(boneCount, 0);
+
+    std::function<void(int)> build = [&](int boneIdx) {
+        if (boneIdx < 0 || boneIdx >= boneCount) return;
+        if (visitState[boneIdx] == 2) return;
+        if (visitState[boneIdx] == 1) {
+            memcpy(worldMatrices[boneIdx].data(), localMatrices[boneIdx].data(), sizeof(float) * 16);
+            visitState[boneIdx] = 2;
+            return;
+        }
+
+        visitState[boneIdx] = 1;
+        int parent = GlbParentOf(&skel, boneIdx, boneCount);
+        if (parent >= 0) {
+            build(parent);
+            GlbMat4Multiply(worldMatrices[parent].data(), localMatrices[boneIdx].data(), worldMatrices[boneIdx].data());
+        } else {
+            memcpy(worldMatrices[boneIdx].data(), localMatrices[boneIdx].data(), sizeof(float) * 16);
+        }
+        visitState[boneIdx] = 2;
+    };
+
+    for (int i = 0; i < boneCount; ++i) build(i);
+}
+
+static void GlbBuildGenericAnimationWorldMatricesForFrame(
+    const NalAnimEntry& anim,
+    const std::vector<std::array<float, 16>>& bindWorldMatrices,
+    int frame,
+    std::vector<std::array<float, 16>>& outWorld)
+{
+    outWorld = bindWorldMatrices;
+    if (!anim.generic_decoded.complete ||
+        frame < 0 || frame >= (int)anim.generic_decoded.world_frames.size())
+        return;
+
+    const auto& genericWorld = anim.generic_decoded.world_frames[frame];
+    const size_t count = std::min(outWorld.size(), genericWorld.size());
+    for (size_t logical = 0; logical < count; ++logical) {
+        // These are already absolute PCM/game-space matrices, including the
+        // root basis adapter.  Preserve them verbatim so assets whose generic
+        // and PCM rest poses differ do not receive a second rest correction.
+        memcpy(outWorld[logical].data(), genericWorld[logical].data(),
+               sizeof(float) * 16);
+    }
+}
+
+static int GlbAddAnimationToWriter(
+    SkinningGLBWriter& writer,
+    const NalAnimEntry& anim,
+    int animIndex,
+    const NalSkeletonData& skel,
+    const std::vector<std::array<float, 16>>& restLocal,
+    const std::vector<std::array<float, 16>>& baseNodeMatrices,
+    const std::vector<GlbExportQuat>& restLocalQuatNal,
+    const std::vector<int>& boneNodeIndices,
+    const std::vector<int>& logicalToMesh)
+{
+    int boneCount = (int)restLocal.size();
+    int frameCount = anim.playback_frame_count();
+    const bool genericReady = anim.is_gen_anim() && anim.generic_decoded.complete &&
+                              !anim.generic_decoded.world_frames.empty();
+    if (boneCount <= 0 || frameCount <= 1 ||
+        (!genericReady && anim.components.empty())) return 0;
+    auto nodeForLogicalBone = [&](int logical) -> int {
+        if (logical < 0 || logical >= boneCount) return -1;
+        int mesh = (logicalToMesh.size() == (size_t)boneCount)
+            ? logicalToMesh[logical] : logical;
+        return (mesh >= 0 && mesh < (int)boneNodeIndices.size())
+            ? boneNodeIndices[mesh] : -1;
+    };
+
+    // A looping N-frame NAL clip has N intervals: the final interval runs
+    // from stored frame N-1 back to frame 0.  glTF players only interpolate
+    // between authored keys, so append frame 0 at t=N/fps to preserve that
+    // closing interval instead of snapping at t=(N-1)/fps.
+    const int sampleCount = frameCount + (anim.is_looping() ? 1 : 0);
+
+    std::vector<float> times(sampleCount);
+    for (int f = 0; f < sampleCount; ++f) {
+        times[f] = (float)f / NAL_PREVIEW_FPS;
+    }
+
+    std::vector<float> baseTranslations(boneCount * 3, 0.0f);
+    std::vector<float> baseRotations(boneCount * 4, 0.0f);
+    for (int bi = 0; bi < boneCount; ++bi) {
+        const float* baseMatrix = (bi < (int)baseNodeMatrices.size()) ? baseNodeMatrices[bi].data() : restLocal[bi].data();
+        GlbMatrixToTRS(baseMatrix, &baseTranslations[bi * 3], &baseRotations[bi * 4]);
+    }
+
+    std::vector<std::vector<float>> rotationSamples(boneCount);
+    std::vector<std::vector<float>> translationSamples(boneCount);
+    for (int bi = 0; bi < boneCount; ++bi) {
+        rotationSamples[bi].reserve((size_t)sampleCount * 4);
+        translationSamples[bi].reserve((size_t)sampleCount * 3);
+    }
+
+    std::vector<std::array<float, 16>> frameWorld;
+    for (int sample = 0; sample < sampleCount; ++sample) {
+        const int frame = (sample == frameCount) ? 0 : sample;
+        if (genericReady) {
+            GlbBuildGenericAnimationWorldMatricesForFrame(
+                anim, baseNodeMatrices, frame, frameWorld);
+        } else {
+            GlbBuildAnimationWorldMatricesForFrame(
+                anim, skel, baseNodeMatrices, restLocal,
+                restLocalQuatNal, frame, frameWorld);
+        }
+        for (int bi = 0; bi < boneCount; ++bi) {
+            if (nodeForLogicalBone(bi) < 0) continue;
+            float translation[3];
+            float rotation[4];
+            const float* sampleMatrix = (bi < (int)frameWorld.size()) ? frameWorld[bi].data() : baseNodeMatrices[bi].data();
+            GlbMatrixToTRS(sampleMatrix, translation, rotation);
+            auto& rot = rotationSamples[bi];
+            if (!rot.empty()) {
+                float prev[4] = {rot[rot.size() - 4], rot[rot.size() - 3], rot[rot.size() - 2], rot[rot.size() - 1]};
+                if (GlbQuatDotXYZZ(prev, rotation) < 0.0f) {
+                    rotation[0] = -rotation[0];
+                    rotation[1] = -rotation[1];
+                    rotation[2] = -rotation[2];
+                    rotation[3] = -rotation[3];
+                }
+            }
+            rot.push_back(rotation[0]);
+            rot.push_back(rotation[1]);
+            rot.push_back(rotation[2]);
+            rot.push_back(rotation[3]);
+
+            auto& trans = translationSamples[bi];
+            trans.push_back(translation[0]);
+            trans.push_back(translation[1]);
+            trans.push_back(translation[2]);
+        }
+    }
+
+    std::vector<int> animatedRotationBones;
+    std::vector<int> animatedTranslationBones;
+    for (int bi = 0; bi < boneCount; ++bi) {
+        if (nodeForLogicalBone(bi) < 0) continue;
+        if (GlbRotationTrackChanged(rotationSamples[bi], &baseRotations[bi * 4])) {
+            animatedRotationBones.push_back(bi);
+        }
+        if (GlbTranslationTrackChanged(translationSamples[bi], &baseTranslations[bi * 3])) {
+            animatedTranslationBones.push_back(bi);
+        }
+    }
+
+    if (animatedRotationBones.empty() && animatedTranslationBones.empty()) return 0;
+
+    std::string name = anim.name.empty() ? ("animation_" + std::to_string(animIndex)) : anim.name;
+    int gltfAnim = writer.AddAnimation(name);
+
+    int timeView = writer.AddBufferView(times.data(), times.size() * sizeof(float), 0);
+    int timeAccessor = writer.AddAccessorWithBounds(timeView, 5126, sampleCount, "SCALAR", {times.front()}, {times.back()});
+
+    for (int bi : animatedRotationBones) {
+        int view = writer.AddBufferView(rotationSamples[bi].data(), rotationSamples[bi].size() * sizeof(float), 0);
+        int accessor = writer.AddAccessor(view, 5126, sampleCount, "VEC4");
+        int sampler = writer.AddAnimationSampler(gltfAnim, timeAccessor, accessor);
+        writer.AddAnimationChannel(gltfAnim, sampler, nodeForLogicalBone(bi), "rotation");
+    }
+
+    for (int bi : animatedTranslationBones) {
+        int view = writer.AddBufferView(translationSamples[bi].data(), translationSamples[bi].size() * sizeof(float), 0);
+        int accessor = writer.AddAccessor(view, 5126, sampleCount, "VEC3");
+        int sampler = writer.AddAnimationSampler(gltfAnim, timeAccessor, accessor);
+        writer.AddAnimationChannel(gltfAnim, sampler, nodeForLogicalBone(bi), "translation");
+    }
+
+    return writer.HasAnimation(gltfAnim) ? 1 : 0;
 }
 
 void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset) {
@@ -1831,83 +3879,44 @@ void SpiderManTool::LoadBackgroundMeshes() {
             continue;
         }
 
-        file.seekg(24);
-        uint32_t headerSize, packDataOffset;
-        file.read((char*)&headerSize, 4);
-        file.read((char*)&packDataOffset, 4);
+        uint32_t mashSize = 0;
+        file.seekg(0x1C);
+        file.read((char*)&mashSize, 4);
+        if (!file.good() || mashSize < 0x40 || mashSize > fileSize) {
+            file.close();
+            continue;
+        }
 
+        std::vector<uint8_t> dirBlob(mashSize);
+        file.seekg(0);
+        file.read((char*)dirBlob.data(), mashSize);
         if (!file.good()) {
             file.close();
             continue;
         }
 
-
-        size_t start = 0;
-        const uint32_t magic = 0xE3E3E3E3;
-        size_t headerReadSize = std::min((size_t)200000, fileSize);
-        std::vector<uint8_t> tempHeader(headerReadSize);
-        file.seekg(0);
-        file.read((char*)tempHeader.data(), headerReadSize);
-
-        for (size_t i = 0; i + 4 <= tempHeader.size(); i++) {
-            if (*(uint32_t*)&tempHeader[i] == magic) {
-                for (size_t j = i + 4; j < i + 1000 && j + 4 <= tempHeader.size(); j++) {
-                    if (*(uint32_t*)&tempHeader[j] == magic) {
-                        start = j + 4;
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-
-        if (start == 0) {
+        PackDirectory dir = PackDirectory::Parse(dirBlob);
+        if (!dir.valid) {
             file.close();
             continue;
         }
 
-        file.clear();
-        file.seekg(start);
+        for (const auto& r : dir.resources) {
+            if (r.size <= 4 || (size_t)r.offset + r.size > fileSize) continue;
+            std::string entryName = "";
+            if (dictionary.count(r.hash)) entryName = StrToLower(dictionary[r.hash]);
+            if (entryName != modelName) continue;
 
-        while (file.good()) {
-            uint32_t hash, type, offset, size;
-            file.read((char*)&hash, 4);
-            file.read((char*)&type, 4);
-            file.read((char*)&offset, 4);
-            file.read((char*)&size, 4);
+            file.seekg(r.offset);
+            uint32_t sig = 0;
+            file.read((char*)&sig, 4);
+            if (!file.good() || sig != 0x204D4350) { file.clear(); continue; }
 
-            if (!file.good()) break;
-            if (type >= 0x1000 || type == 0x0000) break;
-
-            if (size > 4) {
-                size_t filePos = file.tellg();
-                uint32_t absOffset = (uint32_t)(packDataOffset + offset);
-
-                if (absOffset + 4 > fileSize) {
-                    file.seekg(filePos);
-                    continue;
-                }
-
-                file.seekg(absOffset);
-                uint32_t sig = 0;
-                file.read((char*)&sig, 4);
-
-                if (file.good() && sig == 0x204D4350) {
-                    std::string entryName = "";
-                    if (dictionary.count(hash)) entryName = StrToLower(dictionary[hash]);
-                    if (entryName == modelName) {
-                        file.seekg(absOffset);
-                        std::vector<uint8_t> pcmData(size);
-                        file.read((char*)pcmData.data(), size);
-                        AddMeshFromData(pcmData, modelName, nullptr);
-                        file.close();
-                        break;
-                    }
-                }
-
-                file.clear();
-                file.seekg(filePos);
-            }
+            file.seekg(r.offset);
+            std::vector<uint8_t> pcmData(r.size);
+            file.read((char*)pcmData.data(), r.size);
+            AddMeshFromData(pcmData, modelName, nullptr);
+            break;
         }
 
         file.close();
@@ -1934,12 +3943,16 @@ void SpiderManTool::LoadModelToGL(int index) {
     // the bone-palette path below needs `loadedSkeleton` to be the right one.
     // LoadSkeletonForCurrentPack populates skeletonCandidates with every
     // .pcskel-shaped entry; we just promote the one whose name matches.
-    SelectSkeletonForMesh(e.name);
+    SelectSkeletonForMesh(e.name, e.hash);
+
+    // Load the current PCM's bind matrices before resolving any section bone
+    // palettes.  Palette-less sections store global skeleton indices, and
+    // ResolveSectionBonePalette validates those indices against
+    // skeletonBones.size(); doing this after AddMeshFromData made that check use
+    // the previously-previewed model's skeleton (or an empty one).
+    BuildSkeletonVisual(pcmData);
 
     AddMeshFromData(pcmData, e.name, nullptr);
-
-    // Build skeleton visualization from bone data
-    BuildSkeletonVisual(pcmData);
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
@@ -2046,6 +4059,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     struct SubmeshData {
         std::string name;
         std::string textureName;
+        std::vector<std::string> textureCandidates;
         bool isTranslucent;
         bool isAlphaTest;
         std::vector<float> pos, norm, uvs, weights;
@@ -2055,7 +4069,8 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     std::vector<SubmeshData> submeshes;
     std::vector<float> allIBMs;
     uint32_t totalBones = 0;
-    std::string modelName = "Model";
+    std::string modelName = fs::path(outPath).stem().string();
+    if (modelName.empty()) modelName = "Model";
 
     auto ReadName = [&](uint32_t offset) -> std::string {
         return ReadStringTableEntry(pcmData, offset);
@@ -2113,6 +4128,32 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             sm.textureName = mat.textureName;
             sm.isTranslucent = mat.isTranslucent;
             sm.isAlphaTest = mat.isAlphaTest;
+            auto pushTextureCandidate = [&](const std::string& candidate) {
+                if (candidate.empty()) return;
+                if (std::find(sm.textureCandidates.begin(), sm.textureCandidates.end(), candidate) == sm.textureCandidates.end()) {
+                    sm.textureCandidates.push_back(candidate);
+                }
+            };
+            auto pushSingularWingCandidate = [&](const std::string& candidate) {
+                std::string key = GlbSanitizeTextureKey(candidate);
+                if (key.size() > 6 && key.substr(key.size() - 6) == "_wings") {
+                    pushTextureCandidate(key.substr(0, key.size() - 1));
+                }
+            };
+
+            pushSingularWingCandidate(mat.meshName);
+            pushSingularWingCandidate(sm.name);
+            pushTextureCandidate(mat.textureName);
+            if (!modelName.empty()) {
+                std::string cleanName = modelName;
+                size_t lastDot = cleanName.find_last_of(".");
+                if (lastDot != std::string::npos) cleanName = cleanName.substr(0, lastDot);
+                cleanName = StrToLower(cleanName);
+                pushTextureCandidate(cleanName + "_d");
+                pushTextureCandidate(cleanName);
+            }
+            pushTextureCandidate(mat.meshName);
+            pushTextureCandidate(sm.name);
 
             for (int i = 0; i < 3; i++) {
                 sm.minP[i] = 1e9f;
@@ -2226,28 +4267,229 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     }
 
     SkinningGLBWriter writer;
+    std::vector<int> boneNodeIndices;
+    std::vector<std::array<float, 16>> restLocalMatrices;
+    std::vector<GlbExportQuat> restLocalQuatNal;
+    std::vector<std::array<float, 16>> logicalBindMatrices;
+    std::vector<int> exportLogicalToMesh;
+    std::vector<int> exportMeshToLogical;
+    const NalSkeletonData* exportSkeleton = loadedSkeleton ? loadedSkeleton.get() : nullptr;
+
+    auto readTextureLocation = [](const TextureLocation& loc, std::vector<uint8_t>& out) -> bool {
+        if (loc.packPath.empty() || loc.size == 0) return false;
+        std::ifstream texFile(loc.packPath, std::ios::binary);
+        if (!texFile.is_open()) return false;
+        texFile.seekg(loc.offset);
+        out.resize(loc.size);
+        texFile.read(reinterpret_cast<char*>(out.data()), loc.size);
+        return texFile.good() || texFile.gcount() == (std::streamsize)loc.size;
+    };
+
+    auto resolveExactDDS = [&](const std::string& rawName, std::vector<uint8_t>& outDDS, std::string& resolvedName) -> bool {
+        std::string nameLower = GlbSanitizeTextureKey(rawName);
+        if (nameLower.empty()) return false;
+
+        for (const auto& entry : entries) {
+            if (!entry.isDds || entry.offset + entry.size > pcPackData.size()) continue;
+            std::string entryName = StrToLower(entry.name);
+            std::string entryBase = GlbSanitizeTextureKey(entryName);
+            if (entryBase == nameLower || entryName == nameLower || entryName == nameLower + ".dds") {
+                outDDS.assign(pcPackData.begin() + entry.offset, pcPackData.begin() + entry.offset + entry.size);
+                resolvedName = entryBase.empty() ? nameLower : entryBase;
+                return true;
+            }
+        }
+
+        auto nameIt = globalTextureNameIndex.find(nameLower);
+        if (nameIt != globalTextureNameIndex.end() && readTextureLocation(nameIt->second, outDDS)) {
+            resolvedName = nameLower;
+            return true;
+        }
+        nameIt = globalTextureNameIndex.find(nameLower + ".dds");
+        if (nameIt != globalTextureNameIndex.end() && readTextureLocation(nameIt->second, outDDS)) {
+            resolvedName = nameLower;
+            return true;
+        }
+
+        uint32_t hashWithExt = CalculateCRC32(nameLower + ".dds");
+        auto hashIt = globalTextureIndex.find(hashWithExt);
+        if (hashIt != globalTextureIndex.end() && readTextureLocation(hashIt->second, outDDS)) {
+            resolvedName = nameLower;
+            return true;
+        }
+
+        uint32_t hashBare = CalculateCRC32(nameLower);
+        hashIt = globalTextureIndex.find(hashBare);
+        if (hashIt != globalTextureIndex.end() && readTextureLocation(hashIt->second, outDDS)) {
+            resolvedName = nameLower;
+            return true;
+        }
+
+        return false;
+    };
+
+    std::function<bool(const std::string&, std::vector<uint8_t>&, std::string&, int)> resolveDDSByName;
+    resolveDDSByName = [&](const std::string& rawName, std::vector<uint8_t>& outDDS, std::string& resolvedName, int depth) -> bool {
+        std::string nameLower = GlbSanitizeTextureKey(rawName);
+        if (nameLower.empty()) return false;
+        if (resolveExactDDS(nameLower, outDDS, resolvedName)) return true;
+
+        if (depth <= 2) {
+            for (const auto& entry : entries) {
+                if (entry.isDds || entry.offset + entry.size > pcPackData.size()) continue;
+                std::string entryName = StrToLower(entry.name);
+                std::string entryBase = GlbSanitizeTextureKey(entryName);
+                if (entryBase != nameLower && entryName != nameLower && entryName != nameLower + ".dat") continue;
+
+                std::vector<uint8_t> listData(pcPackData.begin() + entry.offset, pcPackData.begin() + entry.offset + entry.size);
+                std::vector<std::string> listTextures = GlbExtractTextureListNames(listData);
+                std::vector<uint8_t> transparentFallbackDDS;
+                std::string transparentFallbackName;
+                for (const std::string& listTexture : listTextures) {
+                    if (resolveDDSByName(listTexture, outDDS, resolvedName, depth + 1)) {
+                        std::vector<uint8_t> rgba;
+                        int width = 0, height = 0;
+                        if (GlbDecodeDDSToRGBA(outDDS, rgba, width, height) && GlbRGBAFullyTransparent(rgba)) {
+                            if (transparentFallbackDDS.empty()) {
+                                transparentFallbackDDS = outDDS;
+                                transparentFallbackName = resolvedName;
+                            }
+                            continue;
+                        }
+                        return true;
+                    }
+                }
+                if (!transparentFallbackDDS.empty()) {
+                    outDDS = std::move(transparentFallbackDDS);
+                    resolvedName = transparentFallbackName;
+                    return true;
+                }
+            }
+        }
+
+        if (depth > 2 || nameLower.compare(0, 4, "nat_") == 0) return false;
+
+        size_t under = nameLower.find('_');
+        if (under == 2 || under == 3) {
+            std::string rest = nameLower.substr(under + 1);
+            if (!rest.empty()) {
+                if (resolveDDSByName("nat_" + rest, outDDS, resolvedName, depth + 1)) return true;
+                if (resolveDDSByName(rest, outDDS, resolvedName, depth + 1)) return true;
+            }
+        }
+        return false;
+    };
+
+    std::map<std::string, int> glbTextureByResolvedName;
+    std::map<std::string, bool> glbTextureAlphaByResolvedName;
+    auto textureIndexForCandidates = [&](const std::vector<std::string>& candidates, bool& hasTextureAlpha) -> int {
+        hasTextureAlpha = false;
+        for (const std::string& candidate : candidates) {
+            std::vector<uint8_t> ddsData;
+            std::string resolvedName;
+            if (!resolveDDSByName(candidate, ddsData, resolvedName, 0)) continue;
+            std::string textureKey = GlbSanitizeTextureKey(resolvedName);
+            auto cached = glbTextureByResolvedName.find(textureKey);
+            if (cached != glbTextureByResolvedName.end()) {
+                auto alphaIt = glbTextureAlphaByResolvedName.find(textureKey);
+                hasTextureAlpha = alphaIt != glbTextureAlphaByResolvedName.end() && alphaIt->second;
+                return cached->second;
+            }
+
+            std::vector<uint8_t> rgba;
+            std::vector<uint8_t> png;
+            int width = 0, height = 0;
+            if (!GlbDecodeDDSToRGBA(ddsData, rgba, width, height)) continue;
+            if (GlbRGBAFullyTransparent(rgba)) continue;
+            bool textureHasAlpha = GlbRGBAHasAlpha(rgba);
+            if (!GlbEncodePNG(rgba, width, height, png)) continue;
+
+            int texIndex = writer.AddPNGTexture(textureKey.empty() ? candidate : textureKey, png);
+            if (texIndex >= 0) {
+                glbTextureByResolvedName[textureKey] = texIndex;
+                glbTextureAlphaByResolvedName[textureKey] = textureHasAlpha;
+                hasTextureAlpha = textureHasAlpha;
+                return texIndex;
+            }
+        }
+        return -1;
+    };
 
     // If we have skinning data and bone matrices, set up skin nodes
     int ibmAccessor = -1;
     if (hasSkinning && !boneMats.matrices.empty()) {
         totalBones = (uint32_t)boneMats.matrices.size();
+        boneNodeIndices.assign(totalBones, -1);
+        const bool entityMapMatches = activeBoneMapping.valid &&
+            activeBoneMapping.meshPoseCount == totalBones &&
+            activeBoneMapping.meshToLogical.size() == totalBones &&
+            !activeBoneMapping.logicalToMesh.empty();
+        const uint32_t logicalBoneCount = entityMapMatches
+            ? (uint32_t)activeBoneMapping.logicalToMesh.size()
+            : totalBones;
+        exportLogicalToMesh.resize(logicalBoneCount);
+        exportMeshToLogical.resize(totalBones);
+        for (uint32_t i = 0; i < logicalBoneCount; ++i) {
+            exportLogicalToMesh[i] = entityMapMatches ? activeBoneMapping.logicalToMesh[i] : (int)i;
+        }
+        for (uint32_t i = 0; i < totalBones; ++i) {
+            exportMeshToLogical[i] = entityMapMatches ? activeBoneMapping.meshToLogical[i] : (int)i;
+        }
+        logicalBindMatrices.resize(logicalBoneCount);
+        for (uint32_t logical = 0; logical < logicalBoneCount; ++logical) {
+            const int mesh = exportLogicalToMesh[logical];
+            if (mesh >= 0 && mesh < (int)totalBones)
+                logicalBindMatrices[logical] = boneMats.matrices[mesh];
+            else {
+                logicalBindMatrices[logical].fill(0.0f);
+                logicalBindMatrices[logical][0] = 1.0f;
+                logicalBindMatrices[logical][5] = 1.0f;
+                logicalBindMatrices[logical][10] = 1.0f;
+                logicalBindMatrices[logical][15] = 1.0f;
+            }
+        }
+        GlbBuildRestLocalMatrices(logicalBindMatrices, exportSkeleton,
+                                  restLocalMatrices, restLocalQuatNal);
 
-        // Add bone nodes
+        std::vector<int> rootBoneNodes;
+        for (uint32_t bi = 0; bi < totalBones; bi++) {
+            int nodeIndex = 1 + (int)bi; // skeleton root is added before all bones
+            rootBoneNodes.push_back(nodeIndex);
+        }
+
+        int skeletonRootNode = writer.AddNode("Skeleton", -1, -1, nullptr, rootBoneNodes);
+        writer.SetSkinRoot(skeletonRootNode);
+        writer.AddToScene(skeletonRootNode);
+
+        // Keep exported joints flat under the skeleton root. Blender then uses
+        // the exact sampled joint matrices instead of rebuilding NAL's runtime
+        // hierarchy from local TRS.
         for (uint32_t bi = 0; bi < totalBones; bi++) {
             std::string boneName = "bone_" + std::to_string(bi);
-            int boneNode = writer.AddNode(boneName);
+            if (exportSkeleton) {
+                int logical = exportMeshToLogical.empty() ? (int)bi : exportMeshToLogical[bi];
+                auto nameIt = exportSkeleton->bone_map.find(logical);
+                if (nameIt != exportSkeleton->bone_map.end() && !nameIt->second.empty()) {
+                    boneName = nameIt->second;
+                }
+            }
+
+            float translation[3];
+            float rotation[4];
+            GlbMatrixToTRS(boneMats.matrices[bi].data(), translation, rotation);
+            int boneNode = writer.AddNode(boneName, -1, -1, nullptr, {}, translation, rotation);
+            boneNodeIndices[bi] = boneNode;
             writer.AddJoint(boneNode);
         }
 
-        // Write inverse bind matrices
-        // The PCM stores bind matrices; we use them as-is for the IBM
-        // (Blender/viewers will compute the actual inverse)
+        // glTF expects actual inverse bind matrices in the same joint order as
+        // the skin's joint list.
         std::vector<float> ibmData;
+        ibmData.reserve((size_t)totalBones * 16);
         for (auto& mat : boneMats.matrices) {
-            // Convert row-major 4x4 to column-major for glTF
-            for (int c = 0; c < 4; c++)
-                for (int r = 0; r < 4; r++)
-                    ibmData.push_back(mat[r * 4 + c]);
+            float inv[16];
+            if (!InvertMatrix(mat.data(), inv)) GlbMat4Identity(inv);
+            for (int i = 0; i < 16; i++) ibmData.push_back(inv[i]);
         }
         int ibmView = writer.AddBufferView(ibmData.data(), ibmData.size() * sizeof(float), 0);
         ibmAccessor = writer.AddAccessor(ibmView, 5126, (int)totalBones, "MAT4");
@@ -2256,7 +4498,9 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     for (size_t si = 0; si < submeshes.size(); si++) {
         auto& sm = submeshes[si];
 
-        int matIdx = writer.AddMaterial(sm.name.empty() ? "material_" + std::to_string(si) : sm.name, sm.isTranslucent, sm.isAlphaTest);
+        bool hasTextureAlpha = false;
+        int textureIndex = textureIndexForCandidates(sm.textureCandidates, hasTextureAlpha);
+        int matIdx = writer.AddMaterial(sm.name.empty() ? "material_" + std::to_string(si) : sm.name, sm.isTranslucent, sm.isAlphaTest || hasTextureAlpha, textureIndex);
 
         int posView = writer.AddBufferView(sm.pos.data(), sm.pos.size() * sizeof(float), 34962);
         int posAcc = writer.AddAccessor(posView, 5126, (int)sm.pos.size() / 3, "VEC3", sm.minP, sm.maxP);
@@ -2289,8 +4533,37 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         writer.AddToScene(nodeIdx);
     }
 
+    int exportedAnimations = 0;
+    if (hasSkinning && loadedAnimFile && loadedSkeleton && !restLocalMatrices.empty() && !boneNodeIndices.empty()) {
+        for (int ai = 0; ai < (int)loadedAnimFile->animations.size(); ++ai) {
+            const auto& anim = loadedAnimFile->animations[ai];
+            // Anims decoded against a different skeleton use that skeleton's
+            // bone indices -- applying them to this mesh's rig produces
+            // garbage, so only export anims bound to the mesh's skeleton.
+            if (anim.skeleton &&
+                !nal_skeleton_pose_compatible(anim.skeleton.get(), loadedSkeleton.get()))
+                continue;
+            const NalSkeletonData& poseSkeleton = anim.skeleton
+                ? *anim.skeleton
+                : *loadedSkeleton;
+            exportedAnimations += GlbAddAnimationToWriter(
+                writer,
+                anim,
+                ai,
+                poseSkeleton,
+                restLocalMatrices,
+                logicalBindMatrices,
+                restLocalQuatNal,
+                boneNodeIndices,
+                exportLogicalToMesh);
+        }
+    }
+
     writer.WriteToFile(outPath, ibmAccessor);
     Log("Converted to: " + outPath);
+    if (exportedAnimations > 0) {
+        Log("Included " + std::to_string(exportedAnimations) + " animation(s) in GLB");
+    }
 }
 
 void SpiderManTool::AnalyzePCM(int index) {

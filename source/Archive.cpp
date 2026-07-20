@@ -64,61 +64,47 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     file.read((char*)pcPackData.data(), size);
     loadedPCPackPath = path;
 
-    BinaryReader br(pcPackData);
-    br.Skip(24);
-    uint32_t headerSize = br.Read<uint32_t>();
-    dataOffset = br.Read<uint32_t>();
-
-    size_t start = 0;
-    bool found = false;
-    const uint32_t magic = 0xE3E3E3E3;
-    for(size_t i=0; i<size-4; i++) {
-        if (*(uint32_t*)&pcPackData[i] == magic) {
-            for(size_t j=i+4; j<size-4; j++) {
-                if (*(uint32_t*)&pcPackData[j] == magic) {
-                    start = j + 4;
-                    found = true;
-                    break;
-                }
-            }
-            break;
-        }
-    }
+    // Byte-exact directory parse (replays OpenUSM's resource_directory un-mash;
+    // see PackDirectory.h). Replaces the old 0xE3E3E3E3 filler scan.
+    currentDir = PackDirectory::Parse(pcPackData);
 
     entries.clear();
-    if (!found) { Log("Invalid PCPACK header."); return; }
+    if (!currentDir.valid) {
+        Log("Invalid PCPACK directory: " + currentDir.error);
+        return;
+    }
+    dataOffset = currentDir.dataBase;
 
     std::map<std::string, int> nameCounts;
 
-    br.Seek(start);
-    int counter = 0;
-    while (true) {
-        uint32_t hash = br.Read<uint32_t>();
-        uint32_t type = br.Read<uint32_t>();
-        uint32_t offset = br.Read<uint32_t>();
-        uint32_t fsize = br.Read<uint32_t>();
-
-        if (type >= 0x1000 || type == 0x0000) break;
-
+    for (const auto& r : currentDir.resources) {
         FileEntry e;
-        e.hash = hash; e.type = type; e.offset = offset + dataOffset; e.size = fsize;
+        e.hash = r.hash; e.type = r.type; e.offset = r.offset; e.size = r.size;
         e.isPcm = false;
         e.isDds = false;
 
-        if (dictionary.count(hash)) e.name = dictionary[hash];
-        else { std::stringstream ss; ss << "Unknown_" << std::hex << hash; e.name = ss.str(); }
+        if (dictionary.count(e.hash)) e.name = dictionary[e.hash];
+        else { std::stringstream ss; ss << "Unknown_" << std::hex << e.hash; e.name = ss.str(); }
 
-        if (fsize > 4 && e.offset + 4 <= pcPackData.size()) {
+        // Extension: content signature first (drives viewer behavior), then the
+        // directory's authoritative resource_key_type.
+        const char* sigExt = nullptr;
+        if (e.size > 4 && (size_t)e.offset + 4 <= pcPackData.size()) {
             const char* magicSig = (const char*)&pcPackData[e.offset];
-            if (strncmp(magicSig, "PCM ", 4) == 0) {
-                e.name += ".pcm";
-                e.isPcm = true;
-            }
-            else if (strncmp(magicSig, "DDS ", 4) == 0) {
-                e.name += ".dds";
-                e.isDds = true;
-            }
-            else e.name += ".dat";
+            if (strncmp(magicSig, "PCM ", 4) == 0) { sigExt = ".pcm"; e.isPcm = true; }
+            else if (strncmp(magicSig, "DDS ", 4) == 0) { sigExt = ".dds"; e.isDds = true; }
+        }
+        if (sigExt) e.name += sigExt;
+        else switch (r.type) {
+            case RES_KEY_ANIMATION:   e.name += ".pcanim"; break;
+            case RES_KEY_NAL_SKL:     e.name += ".pcskel"; break;
+            case RES_KEY_ALS_FILE:    e.name += ".als"; break;
+            case RES_KEY_ENTITY:
+            case RES_KEY_EXTERNAL_ENT: e.name += ".ent"; break;
+            case RES_KEY_SCN_ENTITY:  e.name += ".scn"; break;
+            case RES_KEY_IFL:         e.name += ".ifl"; break;
+            case RES_KEY_SCRIPT:      e.name += ".script"; break;
+            default:                  e.name += ".dat"; break;
         }
 
         std::string originalName = e.name;
@@ -134,9 +120,12 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
         }
 
         entries.push_back(e);
-        br.Seek(start + (counter + 1) * 16);
-        counter++;
     }
+
+    Log("Directory: " + std::to_string(currentDir.resources.size()) + " resources, " +
+        std::to_string(currentDir.skeletons.size()) + " skeleton(s), " +
+        std::to_string(currentDir.animFiles.size()) + " anim file(s), " +
+        std::to_string(currentDir.anims.size()) + " named anim(s)");
 
     std::sort(entries.begin(), entries.end(), [](const FileEntry& a, const FileEntry& b) {
         return a.name < b.name;
@@ -168,6 +157,10 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
         if (e.isPcm && convertAll) {
             fs::path glbPath = fullFilePath;
             glbPath.replace_extension(".glb");
+            // Anims are decoded per-skeleton at pack open; only the skinning
+            // skeleton needs to follow the mesh here.
+            SelectSkeletonForMesh(e.name, e.hash);
+            if (!loadedAnimFile) LoadAnimationForCurrentPack();
             std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
             ConvertPCM(pcmData, glbPath.string());
         } else {
@@ -200,6 +193,8 @@ void SpiderManTool::ExtractFile(int index, bool asGlb) {
     if (e.isPcm && asGlb) {
         fs::path glbPath = fullFilePath;
         glbPath.replace_extension(".glb");
+        SelectSkeletonForMesh(e.name, e.hash);
+        if (!loadedAnimFile) LoadAnimationForCurrentPack();
         std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
         ConvertPCM(pcmData, glbPath.string());
         ShowNotification("Saved GLB to:\n" + glbPath.string());

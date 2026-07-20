@@ -40,6 +40,11 @@ namespace NalCompFlags {
 
 // ─── Bone role enums (match pcskel.py) ───
 namespace TorsoBone   { enum E { PELVIS=0, SPINE, SPINE1, SPINE2, NECK, HEAD, NECK_AUX, COUNT=7 }; }
+// Standard legs use the exact in-memory order consumed by USM.exe sub_5F6960:
+// two proximal-to-distal chains followed by their shared root.  IK legs use a
+// different, toe-first table (LegBone below), so these must never share roles.
+namespace LegStdBone  { enum E { L_THIGH=0, L_CALF, L_FOOT, L_TOE,
+                                 R_THIGH, R_CALF, R_FOOT, R_TOE, ROOT, COUNT=9 }; }
 namespace LegBone     { enum E { L_TOE=0, R_TOE, L_FOOT, R_FOOT, L_THIGH, L_CALF, R_THIGH, R_CALF, PELVIS, COUNT=9 }; }
 namespace ArmBone     { enum E { L_CLAV=0, L_UPPER, L_FORE, L_HAND, R_CLAV, R_UPPER, R_FORE, R_HAND,
                                  L_TWIST0, L_TWIST1, R_TWIST0, R_TWIST1, NECK_PARENT, COUNT=13 }; }
@@ -70,6 +75,16 @@ struct NalComponentData {
     uint32_t type_id       = 0;
     std::string type_name;
 
+    // Preserve the complete serialized blocks. Parsed fields below are views
+    // of these bytes; alignment, reserved, and unconsumed bytes remain
+    // available for byte-exact diagnostics instead of being silently lost.
+    uint32_t raw_skel_block_offset = 0;
+    std::vector<uint8_t> raw_skel_block;
+    uint32_t parsed_skel_bytes = 0;
+    uint32_t raw_default_pose_offset = 0;
+    std::vector<uint8_t> raw_default_pose_block;
+    uint32_t parsed_default_pose_bytes = 0;
+
     // Bone indices for this component (variable size depending on type)
     std::vector<int> bone_indices;
 
@@ -88,12 +103,18 @@ struct NalComponentData {
 
     // For ArbitraryPO: generic nodes
     struct GenericNode {
+        uint32_t name_hash = 0;
         std::string name;
         uint16_t quat_ix = 0, pos_ix = 0;
         int16_t  my_matrix_ix = -1, parent_matrix_ix = -1;
         uint16_t is_quat_anim = 0, is_pos_anim = 0;
+        uint32_t reserved = 0;
     };
     std::vector<GenericNode> arb_nodes;
+    std::array<uint32_t, 8> arb_header = {};
+    std::vector<NalQuat> arb_skel_quats;
+    std::vector<std::array<float,3>> arb_skel_positions;
+    std::vector<uint32_t> arb_eval_order;
 
     // Default pose data
     struct DefaultPose {
@@ -118,6 +139,7 @@ struct NalComponentData {
         // Tentacles
         std::vector<float> tentacle_values;
         // ArbitraryPO pose
+        std::array<uint32_t,4> arbitrary_header = {};
         int quat_count = 0, position_count = 0;
         std::vector<std::array<float,3>> positions;
         bool valid = false;
@@ -136,9 +158,11 @@ struct NalBoneNode {
 struct NalSkeletonData {
     // Header
     uint32_t    cls = 0, version = 0;
+    uint32_t    name_hash = 0, category_hash = 0;
     std::string name, category;
     std::string skeleton_kind = "character"; // "character", "generic", "panel"
     int         num_components = 0;
+    std::vector<uint8_t> source_bytes;
 
     // Components with per-skel data
     std::vector<NalComponentData> components;
@@ -156,8 +180,75 @@ struct NalSkeletonData {
     };
     std::vector<GenericNode> generic_nodes;
 
+    // Exact 0x10200 generic-skeleton payload.  Unlike character skeletons,
+    // these assets describe pose storage with component-info records and a
+    // compact matrix command stream.  Keep every serialized region so the
+    // generic animation decoder never has to infer offsets from bone names.
+    struct GenericComponentInfo {
+        uint32_t type_hash = 0;
+        std::string type_name;
+        uint32_t first_component = 0;
+        uint32_t component_count = 0;
+        uint32_t pose_offset = 0;
+        std::array<uint8_t, 48> raw = {};
+    };
+    uint32_t generic_matrix_count = 0;
+    uint32_t generic_component_slot_count = 0;
+    uint32_t generic_pose_size = 0;
+    uint32_t generic_pose_align = 1;
+    std::vector<uint8_t> generic_matrix_commands;
+    std::vector<uint8_t> generic_lookup_table;
+    std::vector<uint8_t> generic_component_records;
+    std::vector<GenericComponentInfo> generic_component_infos;
+    std::vector<uint8_t> generic_default_pose;
+    std::vector<GenericComponentInfo> generic_const_component_infos;
+    std::vector<uint8_t> generic_const_pose;
+    std::vector<float> generic_component_scales;
+
     std::vector<std::string> warnings;
 };
+
+// Character animation references identify the skeleton used to decode the
+// component slots, but retail packs also reuse clips across distinct skeleton
+// resources whose logical pose layouts are identical (BOOMERANG reuses
+// GANG_SS).  Pointer/name equality is therefore too strict.  Compatibility is
+// structural: every component writes the same logical matrices and the
+// resulting parent graph is identical.  Default poses and offsets may differ;
+// those remain owned by the animation's referenced skeleton.
+static inline bool nal_skeleton_pose_compatible(const NalSkeletonData* a,
+                                                const NalSkeletonData* b) {
+    if (!a || !b) return false;
+    if (a == b) return true;
+    if (a->skeleton_kind != b->skeleton_kind ||
+        a->components.size() != b->components.size() ||
+        a->parent_map != b->parent_map)
+        return false;
+
+    for (size_t i = 0; i < a->components.size(); ++i) {
+        const auto& ac = a->components[i];
+        const auto& bc = b->components[i];
+        if (ac.component_index != bc.component_index ||
+            ac.type_id != bc.type_id ||
+            ac.bone_indices != bc.bone_indices ||
+            ac.other_matrix_indices != bc.other_matrix_indices ||
+            ac.arb_eval_order != bc.arb_eval_order ||
+            ac.arb_nodes.size() != bc.arb_nodes.size())
+            return false;
+
+        for (size_t n = 0; n < ac.arb_nodes.size(); ++n) {
+            const auto& an = ac.arb_nodes[n];
+            const auto& bn = bc.arb_nodes[n];
+            // Channel indices/animation flags belong to the skeleton against
+            // which the clip was decoded and may legitimately differ.  For
+            // retargeting, the invariant is which logical matrix is written
+            // and which logical matrix parents it.
+            if (an.my_matrix_ix != bn.my_matrix_ix ||
+                an.parent_matrix_ix != bn.parent_matrix_ix)
+                return false;
+        }
+    }
+    return true;
+}
 
 // ─── Helper: read a tlFixedString (4-byte hash + 28-byte name) ───
 static inline std::pair<uint32_t, std::string> nal_read_fixed_string(std::ifstream& f) {
@@ -240,11 +331,18 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         return result;
     }
 
+    result.source_bytes.resize(total_file_size);
+    f.read(reinterpret_cast<char*>(result.source_bytes.data()), total_file_size);
+    f.clear();
+    f.seekg(0);
+
     // Header
     f.read(reinterpret_cast<char*>(&result.cls), 4);
     f.read(reinterpret_cast<char*>(&result.version), 4);
     auto [name_hash, name_str] = nal_read_fixed_string(f);
     auto [cat_hash, cat_str]   = nal_read_fixed_string(f);
+    result.name_hash = name_hash;
+    result.category_hash = cat_hash;
     result.name     = name_str;
     result.category = cat_str;
 
@@ -254,27 +352,110 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
     // Generic skeleton
     if (cat_lower.find("generic") != std::string::npos || result.version == 0x10200) {
         result.skeleton_kind = "generic";
-        // Parse generic skeleton (matches pcskel.py _parse_generic_skeleton)
-        uint32_t generic_header[14];
-        f.read(reinterpret_cast<char*>(generic_header), 56);
+        // USM.exe nalGenericSkeleton::_Process (0x793610) derives every
+        // runtime pointer from these exact serialized sizes/alignments.
+        auto u32 = [&](size_t off, uint32_t& value) -> bool {
+            if (off + 4 > result.source_bytes.size()) return false;
+            std::memcpy(&value, result.source_bytes.data() + off, 4);
+            return true;
+        };
+        auto align_up = [](uint64_t value, uint32_t alignment) -> uint64_t {
+            if (alignment == 0) alignment = 1;
+            return (value + alignment - 1) & ~(uint64_t(alignment) - 1);
+        };
+        auto copy_region = [&](uint64_t off, uint64_t size, std::vector<uint8_t>& dst) -> bool {
+            if (off > result.source_bytes.size() || size > result.source_bytes.size() - off)
+                return false;
+            dst.assign(result.source_bytes.begin() + (size_t)off,
+                       result.source_bytes.begin() + (size_t)(off + size));
+            return true;
+        };
 
-        uint32_t field_64 = generic_header[7];
-        uint32_t field_6c = generic_header[9];
-        uint32_t node_count = generic_header[11];
-        uint32_t comp_record_count = generic_header[13];
+        uint32_t command_size = 0, lookup_size = 0, node_count = 0;
+        uint32_t comp_record_count = 0, info_count = 0;
+        uint32_t intermediate_size = 0, const_info_count = 0;
+        uint32_t const_pose_size = 0, const_pose_align = 1;
+        uint32_t scale_prefix_size = 0, scale_size = 0, scale_align = 1;
+        if (!u32(0x60, result.generic_matrix_count) ||
+            !u32(0x64, command_size) || !u32(0x6C, lookup_size) ||
+            !u32(0x74, node_count) || !u32(0x7C, comp_record_count) ||
+            !u32(0x80, result.generic_component_slot_count) ||
+            !u32(0x88, info_count) || !u32(0x90, result.generic_pose_size) ||
+            !u32(0x94, result.generic_pose_align) || !u32(0x9C, intermediate_size) ||
+            !u32(0xA4, const_info_count) || !u32(0xAC, const_pose_size) ||
+            !u32(0xB0, const_pose_align) || !u32(0xB8, scale_prefix_size) ||
+            !u32(0xC0, scale_size) || !u32(0xC4, scale_align)) {
+            result.warnings.push_back("Generic skeleton header is truncated");
+            return result;
+        }
 
-        const uint32_t data_region_off = 0xE0;
-        const uint32_t node_record_size = 48;
-        uint32_t table_a_off = data_region_off + field_64;
-        uint32_t node_records_off = (table_a_off + field_6c + 3) & ~3u;
+        constexpr uint64_t data_region_off = 0xE0;
+        constexpr uint64_t node_record_size = 48;
+        constexpr uint64_t component_record_size = 40;
+        constexpr uint64_t component_info_size = 48;
+        const uint64_t command_off = data_region_off;
+        const uint64_t lookup_off = command_off + command_size;
+        const uint64_t node_records_off = align_up(lookup_off + lookup_size, 4);
+        const uint64_t component_records_off = align_up(
+            node_records_off + uint64_t(node_count) * node_record_size, 4);
+        const uint64_t info_off = align_up(
+            component_records_off + uint64_t(comp_record_count) * component_record_size, 4);
+        const uint64_t default_pose_off = align_up(
+            info_off + uint64_t(info_count) * component_info_size,
+            result.generic_pose_align);
+        const uint64_t const_info_off = align_up(
+            default_pose_off + result.generic_pose_size + intermediate_size, 4);
+        const uint64_t const_pose_off = align_up(
+            const_info_off + uint64_t(const_info_count) * component_info_size,
+            const_pose_align);
+        const uint64_t scale_off = align_up(
+            const_pose_off + const_pose_size + scale_prefix_size, scale_align);
 
-        f.seekg(0, std::ios::end);
-        size_t file_size = f.tellg();
+        if (!copy_region(command_off, command_size, result.generic_matrix_commands) ||
+            !copy_region(lookup_off, lookup_size, result.generic_lookup_table) ||
+            !copy_region(component_records_off,
+                         uint64_t(comp_record_count) * component_record_size,
+                         result.generic_component_records) ||
+            !copy_region(default_pose_off, result.generic_pose_size, result.generic_default_pose) ||
+            !copy_region(const_pose_off, const_pose_size, result.generic_const_pose)) {
+            result.warnings.push_back("Generic skeleton data region is out of range");
+            return result;
+        }
+
+        auto read_component_infos = [&](uint64_t off, uint32_t count,
+                                        std::vector<NalSkeletonData::GenericComponentInfo>& out) {
+            out.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint64_t rec = off + uint64_t(i) * component_info_size;
+                if (rec + component_info_size > result.source_bytes.size()) break;
+                NalSkeletonData::GenericComponentInfo ci;
+                std::memcpy(ci.raw.data(), result.source_bytes.data() + rec, ci.raw.size());
+                std::memcpy(&ci.type_hash, ci.raw.data(), 4);
+                const char* name = reinterpret_cast<const char*>(ci.raw.data() + 4);
+                ci.type_name.assign(name, strnlen(name, 32));
+                std::memcpy(&ci.first_component, ci.raw.data() + 36, 4);
+                std::memcpy(&ci.component_count, ci.raw.data() + 40, 4);
+                std::memcpy(&ci.pose_offset, ci.raw.data() + 44, 4);
+                out.push_back(std::move(ci));
+            }
+        };
+        read_component_infos(info_off, info_count, result.generic_component_infos);
+        read_component_infos(const_info_off, const_info_count,
+                             result.generic_const_component_infos);
+
+        if (scale_size % 4 != 0 || scale_off + scale_size > result.source_bytes.size()) {
+            result.warnings.push_back("Generic skeleton component-scale table is out of range");
+            return result;
+        }
+        result.generic_component_scales.resize(scale_size / 4);
+        if (scale_size != 0)
+            std::memcpy(result.generic_component_scales.data(),
+                        result.source_bytes.data() + scale_off, scale_size);
 
         result.generic_nodes.reserve(node_count);
         for (uint32_t ni = 0; ni < node_count; ++ni) {
-            uint32_t rec_off = node_records_off + ni * node_record_size;
-            if (rec_off + node_record_size > file_size) break;
+            uint64_t rec_off = node_records_off + uint64_t(ni) * node_record_size;
+            if (rec_off + node_record_size > result.source_bytes.size()) break;
             f.seekg(rec_off);
             auto [nh, nn] = nal_read_fixed_string(f);
             int32_t kind, pose_off, data_off, parent_ix;
@@ -292,12 +473,52 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             gn.data_offset = data_off;
             gn.parent_index = parent_ix;
             result.generic_nodes.push_back(gn);
+        }
 
-            // Build bone_map / parent_map
-            if (!nn.empty()) {
-                result.bone_map[ni] = nn;
-                result.parent_map[ni] = (parent_ix >= 0 && parent_ix < (int)node_count) ? parent_ix : -1;
+        // Node metadata is not in matrix order (and RHINO inserts shoulder
+        // nodes mid-table).  Each node's data_offset is the serialized end
+        // offset of the quaternion/PO source consumed for its destination
+        // matrix.  Replaying the exact command-source cursors therefore gives
+        // an unambiguous node->matrix permutation without name heuristics.
+        std::map<int, int> data_end_to_matrix;
+        size_t command_cursor = 0;
+        int animated_cursor = 0;
+        int constant_cursor = 0;
+        while (command_cursor < result.generic_matrix_commands.size()) {
+            const uint8_t raw_opcode = result.generic_matrix_commands[command_cursor++];
+            const uint8_t opcode = raw_opcode & 0x7Fu;
+            const bool constant = (raw_opcode & 0x80u) != 0;
+            if (opcode == 0 || opcode == 1 || opcode == 2) {
+                if (command_cursor >= result.generic_matrix_commands.size()) break;
+                const int matrix = result.generic_matrix_commands[command_cursor++];
+                const int bytes = opcode == 0 ? 12 : (opcode == 1 ? 16 : 28);
+                int& source_cursor = constant ? constant_cursor : animated_cursor;
+                source_cursor += bytes;
+                if (opcode == 1 || opcode == 2)
+                    data_end_to_matrix[source_cursor] = matrix;
+            } else if (opcode == 12) {
+                if (command_cursor + 2 > result.generic_matrix_commands.size()) break;
+                command_cursor += 2;
+            } else {
+                break;
             }
+        }
+
+        std::vector<int> node_to_matrix(result.generic_nodes.size(), -1);
+        for (size_t node = 0; node < result.generic_nodes.size(); ++node) {
+            auto matrix = data_end_to_matrix.find(result.generic_nodes[node].data_offset);
+            if (matrix != data_end_to_matrix.end()) node_to_matrix[node] = matrix->second;
+        }
+        for (size_t node = 0; node < result.generic_nodes.size(); ++node) {
+            const int matrix = node_to_matrix[node];
+            if (matrix < 0 || matrix >= (int)result.generic_matrix_count) continue;
+            const auto& generic_node = result.generic_nodes[node];
+            if (!generic_node.name.empty()) result.bone_map[matrix] = generic_node.name;
+            const int parent_node = generic_node.parent_index;
+            const int parent_matrix = parent_node >= 0 &&
+                                      parent_node < (int)node_to_matrix.size()
+                ? node_to_matrix[parent_node] : -1;
+            result.parent_map[matrix] = parent_matrix;
         }
         return result;
     }
@@ -393,6 +614,14 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             uint32_t comp_type = comp_meta[comp_idx].type;
             int comp_block_start = block_base + block_offsets[bi];
             if (comp_block_start < 0 || (uint64_t)comp_block_start >= total_file_size) continue;
+            int comp_block_end = (bi + 1 < num_blocks)
+                ? block_base + block_offsets[bi + 1]
+                : default_pose_offsets_offs;
+            if (comp_block_end <= comp_block_start || (uint64_t)comp_block_end > total_file_size)
+                comp_block_end = (int)total_file_size;
+            cd.raw_skel_block_offset = (uint32_t)comp_block_start;
+            cd.raw_skel_block.assign(result.source_bytes.begin() + comp_block_start,
+                                     result.source_bytes.begin() + comp_block_end);
             f.seekg(comp_block_start);
             if (!f.good()) break;
 
@@ -422,17 +651,15 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 break;
             }
             case NalCompType::LegsFeet_Compressed: {
-                // pcskel.py reads 9 vec4s, flattens them, then consumes 9 bone indices.
-                // Reading only 8 vec3s shifts the bone table and corrupts every leg chain.
-                float flat[36] = {};
-                for (int i = 0; i < 36; ++i) f.read(reinterpret_cast<char*>(&flat[i]), 4);
+                // Engine object consumed by sub_5F6960: offsetLocs[8] followed
+                // immediately by 8 chain bone indices and one shared root.
+                // The older 9*vec4 interpretation over-read 48 bytes and moved
+                // the bone table into the next structure/padding region.
                 cd.offset_locs.resize(8);
-                for (int i = 0; i < 8; ++i) {
-                    cd.offset_locs[i] = {flat[i * 3 + 0], flat[i * 3 + 1], flat[i * 3 + 2]};
-                }
-                cd.bone_indices.resize(LegBone::COUNT);
+                for (int i = 0; i < 8; ++i) cd.offset_locs[i] = nal_read_vec3(f);
+                cd.bone_indices.resize(LegStdBone::COUNT);
                 for (int i = 0; i < 8; ++i) { int32_t v; f.read(reinterpret_cast<char*>(&v), 4); cd.bone_indices[i] = v; }
-                { int32_t v; f.read(reinterpret_cast<char*>(&v), 4); cd.bone_indices[LegBone::PELVIS] = v; cd.other_matrix_indices.push_back(v); }
+                { int32_t v; f.read(reinterpret_cast<char*>(&v), 4); cd.bone_indices[LegStdBone::ROOT] = v; cd.other_matrix_indices.push_back(v); }
                 break;
             }
             case NalCompType::ArmsHands_Compressed: {
@@ -474,31 +701,58 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 // offsetLocs[30](360) + boneIxs[30](120) + otherMatrixIxs[2](8)
                 cd.offset_locs.resize(30);
                 for (int i = 0; i < 30; ++i) cd.offset_locs[i] = nal_read_vec3(f);
+                std::array<int32_t, 32> serialized_bones{};
+                for (int i = 0; i < 32; ++i)
+                    f.read(reinterpret_cast<char*>(&serialized_bones[i]), 4);
                 cd.bone_indices.resize(FingerBone::COUNT);
-                for (int i = 0; i < 30; ++i) { int32_t v; f.read(reinterpret_cast<char*>(&v), 4); cd.bone_indices[i] = v; }
+                if (comp_type == NalCompType::FiveFinger_ReducedAngular) {
+                    // sub_5F9150 consumes the bone table as ten consecutive
+                    // three-bone chains but addresses pose/offset slots in the
+                    // base[10], middle[10], tip[10] order used by FingerBone.
+                    // Canonicalize only the table; serialized offsetLocs already
+                    // use pose-slot order.
+                    static constexpr int canonical_to_serialized[30] = {
+                         0,15, 3, 6, 9,12,18,21,24,27,
+                         1,16, 4, 7,10,13,19,22,25,28,
+                         2,17, 5, 8,11,14,20,23,26,29
+                    };
+                    for (int i = 0; i < 30; ++i)
+                        cd.bone_indices[i] = serialized_bones[canonical_to_serialized[i]];
+                } else {
+                    // Top2/Curl are already base/middle/tip ordered. Full
+                    // rotational is intentionally retained in its serialized
+                    // chain-major order because its pose mask is chain-major too.
+                    for (int i = 0; i < 30; ++i)
+                        cd.bone_indices[i] = serialized_bones[i];
+                }
                 for (int i = 30; i < FingerBone::COUNT; ++i) {
-                    int32_t v; f.read(reinterpret_cast<char*>(&v), 4);
-                    cd.bone_indices[i] = v;
-                    cd.other_matrix_indices.push_back(v);
+                    cd.bone_indices[i] = serialized_bones[i];
+                    cd.other_matrix_indices.push_back(serialized_bones[i]);
                 }
                 break;
             }
             case NalCompType::FakerootEntropyCompressed: {
-                // No per-skel data block typically; if present, skip
+                // The retail class has no per-skeleton payload. A block can
+                // only reach this case in a non-retail/invalid file; the raw
+                // bytes above remain preserved for diagnostics.
                 break;
             }
             case NalCompType::Tentacles: {
-                // Variable; skip for now
-                result.warnings.push_back("Tentacles per-skel data not fully parsed");
+                // Tentacles Compressed owns 15 scalar animation channels and
+                // a 15-float default pose, but no per-skeleton payload. The
+                // visible tentacle bones are described by ArbitraryPO.
+                if (!cd.raw_skel_block.empty())
+                    result.warnings.push_back("Unexpected Tentacles per-skeleton payload preserved as raw bytes");
                 break;
             }
             case NalCompType::ArbitraryPO: {
-                // ArbitraryPO header: boneCount(4) + unkCount(4) + unkCount2(4) + unkOffset(4)
-                //                    + startOffset(4) + startOffset2(4) + blockStart(4) + startOffset4(4)
-                uint32_t arb_header[8];
-                f.read(reinterpret_cast<char*>(arb_header), 32);
-                uint32_t bone_count = arb_header[0];
-                uint32_t block_start_off = arb_header[6];
+                // Exact runtime layout used by USM.exe sub_5F5E60:
+                // [0] node count, [1..3] metadata, [4] skeleton-quat offset,
+                // [5] skeleton-position offset, [6] 48-byte node-record offset,
+                // [7] uint32 evaluation-order offset. Zero offsets are null.
+                f.read(reinterpret_cast<char*>(cd.arb_header.data()), 32);
+                uint32_t bone_count = cd.arb_header[0];
+                uint32_t block_start_off = cd.arb_header[6];
                 if (bone_count > 200) break; // sanity check
 
                 f.seekg(comp_block_start + block_start_off);
@@ -517,6 +771,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     f.read(reinterpret_cast<char*>(&bpa), 2);
                     f.read(reinterpret_cast<char*>(&unk2), 4);
 
+                    cd.arb_nodes[ni].name_hash = nh;
                     cd.arb_nodes[ni].name = nn;
                     cd.arb_nodes[ni].quat_ix = qix;
                     cd.arb_nodes[ni].pos_ix = pix;
@@ -524,18 +779,60 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     cd.arb_nodes[ni].parent_matrix_ix = par_ix;
                     cd.arb_nodes[ni].is_quat_anim = bqa;
                     cd.arb_nodes[ni].is_pos_anim = bpa;
+                    cd.arb_nodes[ni].reserved = (uint32_t)unk2;
 
                     if (!nn.empty() && my_ix >= 0) {
                         result.bone_map[my_ix] = nn;
                         result.parent_map[my_ix] = par_ix;
                     }
                 }
+
+                // The builder selects skeleton constants only for channels whose
+                // per-node animation flag is clear. Infer their exact array sizes
+                // from the highest referenced indices, just as the record table does.
+                size_t skel_quat_count = 0;
+                size_t skel_pos_count = 0;
+                for (const auto& node : cd.arb_nodes) {
+                    if (!node.is_quat_anim) skel_quat_count = std::max(skel_quat_count, size_t(node.quat_ix) + 1);
+                    if (!node.is_pos_anim) skel_pos_count = std::max(skel_pos_count, size_t(node.pos_ix) + 1);
+                }
+                if (cd.arb_header[4] && skel_quat_count &&
+                    uint64_t(cd.arb_header[4]) + skel_quat_count * 16 <= cd.raw_skel_block.size()) {
+                    cd.arb_skel_quats = nal_unpack_quat_list(
+                        cd.raw_skel_block.data() + cd.arb_header[4], (int)skel_quat_count);
+                }
+                if (cd.arb_header[5] && skel_pos_count &&
+                    uint64_t(cd.arb_header[5]) + skel_pos_count * 12 <= cd.raw_skel_block.size()) {
+                    cd.arb_skel_positions.resize(skel_pos_count);
+                    for (size_t pi = 0; pi < skel_pos_count; ++pi)
+                        memcpy(cd.arb_skel_positions[pi].data(),
+                               cd.raw_skel_block.data() + cd.arb_header[5] + pi * 12, 12);
+                }
+
+                uint32_t order_off = cd.arb_header[7];
+                if (order_off && uint64_t(order_off) + uint64_t(bone_count) * 4 <= cd.raw_skel_block.size()) {
+                    cd.arb_eval_order.resize(bone_count);
+                    memcpy(cd.arb_eval_order.data(), cd.raw_skel_block.data() + order_off, bone_count * 4);
+                } else {
+                    cd.arb_eval_order.resize(bone_count);
+                    for (uint32_t oi = 0; oi < bone_count; ++oi) cd.arb_eval_order[oi] = oi;
+                }
+
+                size_t parsed_bytes = std::max<size_t>(32, size_t(block_start_off) + size_t(bone_count) * 48);
+                if (cd.arb_header[4]) parsed_bytes = std::max(parsed_bytes, size_t(cd.arb_header[4]) + skel_quat_count * 16);
+                if (cd.arb_header[5]) parsed_bytes = std::max(parsed_bytes, size_t(cd.arb_header[5]) + skel_pos_count * 12);
+                if (order_off) parsed_bytes = std::max(parsed_bytes, size_t(order_off) + size_t(bone_count) * 4);
+                f.seekg(comp_block_start + (std::streamoff)std::min(parsed_bytes, cd.raw_skel_block.size()));
                 break;
             }
             default:
                 result.warnings.push_back("Unhandled per-skel type: " + nal_comp_type_name(comp_type));
                 break;
             }
+            std::streamoff parsed_end = f.tellg();
+            if (parsed_end >= comp_block_start)
+                cd.parsed_skel_bytes = (uint32_t)std::min<std::streamoff>(
+                    parsed_end - comp_block_start, (std::streamoff)cd.raw_skel_block.size());
             } catch (...) {
                 result.warnings.push_back("Exception parsing per-skel block " + std::to_string(bi));
             }
@@ -556,7 +853,8 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             f.read(reinterpret_cast<char*>(pose_offsets.data()), num_pose_blocks * 4);
 
             int total_pose_bytes = pose_data_size;
-            uint32_t max_pose_offset = pose_offsets.empty() ? 0 : pose_offsets.back();
+            uint32_t max_pose_offset = pose_offsets.empty() ? 0 :
+                *std::max_element(pose_offsets.begin(), pose_offsets.end());
             if (total_pose_bytes <= 0 || max_pose_offset > (uint32_t)total_pose_bytes)
                 total_pose_bytes = (int)max_pose_offset;
             size_t max_available = total_file_size - (size_t)default_pose_offsets_offs;
@@ -573,18 +871,28 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 if (pi < 0 || pi >= num_pose_blocks) continue;
 
                 uint32_t start = pose_offsets[pi];
-                uint32_t end = (pi + 1 < num_pose_blocks) ? pose_offsets[pi + 1] : total_pose_bytes;
+                // The offset table is indexed by component pose, not sorted by
+                // physical location.  Carnage stores Tentacles (1168) after
+                // ArbitraryPO (576), so using pose_offsets[pi+1] merges blocks.
+                // A block ends at the smallest greater physical offset.
+                uint32_t end = (uint32_t)total_pose_bytes;
+                for (uint32_t candidate : pose_offsets)
+                    if (candidate > start && candidate < end) end = candidate;
                 if (end <= start || end > (uint32_t)total_pose_bytes) continue;
 
                 const uint8_t* pdata = pose_blob.data() + start;
                 size_t psize = end - start;
                 uint32_t ct = comp_meta[ci].type;
                 auto& dp = result.components[ci].default_pose;
+                result.components[ci].raw_default_pose_offset =
+                    (uint32_t)default_pose_offsets_offs + start;
+                result.components[ci].raw_default_pose_block.assign(pdata, pdata + psize);
 
                 if ((ct == NalCompType::TorsoHead_TwoNeck || ct == NalCompType::TorsoHead_OneNeck) && psize >= 112) {
                     dp.kind = "torso_pose";
                     dp.quats = nal_unpack_quat_list(pdata, 6);
                     memcpy(dp.pelvis_pos.data(), pdata + 96, 12);
+                    result.components[ci].parsed_default_pose_bytes = 108;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::LegsFeet_IK && psize >= 96) {
@@ -593,17 +901,20 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     memcpy(dp.foot_pos[0].data(), pdata + 64, 12);
                     memcpy(dp.foot_pos[1].data(), pdata + 76, 12);
                     memcpy(dp.knee_spin, pdata + 88, 8);
+                    result.components[ci].parsed_default_pose_bytes = 96;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::LegsFeet_Compressed && psize >= 64) {
                     dp.kind = "legs_pose";
                     int nq = (psize >= 128) ? 8 : 4;
                     dp.quats = nal_unpack_quat_list(pdata, nq);
+                    result.components[ci].parsed_default_pose_bytes = nq * 16;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::ArmsHands_Compressed && psize >= 128) {
                     dp.kind = "arms_pose";
                     dp.quats = nal_unpack_quat_list(pdata, 8);
+                    result.components[ci].parsed_default_pose_bytes = 128;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::ArmsHands_IK && psize >= 96) {
@@ -613,6 +924,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     memcpy(dp.hand_pos[0].data(), pdata + 64, 12);
                     memcpy(dp.hand_pos[1].data(), pdata + 76, 12);
                     memcpy(dp.elbow_spin, pdata + 88, 8);
+                    result.components[ci].parsed_default_pose_bytes = 96;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::FakerootEntropyCompressed && psize >= 48) {
@@ -624,6 +936,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     dp.floor_offset = pos_floor[3];
                     memcpy(&dp.signal_start, pdata + 32, 4);
                     memcpy(&dp.num_signals, pdata + 36, 4);
+                    result.components[ci].parsed_default_pose_bytes = 40;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::FiveFinger_Top2KnuckleCurl && psize >= 192) {
@@ -638,11 +951,23 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     memcpy(other, pdata + 144, 40);
                     dp.other_tracks.assign(other, other + 10);
                     memcpy(&dp.available_tracks, pdata + 184, 4);
+                    result.components[ci].parsed_default_pose_bytes = 188;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::FiveFinger_ReducedAngular && psize >= 176) {
                     dp.kind = "fing5_reduced_pose";
-                    dp.quats = nal_unpack_quat_list(pdata, 11);
+                    // Exact layout used by sub_5F9150:
+                    // quat[2], baseZ[8], baseY[8], mid[10], tip[10].
+                    dp.quats = nal_unpack_quat_list(pdata, 2);
+                    dp.base_z_tracks.resize(8);
+                    dp.base_y_tracks.resize(8);
+                    dp.hinge_tracks.resize(10);
+                    dp.other_tracks.resize(10);
+                    memcpy(dp.base_z_tracks.data(), pdata + 32, 32);
+                    memcpy(dp.base_y_tracks.data(), pdata + 64, 32);
+                    memcpy(dp.hinge_tracks.data(), pdata + 96, 40);
+                    memcpy(dp.other_tracks.data(), pdata + 136, 40);
+                    result.components[ci].parsed_default_pose_bytes = 176;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::FiveFinger_IndividualCurl && psize >= 112) {
@@ -651,20 +976,26 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     float curls[10];
                     memcpy(curls, pdata + 64, 40);
                     dp.finger_curl.assign(curls, curls + 10);
+                    result.components[ci].parsed_default_pose_bytes = 104;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::FiveFinger_FullRotational && psize >= 480) {
                     dp.kind = "fing5_full_pose";
                     dp.quats = nal_unpack_quat_list(pdata, 30);
+                    result.components[ci].parsed_default_pose_bytes = 480;
                     dp.valid = true;
                 }
                 else if (ct == NalCompType::ArbitraryPO && psize >= 16) {
                     dp.kind = "arbitrary_po_pose";
-                    uint32_t qc, tc;
-                    memcpy(&qc, pdata, 4);
-                    memcpy(&tc, pdata + 4, 4);
+                    // The engine consumes only [0] quaternion count and [1]
+                    // total channel count. [2..3] are reserved/stale storage
+                    // in retail files and are retained byte-for-byte.
+                    memcpy(dp.arbitrary_header.data(), pdata, 16);
+                    uint32_t qc = dp.arbitrary_header[0];
+                    uint32_t tc = dp.arbitrary_header[1];
                     dp.quat_count = qc;
-                    int pc = tc - qc;
+                    if (tc < qc) continue;
+                    int pc = (int)(tc - qc);
                     dp.position_count = pc;
                     size_t expected = 16 + qc * 16 + pc * 12;
                     if (expected <= psize) {
@@ -673,6 +1004,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                         dp.positions.resize(pc);
                         for (int i = 0; i < pc; ++i)
                             memcpy(dp.positions[i].data(), pdata + pos_off + i * 12, 12);
+                        result.components[ci].parsed_default_pose_bytes = (uint32_t)expected;
                         dp.valid = true;
                     }
                 }
@@ -680,6 +1012,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     dp.kind = "tentacles_pose";
                     dp.tentacle_values.resize(15);
                     memcpy(dp.tentacle_values.data(), pdata, 60);
+                    result.components[ci].parsed_default_pose_bytes = 60;
                     dp.valid = true;
                 }
             }
@@ -728,10 +1061,11 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         if (cd.type_id == NalCompType::TorsoHead_TwoNeck && (int)cd.bone_indices.size() > TorsoBone::NECK_AUX) {
             int neck_aux = cd.bone_indices[TorsoBone::NECK_AUX];
             set_parent(neck_aux, sp2);
-            set_parent(neck, neck_aux);
-        } else {
-            set_parent(neck, sp2);
         }
+        // The animated neck and empty auxiliary neck are siblings.  Verified
+        // in USM.exe sub_5F6610: the five-pose chain is parented first, then
+        // neck_aux is independently multiplied by spine2.
+        set_parent(neck, sp2);
         set_parent(head, neck);
     }
 
@@ -742,11 +1076,20 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         if (!is_legs_ik && !is_legs) continue;
         if ((int)cd.bone_indices.size() < 8) continue;
 
-        int l_toe = cd.bone_indices[LegBone::L_TOE], r_toe = cd.bone_indices[LegBone::R_TOE];
-        int l_foot = cd.bone_indices[LegBone::L_FOOT], r_foot = cd.bone_indices[LegBone::R_FOOT];
-        int l_thigh = cd.bone_indices[LegBone::L_THIGH], l_calf = cd.bone_indices[LegBone::L_CALF];
-        int r_thigh = cd.bone_indices[LegBone::R_THIGH], r_calf = cd.bone_indices[LegBone::R_CALF];
-        int pelvis = ((int)cd.bone_indices.size() > 8) ? cd.bone_indices[LegBone::PELVIS] : -1;
+        int l_toe, r_toe, l_foot, r_foot, l_thigh, l_calf, r_thigh, r_calf, pelvis;
+        if (is_legs_ik) {
+            l_toe = cd.bone_indices[LegBone::L_TOE]; r_toe = cd.bone_indices[LegBone::R_TOE];
+            l_foot = cd.bone_indices[LegBone::L_FOOT]; r_foot = cd.bone_indices[LegBone::R_FOOT];
+            l_thigh = cd.bone_indices[LegBone::L_THIGH]; l_calf = cd.bone_indices[LegBone::L_CALF];
+            r_thigh = cd.bone_indices[LegBone::R_THIGH]; r_calf = cd.bone_indices[LegBone::R_CALF];
+            pelvis = cd.bone_indices[LegBone::PELVIS];
+        } else {
+            l_thigh = cd.bone_indices[LegStdBone::L_THIGH]; l_calf = cd.bone_indices[LegStdBone::L_CALF];
+            l_foot = cd.bone_indices[LegStdBone::L_FOOT]; l_toe = cd.bone_indices[LegStdBone::L_TOE];
+            r_thigh = cd.bone_indices[LegStdBone::R_THIGH]; r_calf = cd.bone_indices[LegStdBone::R_CALF];
+            r_foot = cd.bone_indices[LegStdBone::R_FOOT]; r_toe = cd.bone_indices[LegStdBone::R_TOE];
+            pelvis = cd.bone_indices[LegStdBone::ROOT];
+        }
 
         add_bone(l_toe, "l_toe"); add_bone(r_toe, "r_toe");
         add_bone(l_foot, "l_foot"); add_bone(r_foot, "r_foot");
@@ -846,9 +1189,35 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             "r_finger_12", "r_finger_22", "r_finger_32", "r_finger_42",
             "l_hand_parent", "r_hand_parent"
         };
-        for (int role = 0; role < FingerBone::COUNT; ++role) {
-            add_bone(bi(role), finger_names[role]);
+        if (cd.type_id == NalCompType::FiveFinger_FullRotational) {
+            // sub_5F9430 stores both offsets and bone indices chain-major:
+            // five left triples followed by five right triples.
+            static const char* chain_major_names[30] = {
+                "l_finger_0", "l_finger_01", "l_finger_02",
+                "l_finger_1", "l_finger_11", "l_finger_12",
+                "l_finger_2", "l_finger_21", "l_finger_22",
+                "l_finger_3", "l_finger_31", "l_finger_32",
+                "l_finger_4", "l_finger_41", "l_finger_42",
+                "r_finger_0", "r_finger_01", "r_finger_02",
+                "r_finger_1", "r_finger_11", "r_finger_12",
+                "r_finger_2", "r_finger_21", "r_finger_22",
+                "r_finger_3", "r_finger_31", "r_finger_32",
+                "r_finger_4", "r_finger_41", "r_finger_42"
+            };
+            for (int i = 0; i < 30; ++i) add_bone(cd.bone_indices[i], chain_major_names[i]);
+            add_bone(cd.bone_indices[30], finger_names[30]);
+            add_bone(cd.bone_indices[31], finger_names[31]);
+            for (int chain = 0; chain < 10; ++chain) {
+                int first = chain * 3;
+                set_parent(cd.bone_indices[first + 1], cd.bone_indices[first]);
+                set_parent(cd.bone_indices[first + 2], cd.bone_indices[first + 1]);
+                set_parent(cd.bone_indices[first], cd.bone_indices[chain < 5 ? 30 : 31]);
+            }
+            continue;
         }
+
+        for (int role = 0; role < FingerBone::COUNT; ++role)
+            add_bone(bi(role), finger_names[role]);
 
         // Left thumb: 0→01→02, Left fingers: N→N1→N2
         std::vector<std::pair<int,int>> chains = {

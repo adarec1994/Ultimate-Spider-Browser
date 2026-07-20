@@ -812,60 +812,8 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
                     // Runtime mesh ordering differs from TOC hash order
 
-                    // Pre-scan: detect world-space PCMs (vertex bounds > 50 units)
-                    std::set<uint32_t> worldSpacePcms;
-                    for (int pi = 0; pi < numPcm15; pi++) {
-                        uint32_t ph = pcm15Hashes[pi];
-                        if (!pcmDataCache.count(ph)) {
-                            if (!pcmIndex.count(ph)) continue;
-                            const auto& ref = pcmIndex[ph];
-                            std::ifstream pcmFile(ref.packPath, std::ios::binary);
-                            if (!pcmFile.is_open()) continue;
-                            pcmDataCache[ph].resize(ref.size);
-                            pcmFile.seekg(ref.absOffset);
-                            pcmFile.read((char*)pcmDataCache[ph].data(), ref.size);
-                            pcmFile.close();
-                        }
-                        const auto& pcd = pcmDataCache[ph];
-                        if (pcd.size() < 80 || *(uint32_t*)pcd.data() != 0x204D4350) continue;
-                        uint32_t num2 = *(uint32_t*)&pcd[8];
-                        uint32_t ofs2 = *(uint32_t*)&pcd[12];
-                        if (num2 > 500 || ofs2 >= pcd.size()) continue;
-                        float mnX=1e30f, mxX=-1e30f, mnZ=1e30f, mxZ=-1e30f;
-                        bool chk = false;
-                        for (uint32_t ei = 0; ei < num2 && ei < 50; ei++) {
-                            uint32_t eoff = ofs2 + ei * 12;
-                            if (eoff + 12 > pcd.size()) break;
-                            if (*(uint16_t*)&pcd[eoff+2] != 512) continue;
-                            uint32_t eofs = *(uint32_t*)&pcd[eoff+4];
-                            if (eofs+16 > pcd.size()) continue;
-                            uint32_t nSm = *(uint32_t*)&pcd[eofs+8];
-                            uint32_t smO = *(uint32_t*)&pcd[eofs+12];
-                            if (nSm > 256 || smO >= pcd.size()) continue;
-                            for (uint32_t si = 0; si < nSm && si < 4; si++) {
-                                uint32_t roff = smO + si*8;
-                                if (roff+8 > pcd.size()) break;
-                                uint32_t smOff = *(uint32_t*)&pcd[roff+4];
-                                if (smOff+80 > pcd.size()) continue;
-                                uint32_t vn = *(uint32_t*)&pcd[smOff+56];
-                                uint32_t vo = *(uint32_t*)&pcd[smOff+60];
-                                uint32_t st = *(uint32_t*)&pcd[smOff+72];
-                                if (vn > 100000 || vo >= pcd.size() || st == 0) continue;
-                                for (uint32_t vi = 0; vi < std::min(vn,100u); vi++) {
-                                    uint32_t voff = vo+vi*st;
-                                    if (voff+12 > pcd.size()) break;
-                                    float vx = *(float*)&pcd[voff], vz = *(float*)&pcd[voff+8];
-                                    mnX=std::min(mnX,vx); mxX=std::max(mxX,vx);
-                                    mnZ=std::min(mnZ,vz); mxZ=std::max(mxZ,vz);
-                                    chk = true;
-                                }
-                                break;
-                            }
-                            break;
-                        }
-                        if (chk && ((mxX-mnX) > 50.0f || (mxZ-mnZ) > 50.0f))
-                            worldSpacePcms.insert(ph);
-                    }
+                    // Mesh width does not imply world-space data. IG park pieces such
+                    // as ig_col_park/ig_gate are wide local meshes with real records.
 
                     int placedFromRecords = 0;
                     for (int ri = 0; ri < recCount; ri++) {
@@ -884,9 +832,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
                         // Non-renderable meshes (collision, triggers, placeholders)
                         // are now loaded and marked debug-transparent in
                         // AddMeshFromData; no longer skipped here.
-                        // World-space PCMs loaded once below, not per-record
-                        if (worldSpacePcms.count(pcmH)) continue;
-
                         if (!pcmDataCache.count(pcmH)) {
                             const auto& ref = pcmIndex[pcmH];
                             std::ifstream pcmFile(ref.packPath, std::ios::binary);
@@ -926,47 +871,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
                     (void)placedFromRecords;
 
-                    // Load world-space PCMs once at computed centroid from their placement records
-                    for (int pi = 0; pi < numPcm15; pi++) {
-                        uint32_t ph = pcm15Hashes[pi];
-                        if (zoneBaseHashes.count(ph)) continue;
-                        if (!pcmIndex.count(ph)) continue;
-                        if (!worldSpacePcms.count(ph)) continue;
-                        std::string pn = dictionary.count(ph) ? StrToLower(dictionary[ph]) : "";
-                        // Non-renderable types load as debug-transparent now.
-                        // Compute centroid from placement records
-                        float cx = 0, cy = 0, cz = 0;
-                        int ccount = 0;
-                        for (int ri2 = 0; ri2 < recCount; ri2++) {
-                            size_t ro2 = recStart + ri2 * 0x20;
-                            uint16_t rf14; memcpy(&rf14, &blockData[ro2 + 20], 2);
-                            int ridx = DecodePlacementPcmIndex(rf14, numPcm15);
-                            if (ridx < 0 || ridx >= numPcm15) continue;
-                            { // use ALL records for zone center
-                                float rx, ry, rz;
-                                memcpy(&rx, &blockData[ro2 + 8], 4);
-                                memcpy(&ry, &blockData[ro2 + 12], 4);
-                                memcpy(&rz, &blockData[ro2 + 16], 4);
-                                cx += rx; cy += ry; cz += rz;
-                                ccount++;
-                            }
-                        }
-                        if (ccount > 0) { cx /= ccount; cz /= ccount; } cy = 0.0f;
-                        float mat[16] = {
-                            1, 0, 0, 0,
-                            0, 1, 0, 0,
-                            0, 0, 1, 0,
-                            cx, cy, cz, 1
-                        };
-                        float combined[16];
-                        MultiplyMatrix4x4(mat, baseTransform, combined);
-                        const auto& pRef = pcmIndex[ph];
-                        RecordWorldMeshPlacementDebug("unique pcms", pn,
-                                                      pRef.packPath, pRef.absOffset,
-                                                      combined);
-                        AddMeshFromDataWithTransform(pcmDataCache[ph], pn, nullptr,
-                                                     pRef.packPath, pRef.absOffset, combined);
-                    }
                 }
             } // end placement records pass
         } // end instanceBlocks loop
@@ -1006,7 +910,6 @@ void SpiderManTool::LoadAllWorldGeometries() {
 
     pcmDataCache.clear();
 
-    LoadWorldOceanMesh(*this, baseTransform);
     LoadSkybox();
     BatchWorldMeshesByType();
     DumpWorldMeshDebugCategories(*this);

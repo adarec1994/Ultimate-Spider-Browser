@@ -60,7 +60,9 @@ static inline int nal_count(uint32_t mask, uint32_t filt, int weight = 1) {
 // ─── Track count / byte size per component (matches pcanim_codec.py) ───
 static inline int nal_get_num_tracks_for_comp(int comp_ix, uint32_t mask) {
     switch (comp_ix) {
-    case NalComp::ARBITRARY_PO: return 3 * nal_popcount(mask & 0xFFFF);
+    // USM.exe sub_5F3C00 consumes every enabled bit of the 32-bit mask.
+    // Each logical ArbitraryPO channel owns one XYZ/quaternion-vector triple.
+    case NalComp::ARBITRARY_PO: return 3 * nal_popcount(mask);
     case NalComp::GENERIC:      return 0;
     case NalComp::FAKEROOT_STD: { int t = 9; if (mask & 1) t += 6; if (mask & 2) t += 1; return t; }
     case NalComp::TORSO_HEAD:
@@ -75,14 +77,25 @@ static inline int nal_get_num_tracks_for_comp(int comp_ix, uint32_t mask) {
         return t;
     }
     case NalComp::TENTACLE:      return nal_popcount(mask & 0x7FFF);
+    // USM.exe sub_5FDA60: channels 0..1 are quaternion triples,
+    // 2..9 are scalar pairs, and 10..29 are single scalars.
     case NalComp::FING52:
-    case NalComp::FING5_REDUCED: return nal_popcount(mask & 0x3FFFFFFF) + nal_popcount(mask & 0x3FF) + nal_popcount(mask & 0x3);
-    case NalComp::FING5_CURL:    return 15 + nal_count(mask, 0x3FF, 2) + nal_count(mask, 0x3, 2);
-    case NalComp::FING5:         return 61 + nal_count(mask, 0x3FFFFFFF, 3);
+    case NalComp::FING5_REDUCED: return nal_count(mask, 0x3, 3) +
+                                           nal_count(mask, 0x3FC, 2) +
+                                           nal_count(mask, 0x3FFFFC00, 1);
+    // USM.exe sub_5FDB60: the first two channels contain a quaternion
+    // triple plus a curl scalar; the remaining eight contain scalar pairs.
+    case NalComp::FING5_CURL:    return nal_count(mask, 0x3, 4) +
+                                           nal_count(mask, 0x3FC, 2);
+    // USM.exe sub_5FDE30: every enabled StandardFingers5 channel is a quat.
+    case NalComp::FING5:         return nal_count(mask, 0x3FFFFFFF, 3);
     default: return 3 * nal_popcount(mask & 0x1F) + ((mask & 0x20) ? 6 : 0);
     }
 }
 
+// Runtime allocation/state footprint returned by the engine's per-component
+// sizing helpers.  This is deliberately not used as an entropy-stream extent;
+// serialized stream boundaries come from the PCANIM track-offset table.
 static inline int nal_get_num_bytes_for_comp(int comp_ix, uint32_t mask) {
     auto to_bytes = [](int tracks, int hdr = 0) { return tracks * 16 + hdr; };
     switch (comp_ix) {
@@ -95,14 +108,14 @@ static inline int nal_get_num_bytes_for_comp(int comp_ix, uint32_t mask) {
     case NalComp::ARMS:           return to_bytes(17 + nal_count(mask, 0xFF, 3));
     case NalComp::LEGS_IK:
     case NalComp::ARMS_IK:       return to_bytes(nal_count(mask, 0xF, 3) + nal_count(mask, 0xC, 4));
-    case NalComp::TENTACLE:      return to_bytes(nal_popcount(mask & 0x7FFF), 136);
-    case NalComp::FING52:
-    case NalComp::FING5_REDUCED: {
-        int t = nal_popcount(mask & 0x3FFFFFFF) + nal_popcount(mask & 0x3FF) + nal_popcount(mask & 0x3);
-        return to_bytes(t);
-    }
-    case NalComp::FING5_CURL:    return to_bytes(15 + nal_count(mask, 0x3FF, 2) + nal_count(mask, 0x3, 2));
-    case NalComp::FING5:         return to_bytes(61 + nal_count(mask, 0x3FFFFFFF, 3));
+    case NalComp::TENTACLE:      return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 136);
+    // The constants are the exact non-codec state sizes returned by the
+    // engine allocation-size functions: 25, 15, 23, and 61 NalTrackState
+    // records respectively (sub_5FDA40/sub_5FDB60/sub_5FDD50/sub_5FDE30).
+    case NalComp::FING52:        return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 25 * 16);
+    case NalComp::FING5_CURL:    return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 15 * 16);
+    case NalComp::FING5_REDUCED: return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 23 * 16);
+    case NalComp::FING5:         return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 61 * 16);
     default: return -1;
     }
 }
@@ -194,7 +207,9 @@ static inline DecResult dec_2a(NalBitStream& bs) {
 static inline DecResult dec_2b(NalBitStream& bs) {
     uint32_t c = bs.peek_bits(3);
     if ((c & 3) != 0) { int v = c & 3; bs.consume(2); return {1, v - 2}; }
-    bs.consume(3); return {1, (int)(c & 3) - 2};
+    // 3-bit branch keeps the FULL code (0 or 4), so the output here is -2 or +2.
+    // Verified against USM.exe sub_5ECCF0 (decoder table 0x937250, index 7/39).
+    bs.consume(3); return {1, (int)c - 2};
 }
 static inline DecResult dec_2c(NalBitStream& bs) {
     uint32_t c = bs.peek_bits(5);
@@ -633,15 +648,18 @@ static void integrate_linear(NalTrackState* t, const uint8_t* c, uint32_t mask, 
     }
 }
 
-static void integrate_arbitrary(NalTrackState* t, const uint8_t* c, uint32_t mask, int frame, NalBitStream& dec, float ts, bool sa) {
+static void integrate_arbitrary(NalTrackState* t, const uint8_t* c, int ntracks,
+                                int active_quat_channel_count, int frame,
+                                NalBitStream& dec, float ts, bool sa) {
     float sq = DEQUANT_SCALE * ts;
-    int ntracks = 3 * nal_popcount(mask & 0xFFFF);
+    // sub_5F2270 counts enabled quaternion and total channels from a
+    // variable-length mask; sub_5F3C00 then consumes their compact triples.
     nal_dequant_tracks(t, c, ntracks, dec, frame, sq, sa);
     if (frame == 0) return;
     int ti = 0;
-    for (int bit = 0; bit < 16; ++bit) {
-        if ((mask & (1 << bit)) == 0) continue;
-        if (bit < 12) {
+    const int active_channel_count = ntracks / 3;
+    for (int channel = 0; channel < active_channel_count; ++channel) {
+        if (channel < active_quat_channel_count) {
             if (frame == 1) nal_reconstruct_quat_initial(t, ti);
             else nal_apply_quat_delta_accum(t, ti);
         } else {
@@ -662,7 +680,7 @@ static void integrate_arms(NalTrackState* t, const uint8_t* c, uint32_t m, int f
 static void integrate_legs_ik(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa)       { integrate_ik(t,c,m,f,d,ts,sa); }
 static void integrate_arms_ik(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa)       { integrate_ik(t,c,m,f,d,ts,sa); }
 
-// Tentacles, fingers: all use linear integration
+// Tentacles use scalar tracks only (USM.exe sub_5FE7F0).
 static void integrate_tentacle(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
     float sq = DEQUANT_SCALE * ts;
     int nt = nal_popcount(m & 0x7FFF);
@@ -671,33 +689,83 @@ static void integrate_tentacle(NalTrackState* t, const uint8_t* c, uint32_t m, i
     for (int i = 0; i < nt; ++i) { if (f == 1) t[i].whole += t[i].delta; else { float dd = t[i].sec_delta + t[i].delta; t[i].delta = dd; t[i].whole += dd; } }
 }
 
-static void integrate_linear_tracks(NalTrackState* t, const uint8_t* c, int nt, int f, NalBitStream& d, float ts, bool sa) {
+static inline void integrate_scalar_tracks(NalTrackState* t, int first, int count, int f) {
+    for (int i = 0; i < count; ++i) {
+        auto& tr = t[first + i];
+        if (f == 1) tr.whole += tr.delta;
+        else {
+            float dd = tr.sec_delta + tr.delta;
+            tr.delta = dd;
+            tr.whole += dd;
+        }
+    }
+}
+
+// Exact mixed quaternion/scalar layout shared by Top2Knuckle and Reduced.
+// See sub_600940/sub_6010E0; bit_count is 20 and 30 respectively.
+static void integrate_finger_mixed(NalTrackState* t, const uint8_t* c, uint32_t m, int bit_count,
+                                   int f, NalBitStream& d, float ts, bool sa) {
+    // The allocation/count helper sub_5FDA60 always counts all 30 mask bits,
+    // even though the Top2 pose loop itself stops after bit 19.
+    int nt = nal_count(m, 0x3, 3) + nal_count(m, 0x3FC, 2) +
+             nal_count(m, 0x3FFFFC00, 1);
     float sq = DEQUANT_SCALE * ts;
     nal_dequant_tracks(t, c, nt, d, f, sq, sa);
     if (f == 0) return;
-    for (int i = 0; i < nt; ++i) { if (f == 1) t[i].whole += t[i].delta; else { float dd = t[i].sec_delta + t[i].delta; t[i].delta = dd; t[i].whole += dd; } }
+    int ti = 0;
+    for (int bit = 0; bit < bit_count; ++bit) {
+        if ((m & (1u << bit)) == 0) continue;
+        if (bit < 2) {
+            if (f == 1) nal_reconstruct_quat_initial(t, ti);
+            else nal_apply_quat_delta_accum(t, ti);
+            ti += 3;
+        } else {
+            int scalars = (bit < 10) ? 2 : 1;
+            integrate_scalar_tracks(t, ti, scalars, f);
+            ti += scalars;
+        }
+    }
 }
 
 static void integrate_fing52(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
-    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING52, m), f, d, ts, sa);
+    integrate_finger_mixed(t, c, m, 20, f, d, ts, sa);
 }
 
 static void integrate_fing5_curl(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
-    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING5_CURL, m), f, d, ts, sa);
+    const int nt = nal_get_num_tracks_for_comp(NalComp::FING5_CURL, m);
+    float sq = DEQUANT_SCALE * ts;
+    nal_dequant_tracks(t, c, nt, d, f, sq, sa);
+    if (f == 0) return;
+    int ti = 0;
+    for (int bit = 0; bit < 10; ++bit) {
+        if ((m & (1u << bit)) == 0) continue;
+        if (bit < 2) {
+            if (f == 1) nal_reconstruct_quat_initial(t, ti);
+            else nal_apply_quat_delta_accum(t, ti);
+            ti += 3;
+            integrate_scalar_tracks(t, ti, 1, f);
+            ++ti;
+        } else {
+            integrate_scalar_tracks(t, ti, 2, f);
+            ti += 2;
+        }
+    }
 }
 
 static void integrate_fing5_reduced(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
-    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING5_REDUCED, m), f, d, ts, sa);
+    integrate_finger_mixed(t, c, m, 30, f, d, ts, sa);
 }
 
 static void integrate_fing5(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
-    integrate_linear_tracks(t, c, nal_get_num_tracks_for_comp(NalComp::FING5, m), f, d, ts, sa);
+    integrate_quat_masked(t, c, m, f, d, ts, sa, 30);
 }
 
 // ─── Integrator dispatch ───
 static inline Integrator nal_get_integrator(int comp_ix) {
     switch (comp_ix) {
-    case NalComp::ARBITRARY_PO:   return integrate_arbitrary;
+    // ArbitraryPO needs its pose-header quaternion count and is dispatched
+    // explicitly by nal_decode_component_frames.
+    case NalComp::ARBITRARY_PO:   return integrate_noop;
     case NalComp::GENERIC:        return integrate_noop;
     case NalComp::FAKEROOT_STD:   return integrate_fakeroot;
     case NalComp::TORSO_HEAD:
@@ -727,7 +795,8 @@ static inline NalDecodedFrames nal_decode_component_frames(
     uint32_t mask,
     int frame_count,
     float current_time,
-    bool is_scene_anim)
+    bool is_scene_anim,
+    int arbitrary_quat_channel_count = 12)
 {
     NalDecodedFrames result;
     if (frame_count <= 0) return result;
@@ -740,7 +809,12 @@ static inline NalDecodedFrames nal_decode_component_frames(
     NalBitStream dec(encoded_data.data(), encoded_data.size());
 
     for (int frame = 0; frame < frame_count; ++frame) {
-        integrator(tracks.data(), codec_ixs.data(), mask, frame, dec, current_time, is_scene_anim);
+        if (comp_ix == NalComp::ARBITRARY_PO)
+            integrate_arbitrary(tracks.data(), codec_ixs.data(), ntracks,
+                                arbitrary_quat_channel_count, frame, dec,
+                                current_time, is_scene_anim);
+        else
+            integrator(tracks.data(), codec_ixs.data(), mask, frame, dec, current_time, is_scene_anim);
 
         auto& fv = result.frames[frame];
         fv.resize(ntracks);

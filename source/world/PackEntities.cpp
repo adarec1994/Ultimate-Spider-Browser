@@ -597,77 +597,25 @@
 
                 // Runtime mesh ordering differs from TOC hash order
 
-                // Count per-mesh placements
-                std::map<int, int> meshPlaceCounts;
-                std::map<int, std::string> meshSkipReason;
-
-                // Pre-scan: detect world-space PCMs (vertex bounds > 50 units)
-                // These are baked geometry that should load once at identity, not per-record
-                std::set<uint32_t> worldSpacePcms;
-                for (int pi = 0; pi < numPcm15; pi++) {
-                    uint32_t ph = pcm15Hashes[pi];
-                    if (!pcmCache.count(ph)) continue;
-                    const auto& pcd = pcmCache[ph];
-                    if (pcd.size() < 80 || *(uint32_t*)pcd.data() != 0x204D4350) continue;
-                    uint32_t num = *(uint32_t*)&pcd[8];
-                    uint32_t ofs = *(uint32_t*)&pcd[12];
-                    if (num > 500 || ofs >= pcd.size()) continue;
-                    float minX=1e30f, maxX=-1e30f, minZ=1e30f, maxZ=-1e30f;
-                    bool checked = false;
-                    for (uint32_t ei = 0; ei < num && ei < 50; ei++) {
-                        uint32_t eoff = ofs + ei * 12;
-                        if (eoff + 12 > pcd.size()) break;
-                        uint16_t etyp = *(uint16_t*)&pcd[eoff + 2];
-                        uint32_t eofs = *(uint32_t*)&pcd[eoff + 4];
-                        if (etyp != 512 || eofs + 16 > pcd.size()) continue;
-                        uint32_t nSm = *(uint32_t*)&pcd[eofs + 8];
-                        uint32_t smO = *(uint32_t*)&pcd[eofs + 12];
-                        if (nSm > 256 || smO >= pcd.size()) continue;
-                        for (uint32_t si = 0; si < nSm && si < 4; si++) {
-                            uint32_t roff = smO + si * 8;
-                            if (roff + 8 > pcd.size()) break;
-                            uint32_t smOff = *(uint32_t*)&pcd[roff + 4];
-                            if (smOff + 80 > pcd.size()) continue;
-                            uint32_t vn = *(uint32_t*)&pcd[smOff + 56];
-                            uint32_t vo = *(uint32_t*)&pcd[smOff + 60];
-                            uint32_t st = *(uint32_t*)&pcd[smOff + 72];
-                            if (vn > 100000 || vo >= pcd.size() || st == 0) continue;
-                            for (uint32_t vi = 0; vi < std::min(vn, 100u); vi++) {
-                                uint32_t voff = vo + vi * st;
-                                if (voff + 12 > pcd.size()) break;
-                                float vx = *(float*)&pcd[voff], vz = *(float*)&pcd[voff+8];
-                                minX = std::min(minX, vx); maxX = std::max(maxX, vx);
-                                minZ = std::min(minZ, vz); maxZ = std::max(maxZ, vz);
-                                checked = true;
-                            }
-                            break;
-                        }
-                        break;
-                    }
-                    if (checked && ((maxX - minX) > 50.0f || (maxZ - minZ) > 50.0f)) {
-                        worldSpacePcms.insert(ph);
-                    }
-                }
+                // Mesh width does not imply world-space data. Wide local meshes
+                // still need their placement records.
 
                 for (int ri = 0; ri < recCount; ri++) {
                     size_t ro = recStart + ri * 0x20;
                     uint16_t f14; memcpy(&f14, &blockData[ro + 20], 2);
 
                     int pcmIdx = DecodePlacementPcmIndex(f14, numPcm15);
-                    if (pcmIdx < 0 || pcmIdx >= numPcm15) { meshSkipReason[f14] = "out of range"; continue; }
+                    if (pcmIdx < 0 || pcmIdx >= numPcm15) continue;
 
                     uint32_t pcmH = pcm15Hashes[pcmIdx];
                     std::string pcmName = dictionary.count(pcmH) ? StrToLower(dictionary[pcmH]) : "";
 
-                    if (pcmH == zoneBaseHash || pcmH == largestPcmHash) { meshSkipReason[pcmIdx] = "zone base"; continue; }
-                    if (!pcmCache.count(pcmH)) { meshSkipReason[pcmIdx] = "no data"; continue; }
+                    if (pcmH == zoneBaseHash || pcmH == largestPcmHash) continue;
+                    if (!pcmCache.count(pcmH)) continue;
                     // Non-renderable and "col_" prefix meshes used to skip
                     // here; they now load as translucent debug overlays via
                     // RenderMesh::isDebugTransparent. Reason logging kept off
                     // for those rows since they'd otherwise flood the log.
-                    if (worldSpacePcms.count(pcmH)) { meshSkipReason[pcmIdx] = "world-space (load once)"; continue; }
-
-                    meshPlaceCounts[pcmIdx]++;
 
                     uint16_t angle; memcpy(&angle, &blockData[ro + 6], 2);
                     float x, y, z;
@@ -691,58 +639,6 @@
                     AddMeshFromDataWithTransform(pcmCache[pcmH], pcmName, nullptr,
                                                  packFilePath, 0, combined);
                     placedOrphans++;
-                }
-
-                // Load world-space PCMs once at identity + any unplaced ones
-                std::set<uint32_t> placedHashes;
-                for (auto& [idx, cnt] : meshPlaceCounts) placedHashes.insert(pcm15Hashes[idx]);
-                for (auto& [idx, reason] : meshSkipReason) {
-                    if (idx < numPcm15) placedHashes.insert(pcm15Hashes[idx]);
-                }
-                for (int pi = 0; pi < numPcm15; pi++) {
-                    uint32_t ph = pcm15Hashes[pi];
-                    if (ph == zoneBaseHash || ph == largestPcmHash) continue;
-                    if (!pcmCache.count(ph)) continue;
-                    std::string pn = dictionary.count(ph) ? StrToLower(dictionary[ph]) : "";
-                    // Non-renderable / col_-prefixed meshes load and render
-                    // as translucent debug overlays now.
-
-                    if (worldSpacePcms.count(ph)) {
-                        // Compute centroid of placement records that reference this mesh
-                        float cx = 0, cy = 0, cz = 0;
-                        int ccount = 0;
-                        for (int ri2 = 0; ri2 < recCount; ri2++) {
-                            size_t ro2 = recStart + ri2 * 0x20;
-                            uint16_t rf14; memcpy(&rf14, &blockData[ro2 + 20], 2);
-                            int ridx = DecodePlacementPcmIndex(rf14, numPcm15);
-                            if (ridx < 0 || ridx >= numPcm15) continue;
-                            { // use ALL records for zone center
-                                float rx, ry, rz;
-                                memcpy(&rx, &blockData[ro2 + 8], 4);
-                                memcpy(&ry, &blockData[ro2 + 12], 4);
-                                memcpy(&rz, &blockData[ro2 + 16], 4);
-                                cx += rx; cy += ry; cz += rz;
-                                ccount++;
-                            }
-                        }
-                        if (ccount > 0) { cx /= ccount; cz /= ccount; } cy = 0.0f;
-                        float mat[16] = {
-                            1, 0, 0, 0,
-                            0, 1, 0, 0,
-                            0, 0, 1, 0,
-                            cx, cy, cz, 1
-                        };
-                        float combined[16];
-                        MultiplyMatrix4x4(mat, baseTransform, combined);
-                        RecordWorldMeshPlacementDebug("unique pcms", pn,
-                                                      packFilePath, 0,
-                                                      combined);
-                        AddMeshFromDataWithTransform(pcmCache[ph], pn, nullptr,
-                                                     packFilePath, 0, combined);
-                        placedOrphans++;
-                    } else if (!placedHashes.count(ph)) {
-                        (void)pn;
-                    }
                 }
             }
         }

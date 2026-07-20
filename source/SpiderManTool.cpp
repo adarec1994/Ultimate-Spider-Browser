@@ -96,98 +96,52 @@ void SpiderManTool::BuildGlobalTextureIndexStep(int packIndex) {
         return;
     }
 
-    file.seekg(24);
-    uint32_t headerSize, dataOffset;
-    file.read((char*)&headerSize, 4);
-    file.read((char*)&dataOffset, 4);
+    // Parse only the directory region (everything before res_dir_mash_size);
+    // the typed texture_locations table replaces the old 0xE3E3E3E3 scan.
+    uint32_t mashSize = 0;
+    file.seekg(0x1C);
+    file.read((char*)&mashSize, 4);
+    if (!file.good() || mashSize < 0x40 || mashSize > fileSize) {
+        file.close();
+        return;
+    }
 
+    std::vector<uint8_t> dirBlob(mashSize);
+    file.seekg(0);
+    file.read((char*)dirBlob.data(), mashSize);
     if (!file.good()) {
         file.close();
         return;
     }
 
-
-    size_t start = 0;
-    const uint32_t magic = 0xE3E3E3E3;
-    size_t headerReadSize = std::min((size_t)200000, fileSize);
-    std::vector<uint8_t> tempHeader(headerReadSize);
-    file.seekg(0);
-    file.read((char*)tempHeader.data(), headerReadSize);
-
-    if (!file.good() && !file.eof()) {
+    PackDirectory dir = PackDirectory::Parse(dirBlob);
+    if (!dir.valid) {
         file.close();
         return;
     }
 
-    for (size_t i = 0; i + 4 <= tempHeader.size(); i++) {
-        if (*(uint32_t*)&tempHeader[i] == magic) {
-            for (size_t j = i + 4; j < i + 1000 && j + 4 <= tempHeader.size(); j++) {
-                if (*(uint32_t*)&tempHeader[j] == magic) {
-                    start = j + 4;
-                    break;
-                }
+    for (const auto& t : dir.textures) {
+        if (t.size <= 4 || (size_t)t.offset + 4 > fileSize) continue;
+
+        // Confirm it's a DDS (MPAL/IFL textures share the table).
+        file.seekg(t.offset);
+        uint32_t sig = 0;
+        file.read((char*)&sig, 4);
+        if (!file.good() || sig != 0x20534444) { file.clear(); continue; }
+
+        TextureLocation loc;
+        loc.packPath = packPath.string();
+        loc.offset = t.offset;
+        loc.size = t.size;
+
+        globalTextureIndex[t.nameHash] = loc;
+
+        if (dictionary.count(t.nameHash)) {
+            std::string name = StrToLower(dictionary[t.nameHash]);
+            globalTextureNameIndex[name] = loc;
+            if (name.size() > 4 && name.substr(name.size() - 4) == ".dds") {
+                globalTextureNameIndex[name.substr(0, name.size() - 4)] = loc;
             }
-            break;
-        }
-    }
-
-    if (start == 0) {
-        file.close();
-        return;
-    }
-
-
-    file.clear();
-    file.seekg(start);
-
-    while (file.good()) {
-        uint32_t hash, type, offset, size;
-        file.read((char*)&hash, 4);
-        file.read((char*)&type, 4);
-        file.read((char*)&offset, 4);
-        file.read((char*)&size, 4);
-
-        if (!file.good()) break;
-        if (type >= 0x1000 || type == 0x0000) break;
-
-        if (size > 4) {
-            size_t filePos = file.tellg();
-            uint32_t absOffset = dataOffset + offset;
-
-
-            if (absOffset + 4 > fileSize) {
-                file.seekg(filePos);
-                continue;
-            }
-
-
-            file.seekg(absOffset);
-            uint32_t sig = 0;
-            file.read((char*)&sig, 4);
-
-            if (file.good() && sig == 0x20534444) {
-                TextureLocation loc;
-                loc.packPath = packPath.string();
-                loc.offset = absOffset;
-                loc.size = size;
-
-
-                globalTextureIndex[hash] = loc;
-
-
-                if (dictionary.count(hash)) {
-                    std::string name = StrToLower(dictionary[hash]);
-                    globalTextureNameIndex[name] = loc;
-
-
-                    if (name.size() > 4 && name.substr(name.size() - 4) == ".dds") {
-                        globalTextureNameIndex[name.substr(0, name.size() - 4)] = loc;
-                    }
-                }
-            }
-
-            file.clear();
-            file.seekg(filePos);
         }
     }
 
@@ -338,94 +292,60 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
             continue;
         }
 
-        file.seekg(24);
-        uint32_t headerSize, dataOffset;
-        file.read((char*)&headerSize, 4);
-        file.read((char*)&dataOffset, 4);
+        // Directory-region parse (typed entries), replacing the old filler scan.
+        uint32_t mashSize = 0;
+        file.seekg(0x1C);
+        file.read((char*)&mashSize, 4);
+        if (!file.good() || mashSize < 0x40 || mashSize > fileSize) {
+            file.close();
+            continue;
+        }
 
+        std::vector<uint8_t> dirBlob(mashSize);
+        file.seekg(0);
+        file.read((char*)dirBlob.data(), mashSize);
         if (!file.good()) {
             file.close();
             continue;
         }
 
-
-        size_t start = 0;
-        const uint32_t magic = 0xE3E3E3E3;
-        size_t headerReadSize = std::min((size_t)200000, fileSize);
-        std::vector<uint8_t> tempHeader(headerReadSize);
-        file.seekg(0);
-        file.read((char*)tempHeader.data(), headerReadSize);
-
-        for (size_t i = 0; i + 4 <= tempHeader.size(); i++) {
-            if (*(uint32_t*)&tempHeader[i] == magic) {
-                for (size_t j = i + 4; j < i + 1000 && j + 4 <= tempHeader.size(); j++) {
-                    if (*(uint32_t*)&tempHeader[j] == magic) {
-                        start = j + 4;
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-
-        if (start == 0) {
+        PackDirectory dir = PackDirectory::Parse(dirBlob);
+        if (!dir.valid) {
             file.close();
             continue;
         }
 
-        file.clear();
-        file.seekg(start);
-
-        while (file.good()) {
-            uint32_t hash, type, offset, size;
-            file.read((char*)&hash, 4);
-            file.read((char*)&type, 4);
-            file.read((char*)&offset, 4);
-            file.read((char*)&size, 4);
-
-            if (!file.good()) break;
-            if (type >= 0x1000 || type == 0x0000) break;
-
-
+        for (const auto& r : dir.resources) {
             std::string fileName;
-            if (dictionary.count(hash)) {
-                fileName = dictionary[hash];
+            if (dictionary.count(r.hash)) {
+                fileName = dictionary[r.hash];
             } else {
                 std::stringstream ss;
-                ss << "Unknown_" << std::hex << hash;
+                ss << "Unknown_" << std::hex << r.hash;
                 fileName = ss.str();
             }
-
 
             bool isPcm = false;
             bool isDds = false;
 
-            if (size > 4) {
-                size_t filePos = file.tellg();
-                uint32_t absOffset = dataOffset + offset;
+            if (r.size > 4 && (size_t)r.offset + 4 <= fileSize) {
+                file.seekg(r.offset);
+                uint32_t sig = 0;
+                file.read((char*)&sig, 4);
 
-                if (absOffset + 4 <= fileSize) {
-                    file.seekg(absOffset);
-                    uint32_t sig = 0;
-                    file.read((char*)&sig, 4);
-
-                    if (file.good()) {
-                        if (sig == 0x204D4350) {
-                            isPcm = true;
-                            fileName += ".pcm";
-                        } else if (sig == 0x20534444) {
-                            isDds = true;
-                            fileName += ".dds";
-                        } else {
-                            fileName += ".dat";
-                        }
+                if (file.good()) {
+                    if (sig == 0x204D4350) {
+                        isPcm = true;
+                        fileName += ".pcm";
+                    } else if (sig == 0x20534444) {
+                        isDds = true;
+                        fileName += ".dds";
+                    } else {
+                        fileName += ".dat";
                     }
-
-                    file.clear();
-                    file.seekg(filePos);
                 }
+                file.clear();
             }
-
 
             std::string fileNameLower = StrToLower(fileName);
             if (fileNameLower.find(queryLower) != std::string::npos) {
@@ -433,9 +353,9 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
                 result.packIndex = packIdx;
                 result.packName = packPath.filename().string();
                 result.fileName = fileName;
-                result.hash = hash;
-                result.offset = dataOffset + offset;
-                result.size = size;
+                result.hash = r.hash;
+                result.offset = r.offset;
+                result.size = r.size;
                 result.isPcm = isPcm;
                 result.isDds = isDds;
                 globalSearchResults.push_back(result);
@@ -490,65 +410,54 @@ void SpiderManTool::LoadSkeletonForCurrentPack() {
     loadedSkeletonName.clear();
     skeletonCandidates.clear();
     activeSkeletonCandidate = -1;
-    if (pcPackData.empty() || entries.empty()) return;
+    if (pcPackData.empty()) return;
 
-    // Walk every non-PCM/non-DDS entry, try to parse it as a skeleton, and keep
-    // every one that produces a non-empty bone map / generic node list. We
-    // previously stopped at the first match -- that broke for packs with
-    // multiple skeletons because we'd attach the wrong one to whichever mesh
-    // the user opened. The candidate list is then ranked against the active
-    // mesh name in SelectSkeletonForMesh.
-    for (int i = 0; i < (int)entries.size(); i++) {
-        const auto& e = entries[i];
-        if (e.isPcm || e.isDds) continue;
-        if (e.size < 80 || e.offset + e.size > pcPackData.size()) continue;
+    // The pack directory lists every skeleton explicitly (skeleton_locations),
+    // including its tlresource name hash -- the same string_hash the anim
+    // file's skeleton table uses, so anims can be bound per-skeleton exactly
+    // like the engine does. No more signature sniffing.
+    struct SkelSource { uint32_t hash; uint32_t offset; uint32_t size; int entryIndex; };
+    std::vector<SkelSource> sources;
 
-        uint32_t cls, ver;
-        memcpy(&cls, &pcPackData[e.offset], 4);
-        memcpy(&ver, &pcPackData[e.offset + 4], 4);
-
-        bool looksLikeSkel = false;
-        if (ver == 0x10200) {
-            looksLikeSkel = true; // Generic skeleton
-        } else if (ver > 0 && ver < 0x100000) {
-            int printable = 0;
-            for (size_t j = e.offset + 12; j < e.offset + 40 && j < pcPackData.size(); j++) {
-                uint8_t c = pcPackData[j];
-                if (c == 0) break;
-                if (c >= 32 && c < 127) printable++;
+    if (currentDir.valid) {
+        for (const auto& s : currentDir.skeletons) {
+            if ((size_t)s.offset + s.size > pcPackData.size() || s.size < 80) continue;
+            int entryIndex = -1;
+            for (int i = 0; i < (int)entries.size(); i++) {
+                if (entries[i].offset == s.offset) { entryIndex = i; break; }
             }
-            if (printable >= 3) looksLikeSkel = true;
+            sources.push_back({s.nameHash, s.offset, s.size, entryIndex});
         }
+    }
 
-        if (!looksLikeSkel) continue;
-
+    for (const auto& src : sources) {
         std::string tempPath = "temp_skel.pcskel";
         {
             std::ofstream tmp(tempPath, std::ios::binary);
             if (!tmp.is_open()) continue;
-            tmp.write((const char*)&pcPackData[e.offset], e.size);
+            tmp.write((const char*)&pcPackData[src.offset], src.size);
         }
 
         auto skel = std::make_shared<NalSkeletonData>();
         try {
             *skel = ParseNalSkeleton(tempPath);
         } catch (const std::exception& ex) {
-            Log("Skeleton parse error in entry " + std::to_string(i) + ": " + ex.what());
+            Log("Skeleton parse error at offset " + std::to_string(src.offset) + ": " + ex.what());
             std::remove(tempPath.c_str());
             continue;
         } catch (...) {
-            Log("Skeleton parse error (unknown) in entry " + std::to_string(i));
+            Log("Skeleton parse error (unknown) at offset " + std::to_string(src.offset));
             std::remove(tempPath.c_str());
             continue;
         }
         std::remove(tempPath.c_str());
 
-        if (skel->bone_map.empty() && skel->generic_nodes.empty()) continue;
-
         SkeletonCandidate cand;
         cand.data = skel;
-        cand.name = skel->name;
-        cand.entryIndex = i;
+        cand.name = !skel->name.empty() ? skel->name
+                  : (dictionary.count(src.hash) ? dictionary[src.hash] : "");
+        cand.hash = src.hash;
+        cand.entryIndex = src.entryIndex;
         skeletonCandidates.push_back(cand);
     }
 
@@ -582,11 +491,41 @@ void SpiderManTool::ActivateSkeletonCandidate(int candidateIndex) {
     loadedSkeleton = cand.data;
     loadedSkeletonName = cand.name;
 
+    // A pack can contain animations for several rigs. When mesh selection
+    // changes the active skeleton, do not leave an animation from the previous
+    // rig selected: its component bone indices are only meaningful for the
+    // skeleton it was decoded against.
+    if (loadedAnimFile && !loadedAnimFile->animations.empty()) {
+        bool selectedMatches = selectedAnimIndex >= 0 &&
+            selectedAnimIndex < (int)loadedAnimFile->animations.size();
+        if (selectedMatches) {
+            const auto& selected = loadedAnimFile->animations[selectedAnimIndex];
+            selectedMatches = !selected.skeleton ||
+                nal_skeleton_pose_compatible(selected.skeleton.get(), loadedSkeleton.get());
+        }
+        if (!selectedMatches) {
+            selectedAnimIndex = -1;
+            for (int i = 0; i < (int)loadedAnimFile->animations.size(); ++i) {
+                const auto& candidate = loadedAnimFile->animations[i];
+                if (!candidate.skeleton ||
+                    nal_skeleton_pose_compatible(candidate.skeleton.get(), loadedSkeleton.get())) {
+                    selectedAnimIndex = i;
+                    break;
+                }
+            }
+            currentAnimFrame = 0;
+            animFrameFraction = 0.0f;
+            animPlaybackTime = 0.0f;
+            isAnimPlaying = selectedAnimIndex >= 0;
+        }
+    }
+
     Log("Active skeleton: " + (cand.name.empty() ? "<unnamed>" : cand.name) +
         " (" + std::to_string(cand.data->bone_map.size()) + " bones)");
 }
 
-void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName) {
+void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName, uint32_t meshHash) {
+    SelectBoneMappingForMesh(meshHash);
     if (skeletonCandidates.empty()) return;
     if (meshName.empty()) {
         ActivateSkeletonCandidate(0);
@@ -643,55 +582,234 @@ void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName) {
     ActivateSkeletonCandidate(bestIdx);
 }
 
+void SpiderManTool::BuildGlobalSkeletonIndex() {
+    if (globalSkeletonIndexBuilt) return;
+    globalSkeletonIndexBuilt = true;
+    globalSkeletonIndex.clear();
+
+    for (const auto& packPath : foundPacks) {
+        std::ifstream f(packPath, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) continue;
+        size_t fileSize = (size_t)f.tellg();
+        if (fileSize < 0x40) continue;
+
+        // Only the directory region is needed; resource data stays on disk.
+        uint32_t mashSize = 0;
+        f.seekg(0x1C);
+        f.read((char*)&mashSize, 4);
+        if (mashSize < 0x40 || mashSize > fileSize) continue;
+
+        std::vector<uint8_t> dirBlob(mashSize);
+        f.seekg(0);
+        f.read((char*)dirBlob.data(), mashSize);
+        if (!f.good()) continue;
+
+        PackDirectory dir = PackDirectory::Parse(dirBlob);
+        if (!dir.valid) continue;
+        for (const auto& s : dir.skeletons) {
+            if (!globalSkeletonIndex.count(s.nameHash)) {
+                globalSkeletonIndex[s.nameHash] = {packPath.string(), s.offset, s.size};
+            }
+        }
+    }
+    Log("Global skeleton index: " + std::to_string(globalSkeletonIndex.size()) + " skeletons across " +
+        std::to_string(foundPacks.size()) + " packs");
+}
+
+std::shared_ptr<NalSkeletonData> SpiderManTool::LoadSkeletonFromLocation(const SkeletonLocation& loc) {
+    std::ifstream f(loc.packPath, std::ios::binary);
+    if (!f.is_open()) return nullptr;
+    std::vector<uint8_t> data(loc.size);
+    f.seekg(loc.offset);
+    f.read((char*)data.data(), loc.size);
+    if (!f.good()) return nullptr;
+
+    std::string tempPath = "temp_skel.pcskel";
+    {
+        std::ofstream tmp(tempPath, std::ios::binary);
+        if (!tmp.is_open()) return nullptr;
+        tmp.write((const char*)data.data(), data.size());
+    }
+    auto skel = std::make_shared<NalSkeletonData>();
+    try {
+        *skel = ParseNalSkeleton(tempPath);
+    } catch (...) {
+        std::remove(tempPath.c_str());
+        return nullptr;
+    }
+    std::remove(tempPath.c_str());
+    return skel;
+}
+
 void SpiderManTool::LoadAnimationForCurrentPack() {
     loadedAnimFile.reset();
     loadedAnimName.clear();
     selectedAnimIndex = -1;
     currentAnimFrame = 0;
     isAnimPlaying = false;
-    if (pcPackData.empty() || entries.empty()) return;
+    if (pcPackData.empty()) return;
 
-    // Search for PCANIM container (signature 0x00010101)
-    for (int i = 0; i < (int)entries.size(); i++) {
-        const auto& e = entries[i];
+    // Every skeleton in the pack, so each anim can bind to its own skeleton
+    // via its skel_index (matched by tlresource hash, then name) -- exactly
+    // what the engine's nalLoadAnimFileInternal does. Decoding with the wrong
+    // skeleton's component-slot table reads garbage flags/masks, which is why
+    // animations used to break on packs with several skeletons.
+    std::vector<NalSkeletonRef> skelRefs;
+    for (const auto& cand : skeletonCandidates) {
+        skelRefs.push_back({cand.hash, cand.name, cand.data});
+        // The directory resource hash and the skeleton header's logical-name
+        // hash are normally equal, but older 0x10200 generic assets use the
+        // latter in PCANIM skeleton tables. Preserve both aliases.
+        if (cand.data && cand.data->name_hash != 0 && cand.data->name_hash != cand.hash)
+            skelRefs.push_back({cand.data->name_hash, cand.name, cand.data});
+    }
+
+    // Anim containers straight from the directory; fall back to a signature
+    // scan only if the directory was unparseable.
+    struct AnimSource { uint32_t offset; uint32_t size; };
+    std::vector<AnimSource> sources;
+    auto addAnimSource = [&](uint32_t offset, uint32_t size) {
+        for (const auto& existing : sources)
+            if (existing.offset == offset) return;
+        sources.push_back({offset, size});
+    };
+    if (currentDir.valid) {
+        for (const auto& a : currentDir.animFiles) {
+            if ((size_t)a.offset + a.size > pcPackData.size() || a.size < 64) continue;
+            addAnimSource(a.offset, a.size);
+        }
+    }
+
+    // Directory resource typing is advisory, while the container magic is
+    // authoritative. Always supplement the typed list with a complete magic
+    // scan; otherwise valid PCANIM resources disappear whenever an otherwise
+    // valid pack directory omits or misclassifies their type.
+    for (const auto& e : entries) {
         if (e.isPcm || e.isDds) continue;
-        if (e.size < 64 || e.offset + e.size > pcPackData.size()) continue;
-
-        uint32_t sig;
+        if (e.size < 64 || (size_t)e.offset + e.size > pcPackData.size()) continue;
+        uint32_t sig = 0;
         memcpy(&sig, &pcPackData[e.offset], 4);
-        if (sig != 0x00010101) continue; // NAL_ANIM_CONTAINER
+        if (sig == NAL_ANIM_CONTAINER) addAnimSource(e.offset, e.size);
+    }
 
+    // Pre-scan each container's skeleton table; pull skeletons that live in
+    // other packs (engine: global nalSkeletonDirectory) into the ref list.
+    for (const auto& src : sources) {
+        int32_t numSkels = 0;
+        if ((size_t)src.offset + 64 > pcPackData.size()) continue;
+        memcpy(&numSkels, &pcPackData[src.offset + 12], 4);
+        for (int i = 0; i < numSkels; i++) {
+            size_t entryOff = (size_t)src.offset + 64 + (size_t)i * 32;
+            if (entryOff + 32 > pcPackData.size()) break;
+            uint32_t skelHash;
+            memcpy(&skelHash, &pcPackData[entryOff + 8], 4);
+
+            bool haveIt = false;
+            for (const auto& ref : skelRefs) {
+                if (ref.hash == skelHash) { haveIt = true; break; }
+            }
+            if (haveIt) continue;
+
+            BuildGlobalSkeletonIndex();
+            auto it = globalSkeletonIndex.find(skelHash);
+            if (it == globalSkeletonIndex.end()) continue;
+            auto skel = LoadSkeletonFromLocation(it->second);
+            if (!skel) continue;
+            skelRefs.push_back({skelHash, skel->name, skel});
+
+            // External skeletons participate in rendering too, not only in
+            // animation decoding.  Packs such as CH_VWR_VENOM_VIEWER contain
+            // an animation and PCM but reference the Venom skeleton stored in
+            // CITY_ARENA.PCPACK.  Keeping that skeleton only in skelRefs left
+            // loadedSkeleton null, so the correctly decoded animation could
+            // never reach either the live skinning or GLB export path.
+            SkeletonCandidate cand;
+            cand.data = skel;
+            cand.name = skel->name;
+            cand.hash = skelHash;
+            cand.entryIndex = -1;
+            skeletonCandidates.push_back(cand);
+            if (!loadedSkeleton) {
+                ActivateSkeletonCandidate((int)skeletonCandidates.size() - 1);
+            }
+            Log("Loaded external skeleton '" + skel->name + "' from " +
+                fs::path(it->second.packPath).filename().string());
+        }
+    }
+
+    // Parse every container and merge into one list for the UI.
+    std::shared_ptr<NalAnimFile> merged;
+    for (const auto& src : sources) {
         std::string tempPath = "temp_anim.pcanim";
         {
             std::ofstream tmp(tempPath, std::ios::binary);
             if (!tmp.is_open()) continue;
-            tmp.write((const char*)&pcPackData[e.offset], e.size);
+            tmp.write((const char*)&pcPackData[src.offset], src.size);
         }
 
-        NalSkeletonData* skelPtr = loadedSkeleton ? loadedSkeleton.get() : nullptr;
-        auto animFile = std::make_shared<NalAnimFile>(ParseNalAnimation(tempPath, skelPtr, true));
+        NalSkeletonData* fallbackSkel = loadedSkeleton ? loadedSkeleton.get() : nullptr;
+        NalAnimFile animFile = ParseNalAnimation(tempPath, skelRefs, fallbackSkel, true);
         std::remove(tempPath.c_str());
 
-        if (!animFile->animations.empty()) {
-            loadedAnimFile = animFile;
-            loadedAnimName = animFile->name;
-            selectedAnimIndex = 0;
-            currentAnimFrame = 0;
-            animPlaybackTime = 0.0f;
-            isAnimPlaying = true;
-            Log("Loaded " + std::to_string(animFile->animations.size()) + " animations from: " + animFile->name);
+        // Some retail containers retain named directory/list nodes whose
+        // animation payload is the engine's 0xFFFFFFFF sentinel.  Preserve
+        // those bytes in ParseNalAnimation/source_bytes, but do not expose the
+        // node as a playable clip: treating -1 as a frame count produces a
+        // one-frame fallback with a nonsensical duration.  Boomerang's
+        // gss_webblindloop is one such node.
+        const size_t parsedAnimationCount = animFile.animations.size();
+        animFile.animations.erase(
+            std::remove_if(animFile.animations.begin(), animFile.animations.end(),
+                [](const NalAnimEntry& anim) { return anim.frame_count < 0; }),
+            animFile.animations.end());
+        const size_t sentinelCount = parsedAnimationCount - animFile.animations.size();
+        if (sentinelCount > 0) {
+            Log("Ignored " + std::to_string(sentinelCount) +
+                " empty animation sentinel(s) in " + animFile.name);
+        }
 
-            for (size_t a = 0; a < animFile->animations.size(); a++) {
-                const auto& anim = animFile->animations[a];
-                std::string info = "  [" + std::to_string(a) + "] " + anim.name;
-                info += " frames=" + std::to_string(anim.frame_count);
-                info += " dur=" + std::to_string(anim.duration);
-                if (anim.is_looping()) info += " [loop]";
-                if (anim.is_scene_anim()) info += " [scene]";
-                info += " comps=" + std::to_string(anim.components.size());
-                Log(info);
+        if (animFile.animations.empty()) continue;
+        if (!merged) {
+            merged = std::make_shared<NalAnimFile>(std::move(animFile));
+        } else {
+            merged->animations.insert(merged->animations.end(),
+                                      animFile.animations.begin(), animFile.animations.end());
+            merged->skeletons.insert(merged->skeletons.end(),
+                                     animFile.skeletons.begin(), animFile.skeletons.end());
+            merged->num_anims += animFile.num_anims;
+        }
+    }
+
+    if (merged) {
+        loadedAnimFile = merged;
+        loadedAnimName = merged->name;
+        selectedAnimIndex = -1;
+        for (int i = 0; i < (int)merged->animations.size(); ++i) {
+            const auto& candidate = merged->animations[i];
+            if (!candidate.skeleton || !loadedSkeleton ||
+                nal_skeleton_pose_compatible(candidate.skeleton.get(), loadedSkeleton.get())) {
+                selectedAnimIndex = i;
+                break;
             }
-            return;
+        }
+        currentAnimFrame = 0;
+        animPlaybackTime = 0.0f;
+        animFrameFraction = 0.0f;
+        isAnimPlaying = selectedAnimIndex >= 0;
+        Log("Loaded " + std::to_string(merged->animations.size()) + " animations from " +
+            std::to_string(sources.size()) + " container(s): " + merged->name);
+
+        for (size_t a = 0; a < merged->animations.size(); a++) {
+            const auto& anim = merged->animations[a];
+            std::string info = "  [" + std::to_string(a) + "] " + anim.name;
+            info += " frames=" + std::to_string(anim.frame_count);
+            info += " dur=" + std::to_string(anim.playback_duration());
+            if (!anim.skeleton_name.empty()) info += " skel=" + anim.skeleton_name;
+            if (!anim.skeleton) info += " [no skel match]";
+            if (anim.is_looping()) info += " [loop]";
+            if (anim.is_scene_anim()) info += " [scene]";
+            info += " comps=" + std::to_string(anim.components.size());
+            Log(info);
         }
     }
 }
@@ -704,13 +822,106 @@ void SpiderManTool::UpdateAnimationPlayback(float deltaTime) {
     int frameCount = anim.playback_frame_count();
     if (frameCount <= 0) return;
 
-    animPlaybackTime += deltaTime;
+    animPlaybackTime = std::max(0.0f, animPlaybackTime + deltaTime);
 
-    float duration = anim.playback_duration();
-    animPlaybackTime = fmodf(animPlaybackTime, duration);
+    if (anim.is_looping()) {
+        // N frames contain N intervals for a looping clip: the last interval
+        // interpolates frame N-1 back to frame 0.
+        float duration = (float)frameCount / NAL_PREVIEW_FPS;
+        if (duration <= 0.0f) return;
+        animPlaybackTime = fmodf(animPlaybackTime, duration);
+        float frameF = animPlaybackTime * NAL_PREVIEW_FPS;
+        currentAnimFrame = std::max(0, std::min((int)floorf(frameF), frameCount - 1));
+        animFrameFraction = frameF - (float)currentAnimFrame;
+    } else {
+        // Non-looping clips stop on their final sample instead of wrapping.
+        float endTime = (float)std::max(0, frameCount - 1) / NAL_PREVIEW_FPS;
+        if (animPlaybackTime >= endTime) {
+            animPlaybackTime = endTime;
+            currentAnimFrame = frameCount - 1;
+            animFrameFraction = 0.0f;
+            isAnimPlaying = false;
+            return;
+        }
+        float frameF = animPlaybackTime * NAL_PREVIEW_FPS;
+        currentAnimFrame = std::max(0, std::min((int)floorf(frameF), frameCount - 1));
+        animFrameFraction = frameF - (float)currentAnimFrame;
+    }
+}
 
-    int newFrame = (int)floorf(animPlaybackTime * NAL_PREVIEW_FPS);
-    newFrame = std::max(0, std::min(newFrame, frameCount - 1));
+void SpiderManTool::BuildGlobalEntityIndex() {
+    if (globalEntityIndexBuilt) return;
+    globalEntityIndexBuilt = true;
+    globalEntityIndex.clear();
 
-    currentAnimFrame = newFrame;
+    for (const auto& packPath : foundPacks) {
+        std::ifstream f(packPath, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) continue;
+        size_t fileSize = (size_t)f.tellg();
+        if (fileSize < 0x40) continue;
+
+        uint32_t mashSize = 0;
+        f.seekg(0x1C);
+        f.read((char*)&mashSize, 4);
+        if (mashSize < 0x40 || mashSize > fileSize) continue;
+
+        std::vector<uint8_t> dirBlob(mashSize);
+        f.seekg(0);
+        f.read((char*)dirBlob.data(), mashSize);
+        if (!f.good()) continue;
+
+        PackDirectory dir = PackDirectory::Parse(dirBlob);
+        if (!dir.valid) continue;
+        for (const auto& r : dir.resources) {
+            if (r.type != RES_KEY_ENTITY || r.size == 0 ||
+                (uint64_t)r.offset + r.size > fileSize) continue;
+            globalEntityIndex[r.hash].push_back({packPath.string(), r.offset, r.size});
+        }
+    }
+    Log("Global entity index: " + std::to_string(globalEntityIndex.size()) +
+        " names across " + std::to_string(foundPacks.size()) + " packs");
+}
+
+bool SpiderManTool::SelectBoneMappingForMesh(uint32_t meshHash) {
+    activeBoneMapping = {};
+    activeBoneMappingHash = 0;
+    if (meshHash == 0) return false;
+
+    auto accept = [&](const std::vector<uint8_t>& entityData,
+                      const std::string& sourceName) -> bool {
+        EntityBoneMapping parsed = ParseEntityBoneMapping(entityData);
+        if (!parsed.valid) return false;
+        activeBoneMapping = std::move(parsed);
+        activeBoneMappingHash = meshHash;
+        Log("ENTITY bone map: " + std::to_string(activeBoneMapping.meshPoseCount) +
+            " mesh bones from " + sourceName);
+        return true;
+    };
+
+    // The engine's resource directory resolves the local pack first.
+    if (currentDir.valid) {
+        for (const auto& r : currentDir.resources) {
+            if (r.type != RES_KEY_ENTITY || r.hash != meshHash ||
+                (uint64_t)r.offset + r.size > pcPackData.size()) continue;
+            std::vector<uint8_t> entityData(pcPackData.begin() + r.offset,
+                                            pcPackData.begin() + r.offset + r.size);
+            if (accept(entityData, fs::path(loadedPCPackPath).filename().string())) return true;
+        }
+    }
+
+    // Viewer/cutscene packs often contain only the PCM.  Resolve the character
+    // ENTITY globally by the same resource hash, matching the game directory.
+    BuildGlobalEntityIndex();
+    auto found = globalEntityIndex.find(meshHash);
+    if (found == globalEntityIndex.end()) return false;
+    for (const auto& loc : found->second) {
+        std::ifstream f(loc.packPath, std::ios::binary);
+        if (!f.is_open()) continue;
+        std::vector<uint8_t> entityData(loc.size);
+        f.seekg(loc.offset);
+        f.read((char*)entityData.data(), loc.size);
+        if (f.gcount() != (std::streamsize)loc.size) continue;
+        if (accept(entityData, fs::path(loc.packPath).filename().string())) return true;
+    }
+    return false;
 }
