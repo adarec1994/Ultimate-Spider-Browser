@@ -30,18 +30,7 @@ bool IsWorldInteriorPack(const std::string& stemName) {
 }
 
 
-static std::string ReadPcmString(const std::vector<uint8_t>& data, uint32_t offset) {
-    if (offset == 0 || offset + 32 > data.size()) return "";
-    size_t strStart = offset + 4;
-    size_t end = strStart;
-    while (end < strStart + 64 && end < data.size() && data[end] != 0) end++;
-    return std::string((char*)&data[strStart], end - strStart);
-}
-
 void RenderUI(SpiderManTool& tool) {
-    static int s_WorldHexScrollTo = -1;
-
-
     if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
         const int PACKS_PER_FRAME = 10;
         for (int i = 0; i < PACKS_PER_FRAME && tool.indexingProgress < tool.indexingTotal; i++) {
@@ -147,8 +136,15 @@ void RenderUI(SpiderManTool& tool) {
 
         ImGuiID dock_main_id = dockspace_id;
         ImGuiID dock_id_left = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.25f, nullptr, &dock_main_id);
+        ImGuiID dock_id_right = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.22f, nullptr, &dock_main_id);
+
+        if (ImGuiDockNode* viewportDock = ImGui::DockBuilderGetNode(dock_main_id)) {
+            viewportDock->SetLocalFlags(
+                viewportDock->LocalFlags | ImGuiDockNodeFlags_NoTabBar);
+        }
 
         ImGui::DockBuilderDockWindow("Asset Browser", dock_id_left);
+        ImGui::DockBuilderDockWindow("Animations", dock_id_right);
         ImGui::DockBuilderDockWindow("Viewport", dock_main_id);
         ImGui::DockBuilderFinish(dockspace_id);
         dockLayoutInitialized = true;
@@ -164,7 +160,33 @@ void RenderUI(SpiderManTool& tool) {
                                ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
                                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 
+    ImGuiWindowClass viewportWindowClass;
+    viewportWindowClass.DockNodeFlagsOverrideSet = ImGuiDockNodeFlags_NoTabBar;
+    ImGui::SetNextWindowClass(&viewportWindowClass);
     ImGui::Begin("Viewport", nullptr, bgFlags);
+
+    int previewTabToClose = -1;
+    if (!tool.previewTabs.empty() && ImGui::BeginTabBar(
+            "PreviewTabs", ImGuiTabBarFlags_Reorderable |
+                           ImGuiTabBarFlags_AutoSelectNewTabs |
+                           ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < (int)tool.previewTabs.size(); ++i) {
+            auto& tab = tool.previewTabs[i];
+            bool open = true;
+            ImGuiTabItemFlags flags = tab.requestSelect ? ImGuiTabItemFlags_SetSelected : 0;
+            const std::string title = tab.label + "###PreviewTab" + std::to_string(tab.id);
+            const bool selected = ImGui::BeginTabItem(title.c_str(), &open, flags);
+            tab.requestSelect = false;
+            if (selected) {
+                if (tool.activePreviewTab != i) tool.ActivatePreviewTab(i);
+                ImGui::EndTabItem();
+            }
+            if (!open) previewTabToClose = i;
+        }
+        ImGui::EndTabBar();
+    }
+    if (previewTabToClose >= 0) tool.ClosePreviewTab(previewTabToClose);
+    const float viewportOverlayTop = ImGui::GetCursorPosY();
 
     if (tool.isModelLoaded && tool.viewportTextureId != 0) {
         ImVec2 winPos = ImGui::GetCursorScreenPos();
@@ -186,33 +208,54 @@ void RenderUI(SpiderManTool& tool) {
 
         if (tool.isWorldMode && tool.selectedMeshIndex >= 0 && tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
             if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
-                tool.previewMeshes[tool.selectedMeshIndex].isHidden = true;
-                tool.Log("Hidden mesh: " + tool.previewMeshes[tool.selectedMeshIndex].meshName);
+                auto& selectedMesh = tool.previewMeshes[tool.selectedMeshIndex];
+                if (tool.selectedMeshInstanceIndex >= 0 &&
+                    tool.selectedMeshInstanceIndex < (int)selectedMesh.instances.size()) {
+                    auto& instance = selectedMesh.instances[tool.selectedMeshInstanceIndex];
+                    instance.isHidden = true;
+                    tool.RefreshInstanceBuffer(selectedMesh);
+                    tool.Log("Hidden mesh: " + (instance.name.empty() ? selectedMesh.meshName : instance.name));
+                } else {
+                    selectedMesh.isHidden = true;
+                    tool.Log("Hidden mesh: " + selectedMesh.meshName);
+                }
                 tool.selectedMeshIndex = -1;
-                tool.showWorldMeshHexEditor = false;
+                tool.selectedMeshInstanceIndex = -1;
+                tool.showWorldMeshDetails = false;
             }
         }
 
-        tool.UpdateWorldCamera(isViewportActive);
+        if (tool.isWorldMode) {
+            tool.UpdateWorldCamera(isViewportActive);
+        } else {
+            tool.UpdateModelOrbitCamera(viewportImageHovered);
+        }
 
-        ImGui::SetCursorPos(ImVec2(20, 20));
+        ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 20));
         if (tool.isWorldMode) {
             ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up | LMB to Select | DEL to Hide");
             if (tool.selectedMeshIndex >= 0 && tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
                 const auto& m = tool.previewMeshes[tool.selectedMeshIndex];
-                ImGui::SetCursorPos(ImVec2(20, 45));
-                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 0.9f), "Selected: %s", m.meshName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)).c_str() : m.meshName.c_str());
+                const std::string instanceName =
+                    (tool.selectedMeshInstanceIndex >= 0 &&
+                     tool.selectedMeshInstanceIndex < (int)m.instances.size() &&
+                     !m.instances[tool.selectedMeshInstanceIndex].name.empty())
+                        ? m.instances[tool.selectedMeshInstanceIndex].name
+                        : m.meshName;
+                ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 45));
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 0.9f), "Selected: %s",
+                                   instanceName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)).c_str() : instanceName.c_str());
             }
         } else {
-            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Hold RMB + WASD/ZX to Fly | Scroll to Speed Up");
+            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Drag LMB to Rotate | Scroll to Zoom");
             if (tool.skeletonBoneCount > 0) {
-                ImGui::SetCursorPos(ImVec2(20, 45));
+                ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 45));
                 ImGui::Checkbox("Show Skeleton", &tool.showSkeleton);
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 0.8f), "(%d bones)", tool.skeletonBoneCount);
 
                 if (tool.showSkeleton && tool.selectedBoneIndex >= 0) {
-                    ImGui::SetCursorPos(ImVec2(20, 70));
+                    ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 70));
                     int nalIdx = (tool.selectedBoneIndex < (int)tool.nalBoneVboOrder.size())
                         ? tool.nalBoneVboOrder[tool.selectedBoneIndex] : -1;
                     std::string boneName = "Bone " + std::to_string(nalIdx);
@@ -228,10 +271,10 @@ void RenderUI(SpiderManTool& tool) {
                         int parentIdx = tool.loadedSkeleton->parent_map.at(nalIdx);
                         std::string parentName = (parentIdx >= 0 && tool.loadedSkeleton->bone_map.count(parentIdx))
                             ? tool.loadedSkeleton->bone_map.at(parentIdx) : "ROOT";
-                        ImGui::SetCursorPos(ImVec2(20, 90));
+                        ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 90));
                         ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 0.8f), "Parent: [%d] %s", parentIdx, parentName.c_str());
                     }
-                    ImGui::SetCursorPos(ImVec2(20, 110));
+                    ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 110));
                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 0.8f), "R = Rotate | X/Y/Z = Axis | Esc = Cancel");
                 }
 
@@ -312,6 +355,42 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::End();
     }
 
+    // Rigged-model side panel.  Keep the presentation intentionally minimal:
+    // only animation names are visible.  Selecting a name retains the useful
+    // behavior of starting that clip, without exposing codec/debug details,
+    // frame counters, timelines, or skeleton internals.
+    bool hasCompatibleAnimations = false;
+    if (!tool.isWorldMode && tool.activePreviewTab >= 0 && tool.loadedSkeleton &&
+        tool.loadedAnimFile) {
+        for (const auto& anim : tool.loadedAnimFile->animations) {
+            if (!anim.skeleton || nal_skeleton_pose_compatible(
+                    anim.skeleton.get(), tool.loadedSkeleton.get())) {
+                hasCompatibleAnimations = true;
+                break;
+            }
+        }
+    }
+    if (hasCompatibleAnimations) {
+        if (ImGui::Begin("Animations")) {
+            for (int i = 0; i < (int)tool.loadedAnimFile->animations.size(); ++i) {
+                const auto& anim = tool.loadedAnimFile->animations[i];
+                if (anim.skeleton && !nal_skeleton_pose_compatible(
+                        anim.skeleton.get(), tool.loadedSkeleton.get())) {
+                    continue;
+                }
+                const std::string label = anim.name + "###Animation" + std::to_string(i);
+                if (ImGui::Selectable(label.c_str(), tool.selectedAnimIndex == i)) {
+                    tool.selectedAnimIndex = i;
+                    tool.currentAnimFrame = 0;
+                    tool.animFrameFraction = 0.0f;
+                    tool.animPlaybackTime = 0.0f;
+                    tool.isAnimPlaying = true;
+                }
+            }
+        }
+        ImGui::End();
+    }
+
     if (tool.showAssetBrowser) {
         if (ImGui::Begin("Asset Browser", &tool.showAssetBrowser)) {
             ImGui::InputTextWithHint("##SearchPacks", "Search packs...", tool.searchBuffer, sizeof(tool.searchBuffer));
@@ -362,139 +441,6 @@ void RenderUI(SpiderManTool& tool) {
             RenderPackNode("Asset Packs", [](const std::string& s) { return !IsWorldPack(s) && !IsWorldInteriorPack(s); });
             ImGui::EndChild();
 
-            // === Skeleton / Animation Info ===
-            if (tool.loadedSkeleton) {
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "Skeleton: %s", tool.loadedSkeletonName.c_str());
-                ImGui::Text("  Kind: %s", tool.loadedSkeleton->skeleton_kind.c_str());
-                ImGui::Text("  Bones: %d", (int)tool.loadedSkeleton->bone_map.size());
-                ImGui::Text("  Components: %d", (int)tool.loadedSkeleton->components.size());
-
-                if (ImGui::TreeNode("Bone Hierarchy")) {
-                    for (const auto& [idx, name] : tool.loadedSkeleton->bone_map) {
-                        int parent = tool.loadedSkeleton->parent_map.count(idx) ? tool.loadedSkeleton->parent_map.at(idx) : -1;
-                        std::string parentName = (parent >= 0 && tool.loadedSkeleton->bone_map.count(parent))
-                            ? tool.loadedSkeleton->bone_map.at(parent) : "ROOT";
-                        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f),
-                            "[%d] %s -> %s", idx, name.c_str(), parentName.c_str());
-                    }
-                    ImGui::TreePop();
-                }
-
-                if (ImGui::TreeNode("Components")) {
-                    for (const auto& c : tool.loadedSkeleton->components) {
-                        if (c.type_name.empty() || c.type_name == "Unknown") continue;
-                        std::string label = c.type_name;
-                        if (!c.bone_indices.empty())
-                            label += " (" + std::to_string(c.bone_indices.size()) + " bones)";
-                        if (c.default_pose.valid)
-                            label += " [pose]";
-                        if (c.has_ik)
-                            label += " [IK]";
-                        ImGui::BulletText("%s", label.c_str());
-                    }
-                    ImGui::TreePop();
-                }
-            }
-
-            if (tool.loadedAnimFile && !tool.loadedAnimFile->animations.empty()) {
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Animations: %s", tool.loadedAnimName.c_str());
-                ImGui::Text("  Count: %d", (int)tool.loadedAnimFile->animations.size());
-
-                if (ImGui::TreeNode("Animation List")) {
-                    for (int ai = 0; ai < (int)tool.loadedAnimFile->animations.size(); ai++) {
-                        const auto& a = tool.loadedAnimFile->animations[ai];
-                        bool isSelected = (tool.selectedAnimIndex == ai);
-                        // Flag anims bound to a different skeleton than the
-                        // active one -- they decode fine but won't fit this rig.
-                        bool skelMismatch = a.skeleton && tool.loadedSkeleton &&
-                            !nal_skeleton_pose_compatible(a.skeleton.get(), tool.loadedSkeleton.get());
-                        char label[256];
-                        snprintf(label, sizeof(label), "[%d] %s (%d frames%s%s%s%s)",
-                            ai, a.name.c_str(), a.frame_count,
-                            a.is_looping() ? ", loop" : "",
-                            a.is_scene_anim() ? ", scene" : "",
-                            a.skeleton_name.empty() ? "" : (", skel: " + a.skeleton_name).c_str(),
-                            skelMismatch ? " [other rig]" : "");
-
-                        if (ImGui::Selectable(label, isSelected)) {
-                            tool.selectedAnimIndex = ai;
-                            tool.currentAnimFrame = 0;
-                            tool.animFrameFraction = 0.f;
-                            tool.animPlaybackTime = 0.f;
-                            tool.isAnimPlaying = true;
-                        }
-                    }
-                    ImGui::TreePop();
-                }
-
-                if (tool.selectedAnimIndex >= 0 && tool.selectedAnimIndex < (int)tool.loadedAnimFile->animations.size()) {
-                    const auto& selAnim = tool.loadedAnimFile->animations[tool.selectedAnimIndex];
-                    ImGui::Separator();
-                    ImGui::Text("Selected: %s", selAnim.name.c_str());
-                    int playbackFrameCount = selAnim.playback_frame_count();
-                    float playbackDuration = selAnim.playback_duration();
-                    ImGui::Text("  Frames: %d  Duration: %.3fs", playbackFrameCount, playbackDuration);
-                    ImGui::Text("  Header +0x30: %.6f (preserved)  T_scale: %.6f",
-                        selAnim.header_float_30, selAnim.t_scale);
-                    ImGui::Text("  Decoded comps: %d", (int)selAnim.components.size());
-                    if (!selAnim.skeleton_name.empty()) {
-                        bool mismatch = selAnim.skeleton && tool.loadedSkeleton &&
-                            !nal_skeleton_pose_compatible(selAnim.skeleton.get(), tool.loadedSkeleton.get());
-                        ImGui::Text("  Skeleton: %s%s", selAnim.skeleton_name.c_str(),
-                                    mismatch ? "  (differs from active mesh skeleton!)" : "");
-                    }
-
-                    // Frame scrubber
-                    int maxFrame = std::max(0, playbackFrameCount - 1);
-                    if (ImGui::SliderInt("Frame", &tool.currentAnimFrame, 0, maxFrame)) {
-                        tool.animFrameFraction = 0.f;
-                        tool.animPlaybackTime = (float)tool.currentAnimFrame / NAL_PREVIEW_FPS;
-                    }
-
-                    if (tool.isAnimPlaying) {
-                        if (ImGui::Button("Pause")) tool.isAnimPlaying = false;
-                    } else {
-                        if (ImGui::Button("Play")) {
-                            if (!selAnim.is_looping() && tool.currentAnimFrame >= maxFrame) {
-                                tool.currentAnimFrame = 0;
-                                tool.animFrameFraction = 0.f;
-                            }
-                            tool.isAnimPlaying = true;
-                            tool.animPlaybackTime = (float)tool.currentAnimFrame / NAL_PREVIEW_FPS;
-                        }
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Reset")) {
-                        tool.currentAnimFrame = 0;
-                        tool.animFrameFraction = 0.f;
-                        tool.animPlaybackTime = 0.f;
-                        tool.isAnimPlaying = false;
-                    }
-
-                    // Show decoded track values for current frame
-                    if (!selAnim.components.empty() && ImGui::TreeNode("Track Values")) {
-                        for (const auto& comp : selAnim.components) {
-                            char compLabel[64];
-                            snprintf(compLabel, sizeof(compLabel), "Comp %d (mask=0x%X, %d tracks)",
-                                comp.comp_ix, comp.mask, comp.ntracks);
-                            if (ImGui::TreeNode(compLabel)) {
-                                int frame = tool.currentAnimFrame;
-                                if (frame < (int)comp.decoded.frames.size()) {
-                                    const auto& fv = comp.decoded.frames[frame];
-                                    for (int t = 0; t < (int)fv.size(); t++) {
-                                        ImGui::Text("  [%d] = %.6f", t, fv[t]);
-                                    }
-                                }
-                                ImGui::TreePop();
-                            }
-                        }
-                        ImGui::TreePop();
-                    }
-                }
-            }
-
             ImGui::Separator();
 
             static char fileSearchBuffer[256] = "";
@@ -540,24 +486,17 @@ void RenderUI(SpiderManTool& tool) {
                 float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
                 if (!hasSelection) ImGui::BeginDisabled();
-                if (ImGui::Button("Extract", ImVec2(halfWidth, 0))) {
+                if (ImGui::Button("Extract", ImVec2(-1.0f, 0))) {
                     tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
                     tool.ExtractFile(tool.selectedFileIndex);
                 }
-                ImGui::SameLine();
-                if (ImGui::Button("Preview", ImVec2(halfWidth, 0))) {
-                    tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
-                    tool.LoadPreview(tool.selectedFileIndex);
-                }
 
                 bool isPcm = hasSelection && tool.globalSearchResults[tool.selectedGlobalSearchIndex].isPcm;
-                float hexWidth = isPcm ? halfWidth : -1.0f;
-                if (ImGui::Button("Hex View", ImVec2(hexWidth, 0))) {
-                    tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
-                    tool.showHexEditor = true;
-                }
-
                 if (isPcm) {
+                    if (ImGui::Button("Details", ImVec2(halfWidth, 0))) {
+                        tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
+                        tool.AnalyzePCM(tool.selectedFileIndex);
+                    }
                     ImGui::SameLine();
                     if (ImGui::Button("To GLB", ImVec2(halfWidth, 0))) {
                         tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
@@ -595,8 +534,9 @@ void RenderUI(SpiderManTool& tool) {
                         bool isSelected = (tool.selectedGlobalSearchIndex == i);
                         if (ImGui::Selectable(r.fileName.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
                             tool.selectedGlobalSearchIndex = i;
+                            if (r.isPcm) tool.OpenGlobalSearchPcmTab(i);
                         }
-                        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                        if (!r.isPcm && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                             tool.SelectGlobalSearchResult(i);
                             tool.LoadPreview(tool.selectedFileIndex);
                         }
@@ -613,15 +553,13 @@ void RenderUI(SpiderManTool& tool) {
                 float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
                 if (!fileSelected) ImGui::BeginDisabled();
-                if (ImGui::Button("Extract", ImVec2(halfWidth, 0))) tool.ExtractFile(tool.selectedFileIndex);
-                ImGui::SameLine();
-                if (ImGui::Button("Preview", ImVec2(halfWidth, 0))) tool.LoadPreview(tool.selectedFileIndex);
+                if (ImGui::Button("Extract", ImVec2(-1.0f, 0))) tool.ExtractFile(tool.selectedFileIndex);
 
                 bool isPcm = fileSelected && tool.entries[tool.selectedFileIndex].isPcm;
-                float hexWidth = isPcm ? halfWidth : -1.0f;
-                if (ImGui::Button("Hex View", ImVec2(hexWidth, 0))) tool.showHexEditor = true;
-
                 if (isPcm) {
+                    if (ImGui::Button("Details", ImVec2(halfWidth, 0))) {
+                        tool.AnalyzePCM(tool.selectedFileIndex);
+                    }
                     ImGui::SameLine();
                     if (ImGui::Button("To GLB", ImVec2(halfWidth, 0))) tool.ExtractFile(tool.selectedFileIndex, true);
                 }
@@ -654,7 +592,13 @@ void RenderUI(SpiderManTool& tool) {
                         ImGui::TableNextRow();
                         ImGui::TableSetColumnIndex(0);
                         bool isSelected = (tool.selectedFileIndex == i);
-                        if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) tool.selectedFileIndex = i;
+                        if (ImGui::Selectable(e.name.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
+                            tool.selectedFileIndex = i;
+                            if (e.isPcm) tool.OpenPcmPreviewTab(i);
+                        }
+                        if (e.isDds && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                            tool.LoadPreview(i);
+                        }
                         ImGui::TableSetColumnIndex(1);
                         if (e.isPcm) ImGui::Text("MDL"); else if (e.isDds) ImGui::Text("TEX"); else ImGui::Text("DAT");
                     }
@@ -670,40 +614,11 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::End();
     }
 
-    if (tool.showHexEditor && tool.selectedFileIndex != -1 && !tool.pcPackData.empty()) {
-        const auto& e = tool.entries[tool.selectedFileIndex];
-
-        if (e.offset + e.size <= tool.pcPackData.size()) {
-            std::string typeStr = "Data";
-            if (e.isPcm) typeStr = "PCM";
-            else if (e.isDds) typeStr = "DDS";
-
-            std::string title = "Hex View: " + e.name + " (" + typeStr + ")";
-
-            ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin(title.c_str(), &tool.showHexEditor)) {
-                bool showSidebar = e.isPcm;
-
-                if (showSidebar) {
-                    tool.AnalyzePCM(tool.selectedFileIndex);
-                    ImGui::Columns(2, "HexCols");
-                    ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 320);
-                }
-
-                tool.hexEditor.Bytes = &tool.pcPackData[e.offset];
-                tool.hexEditor.MaxBytes = e.size;
-
-                ImGui::BeginChild("HexPanel", ImVec2(0,0), false);
-                ImGui::BeginHexEditor("##Hex", &tool.hexEditor);
-                ImGui::EndHexEditor();
-                ImGui::EndChild();
-
-                if (showSidebar) {
-                    ImGui::NextColumn();
-                    ImGui::BeginChild("SidePanel", ImVec2(0,0), false);
-
-
-                    if (ImGui::BeginTabBar("PCMDetailsTabs")) {
+    if (tool.showPcmDetailsPanel) {
+        ImGui::SetNextWindowSize(ImVec2(720, 620), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Model Details", &tool.showPcmDetailsPanel,
+                         ImGuiWindowFlags_NoDocking)) {
+            if (ImGui::BeginTabBar("PCMDetailsTabs")) {
 
                         if (ImGui::BeginTabItem("Overview")) {
                             const auto& d = tool.currentPcmDetails;
@@ -953,204 +868,66 @@ void RenderUI(SpiderManTool& tool) {
                             ImGui::EndTabItem();
                         }
 
-                        ImGui::EndTabBar();
-                    }
-
-                    ImGui::EndChild();
-                    ImGui::Columns(1);
-                }
+                ImGui::EndTabBar();
             }
-            ImGui::End();
         }
+        ImGui::End();
     }
 
-    if (tool.showWorldMeshHexEditor && tool.selectedMeshIndex >= 0 && !tool.selectedMeshPcmData.empty()) {
+    if (tool.showWorldMeshDetails && tool.selectedMeshIndex >= 0 &&
+        tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
         const auto& m = tool.previewMeshes[tool.selectedMeshIndex];
-        std::string title = "World Mesh Hex View: " + (m.meshName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)) : m.meshName);
+        const bool hasSelectedInstance =
+            tool.selectedMeshInstanceIndex >= 0 &&
+            tool.selectedMeshInstanceIndex < (int)m.instances.size();
+        const auto* selectedInstance = hasSelectedInstance
+            ? &m.instances[tool.selectedMeshInstanceIndex] : nullptr;
+        const std::string visibleName =
+            selectedInstance && !selectedInstance->name.empty()
+                ? selectedInstance->name
+                : (m.meshName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)) : m.meshName);
+        const std::string title = "World Mesh Details: " + visibleName + "###WorldMeshDetails";
 
-        ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin(title.c_str(), &tool.showWorldMeshHexEditor)) {
-
-
-            uint32_t nameOffset = 0, nameLen = 0;
-            uint32_t texOffset = 0, texLen = 0;
-
-            if (tool.selectedMeshPcmData.size() > 32) {
-                BinaryReader br(tool.selectedMeshPcmData);
-                br.Seek(8);
-                uint32_t numEntries = br.Read<uint32_t>();
-                uint32_t entryTableOfs = br.Read<uint32_t>();
-
-                if (numEntries < 1000 && entryTableOfs < tool.selectedMeshPcmData.size()) {
-                    br.Seek(entryTableOfs);
-                    struct E { uint16_t type, tag; uint32_t dataOfs, nameOfs; };
-                    std::vector<E> entries;
-                    for(uint32_t i=0; i<numEntries; i++) {
-                        E e; e.type = br.Read<uint16_t>(); e.tag = br.Read<uint16_t>();
-                        e.dataOfs = br.Read<uint32_t>(); e.nameOfs = br.Read<uint32_t>();
-                        entries.push_back(e);
-                    }
-
-                    uint32_t targetMeshNameRef = 0;
-
-
-                    for(const auto& e : entries) {
-                        if (e.tag == 512) {
-                            br.Seek(e.dataOfs + 8);
-                            uint32_t numSm = br.Read<uint32_t>();
-                            uint32_t smOfs = br.Read<uint32_t>();
-                            if (smOfs < tool.selectedMeshPcmData.size()) {
-                                br.Seek(smOfs);
-                                std::vector<uint32_t> smOffsets;
-                                for(uint32_t s=0; s<numSm; s++) { br.Skip(4); smOffsets.push_back(br.Read<uint32_t>()); }
-
-                                for(uint32_t smo : smOffsets) {
-                                    if (smo < tool.selectedMeshPcmData.size()) {
-                                        br.Seek(smo);
-                                        uint32_t nameRef = br.Read<uint32_t>();
-                                        if (nameRef != 0) {
-                                            std::string s = ReadPcmString(tool.selectedMeshPcmData, nameRef);
-                                            if (s == m.meshName) {
-                                                targetMeshNameRef = nameRef;
-                                                nameOffset = nameRef + 4;
-                                                nameLen = (uint32_t)s.length();
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (targetMeshNameRef != 0) break;
-                    }
-
-
-                    if (targetMeshNameRef != 0) {
-                        for(const auto& e : entries) {
-                            if (e.tag == 256) {
-                                br.Seek(e.dataOfs);
-                                uint32_t matMeshNameRef = br.Read<uint32_t>();
-                                if (matMeshNameRef == targetMeshNameRef) {
-                                    br.Seek(e.dataOfs + 0x60);
-                                    uint32_t texRef = br.Read<uint32_t>();
-                                    if (texRef != 0) {
-                                        std::string s = ReadPcmString(tool.selectedMeshPcmData, texRef);
-                                        texOffset = texRef + 4;
-                                        texLen = (uint32_t)s.length();
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
+        ImGui::SetNextWindowSize(ImVec2(430, 520), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin(title.c_str(), &tool.showWorldMeshDetails,
+                         ImGuiWindowFlags_NoDocking)) {
+            ImGui::Text("Index: %d / %d", tool.selectedMeshIndex,
+                        (int)tool.previewMeshes.size());
+            if (selectedInstance) {
+                ImGui::Text("Instance: %d / %d", tool.selectedMeshInstanceIndex,
+                            (int)m.instances.size());
             }
-
-            ImGui::Columns(2, "WorldHexCols");
-            ImGui::SetColumnWidth(0, ImGui::GetWindowWidth() - 300);
-
-            tool.worldMeshHexEditor.Bytes = tool.selectedMeshPcmData.data();
-            tool.worldMeshHexEditor.MaxBytes = tool.selectedMeshPcmData.size();
-
-            ImGui::BeginChild("WorldHexPanel", ImVec2(0,0), false);
-
-
-            if (s_WorldHexScrollTo != -1) {
-
-
-                float lineHeight = ImGui::GetTextLineHeightWithSpacing();
-                int row = s_WorldHexScrollTo / 16;
-
-
-                if (row > 2) row -= 2;
-
-                float scrollY = (float)row * lineHeight;
-
-
-                ImGui::SetNextWindowScroll(ImVec2(0.0f, scrollY));
-                s_WorldHexScrollTo = -1;
-            }
-
-
-            ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(0.9f, 0.2f, 0.2f, 0.5f));
-            ImGui::BeginHexEditor("##WorldHex", &tool.worldMeshHexEditor);
-            ImGui::EndHexEditor();
-            ImGui::PopStyleColor();
-
-            ImGui::EndChild();
-
-            ImGui::NextColumn();
-            ImGui::BeginChild("WorldMeshInfoPanel", ImVec2(0,0), false);
-
-            ImGui::Text("Mesh Info");
             ImGui::Separator();
-
-            ImGui::Text("Index: %d / %d", tool.selectedMeshIndex, (int)tool.previewMeshes.size());
-
-            ImGui::Text("Name: ");
-            ImGui::SameLine();
-            if (!m.meshName.empty()) {
-                std::string label = m.meshName;
-                if (nameOffset != 0) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), " (0x%X)", nameOffset);
-                    label += buf;
-                } else {
-                    label += " (Not Found)";
-                }
-                if (ImGui::Selectable(label.c_str(), false)) {
-                     if (nameOffset != 0) {
-                         tool.worldMeshHexEditor.SelectStartByte = nameOffset;
-                         tool.worldMeshHexEditor.SelectEndByte = nameOffset + nameLen;
-                         s_WorldHexScrollTo = nameOffset;
-                     }
-                }
-            } else {
-                ImGui::TextDisabled("(none)");
-            }
-
-            ImGui::Text("Texture: ");
-            ImGui::SameLine();
+            ImGui::Text("Name: %s", visibleName.c_str());
             if (!m.textureName.empty()) {
-                std::string label = m.textureName;
-                if (texOffset != 0) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), " (0x%X)", texOffset);
-                    label += buf;
-                } else {
-                    label += " (Not Found)";
-                }
-                if (ImGui::Selectable(label.c_str(), false)) {
-                     if (texOffset != 0) {
-                         tool.worldMeshHexEditor.SelectStartByte = texOffset;
-                         tool.worldMeshHexEditor.SelectEndByte = texOffset + texLen;
-                         s_WorldHexScrollTo = texOffset;
-                     }
-                }
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                                   "Texture: %s", m.textureName.c_str());
             } else {
-                ImGui::TextDisabled("(none)");
+                ImGui::TextDisabled("Texture: (none)");
             }
 
             ImGui::Spacing();
-            ImGui::Text("Bounding Box:");
-            ImGui::Text("  Min: (%.1f, %.1f, %.1f)", m.bboxMin[0], m.bboxMin[1], m.bboxMin[2]);
-            ImGui::Text("  Max: (%.1f, %.1f, %.1f)", m.bboxMax[0], m.bboxMax[1], m.bboxMax[2]);
+            ImGui::Text("Bounding Box");
+            ImGui::Text("  Min: (%.1f, %.1f, %.1f)",
+                        selectedInstance ? selectedInstance->bboxMin[0] : m.bboxMin[0],
+                        selectedInstance ? selectedInstance->bboxMin[1] : m.bboxMin[1],
+                        selectedInstance ? selectedInstance->bboxMin[2] : m.bboxMin[2]);
+            ImGui::Text("  Max: (%.1f, %.1f, %.1f)",
+                        selectedInstance ? selectedInstance->bboxMax[0] : m.bboxMax[0],
+                        selectedInstance ? selectedInstance->bboxMax[1] : m.bboxMax[1],
+                        selectedInstance ? selectedInstance->bboxMax[2] : m.bboxMax[2]);
 
             ImGui::Spacing();
-            ImGui::Text("Source:");
+            ImGui::Text("Source");
             if (!m.sourcePack.empty()) {
-                fs::path packPath(m.sourcePack);
+                const fs::path packPath(m.sourcePack);
                 ImGui::Text("  Pack: %s", packPath.filename().string().c_str());
                 ImGui::Text("  Offset: 0x%X", m.sourceOffset);
                 ImGui::Text("  Size: %u bytes", m.sourceSize);
             } else {
-                ImGui::TextDisabled("  (no source info)");
+                ImGui::TextDisabled("  (no source information)");
             }
 
-            ImGui::Spacing();
-            ImGui::Text("Rendering:");
-            ImGui::Text("  Indices: %d", m.indexCount);
-            ImGui::Text("  Texture ID: %u", m.textureId);
             const char* shaderTypeName = "Unknown";
             switch (m.shaderType) {
                 case 2: shaderTypeName = "Character"; break;
@@ -1158,6 +935,9 @@ void RenderUI(SpiderManTool& tool) {
                 case 8: shaderTypeName = "Street"; break;
                 case 11: shaderTypeName = "Translucent"; break;
             }
+            ImGui::Spacing();
+            ImGui::Text("Rendering");
+            ImGui::Text("  Indices: %d", m.indexCount);
             ImGui::Text("  Shader: %s (%u)", shaderTypeName, m.shaderType);
             ImGui::Text("  Translucent: %s", m.isTranslucent ? "Yes" : "No");
 
@@ -1168,9 +948,6 @@ void RenderUI(SpiderManTool& tool) {
             if (ImGui::Button("Export GLB", ImVec2(-1, 0))) {
                 tool.ExportSelectedWorldMesh(true);
             }
-
-            ImGui::EndChild();
-            ImGui::Columns(1);
         }
         ImGui::End();
     }

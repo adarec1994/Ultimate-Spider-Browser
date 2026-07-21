@@ -408,6 +408,7 @@ void SpiderManTool::ExtractAllWorldMeshes() {
                 if (m.vao) glDeleteVertexArrays(1, &m.vao);
                 if (m.vbo) glDeleteBuffers(1, &m.vbo);
                 if (m.ebo) glDeleteBuffers(1, &m.ebo);
+                if (m.instanceVbo) glDeleteBuffers(1, &m.instanceVbo);
             }
             previewMeshes.clear();
             if (isLevel) levelCount++; else propCount++;

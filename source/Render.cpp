@@ -809,13 +809,20 @@ void SpiderManTool::InitModelPreview() {
         "in vec4 boneIndices;\n"
         "in vec4 boneWeights;\n"
         "in vec4 vertColor;\n"
+        "in vec4 instanceTransform0;\n"
+        "in vec4 instanceTransform1;\n"
+        "in vec4 instanceTransform2;\n"
+        "in vec4 instanceTransform3;\n"
+        "in float instanceIndex;\n"
         "out vec2 TexCoord;\n"
         "out vec4 VertColor;\n"
         "out vec3 WorldPos;\n"   // for water fresnel
+        "out float InstanceIndex;\n"
         "uniform mat4 model;\n"
         "uniform mat4 view;\n"
         "uniform mat4 projection;\n"
         "uniform bool useSkinning;\n"
+        "uniform bool useInstancing;\n"
         "uniform mat4 boneMatrices[64];\n"
         // Water: rolling-wave displacement and a small UV scroll. The engine
         // ports a high-poly `oceanmesh` (USOcean2Shader, Archive/OpenUSM ngl.cpp:
@@ -856,8 +863,11 @@ void SpiderManTool::InitModelPreview() {
         "        float wave3 = sin((skinnedPos.x + skinnedPos.z) * 0.012 + time * 1.6);\n"
         "        skinnedPos.y += wave1 * 6.0 + wave2 * 5.0 + wave3 * 1.5;\n"
         "    }\n"
-        "    vec4 worldPos = model * skinnedPos;\n"
+        "    mat4 instanceTransform = mat4(instanceTransform0, instanceTransform1, instanceTransform2, instanceTransform3);\n"
+        "    vec4 placedPos = useInstancing ? (instanceTransform * skinnedPos) : skinnedPos;\n"
+        "    vec4 worldPos = model * placedPos;\n"
         "    WorldPos = worldPos.xyz;\n"
+        "    InstanceIndex = useInstancing ? instanceIndex : -1.0;\n"
         "    if (isWater) {\n"
         // Slow UV scroll so any baked caustic / specular texture moves.
         "        TexCoord = texCoord + vec2(time * 0.012, time * 0.009);\n"
@@ -883,6 +893,7 @@ void SpiderManTool::InitModelPreview() {
         "in vec2 TexCoord;\n"
         "in vec4 VertColor;\n"
         "in vec3 WorldPos;\n"
+        "in float InstanceIndex;\n"
         "out vec4 FragColor;\n"
         "uniform sampler2D diffTexture;\n"
         "uniform bool hasTexture;\n"
@@ -891,6 +902,7 @@ void SpiderManTool::InitModelPreview() {
         "uniform bool isFakeShadow;\n"
         "uniform bool isColorVolume;\n"
         "uniform bool isHighlighted;\n"
+        "uniform float selectedInstanceIndex;\n"
         // Debug-transparent meshes (collision proxies, color/shadow volumes,
         // GENERIC_WHITE placeholders, triggers) render as a faint white ghost
         // so the user can see them without them dominating the view.
@@ -946,7 +958,7 @@ void SpiderManTool::InitModelPreview() {
         // shows its baked shading instead of solid gray.
         "        result = VertColor;\n"
         "    }\n"
-        "    if (isHighlighted) {\n"
+        "    if (isHighlighted || (selectedInstanceIndex >= 0.0 && abs(InstanceIndex - selectedInstanceIndex) < 0.25)) {\n"
         "        result.rgb = mix(result.rgb, vec3(0.2, 1.0, 0.3), 0.6);\n"
         "    }\n"
         "    FragColor = result;\n"
@@ -973,6 +985,11 @@ void SpiderManTool::InitModelPreview() {
     glBindAttribLocation(modelProgram, 3, "boneIndices");
     glBindAttribLocation(modelProgram, 4, "boneWeights");
     glBindAttribLocation(modelProgram, 5, "vertColor");
+    glBindAttribLocation(modelProgram, 6, "instanceTransform0");
+    glBindAttribLocation(modelProgram, 7, "instanceTransform1");
+    glBindAttribLocation(modelProgram, 8, "instanceTransform2");
+    glBindAttribLocation(modelProgram, 9, "instanceTransform3");
+    glBindAttribLocation(modelProgram, 10, "instanceIndex");
     glLinkProgram(modelProgram);
     { int ok; glGetProgramiv(modelProgram, GL_LINK_STATUS, &ok);
       if (!ok) { char log[512]; glGetProgramInfoLog(modelProgram, 512, NULL, log); printf("LINK ERROR: %s\n", log); } }
@@ -1022,13 +1039,22 @@ void SpiderManTool::UpdateWorldCamera(bool isHovered) {
     GLFWwindow* window = glfwGetCurrentContext();
     if (!window) return;
 
-    bool isCapturing = (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED);
-    if (!isHovered && !isCapturing && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) return;
+    const bool rightMouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+    if (!rightMouseDown && isFlyCameraMouseLocked) {
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        glfwSetCursorPos(window, flyCameraLockX, flyCameraLockY);
+        isFlyCameraMouseLocked = false;
+    }
+    if (!isHovered && !isFlyCameraMouseLocked && !rightMouseDown) return;
 
     float dt = ImGui::GetIO().DeltaTime;
 
-    if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    if (rightMouseDown) {
+        if (!isFlyCameraMouseLocked) {
+            glfwGetCursorPos(window, &flyCameraLockX, &flyCameraLockY);
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            isFlyCameraMouseLocked = true;
+        }
 
         float xoffset = ImGui::GetIO().MouseDelta.x;
         float yoffset = ImGui::GetIO().MouseDelta.y;
@@ -1092,10 +1118,61 @@ void SpiderManTool::UpdateWorldCamera(bool isHovered) {
         if (ImGui::IsKeyDown(ImGuiKey_X)) {
             camPos[1] -= velocity;
         }
-
-    } else {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
+}
+
+void SpiderManTool::UpdateModelOrbitCamera(bool isHovered) {
+    GLFWwindow* window = glfwGetCurrentContext();
+    if (window && isFlyCameraMouseLocked) {
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        glfwSetCursorPos(window, flyCameraLockX, flyCameraLockY);
+        isFlyCameraMouseLocked = false;
+    }
+    if (!isHovered) return;
+
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kRotateSensitivity = 0.30f;
+
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        camYaw += ImGui::GetIO().MouseDelta.x * kRotateSensitivity;
+        camPitch += ImGui::GetIO().MouseDelta.y * kRotateSensitivity;
+        camPitch = std::max(-85.0f, std::min(85.0f, camPitch));
+    }
+
+    float offset[3] = {
+        camPos[0] - modelCenter[0],
+        camPos[1] - modelCenter[1],
+        camPos[2] - modelCenter[2]
+    };
+    float distance = sqrtf(offset[0] * offset[0] +
+                           offset[1] * offset[1] +
+                           offset[2] * offset[2]);
+    if (!std::isfinite(distance) || distance < 0.001f) {
+        distance = std::max(1.0f, modelRadius * 3.2f);
+    }
+
+    const float wheel = ImGui::GetIO().MouseWheel;
+    if (wheel != 0.0f) {
+        distance *= powf(0.85f, wheel);
+        const float minDistance = std::max(0.05f, modelRadius * 0.20f);
+        const float maxDistance = std::max(100.0f, modelRadius * 40.0f);
+        distance = std::max(minDistance, std::min(maxDistance, distance));
+    }
+
+    const float yaw = camYaw * kPi / 180.0f;
+    const float pitch = camPitch * kPi / 180.0f;
+    const float horizontal = cosf(pitch) * distance;
+    camPos[0] = modelCenter[0] + cosf(yaw) * horizontal;
+    camPos[1] = modelCenter[1] + sinf(pitch) * distance;
+    camPos[2] = modelCenter[2] + sinf(yaw) * horizontal;
+
+    camFront[0] = modelCenter[0] - camPos[0];
+    camFront[1] = modelCenter[1] - camPos[1];
+    camFront[2] = modelCenter[2] - camPos[2];
+    Normalize(camFront);
+    camUp[0] = 0.0f;
+    camUp[1] = 1.0f;
+    camUp[2] = 0.0f;
 }
 
 void SpiderManTool::RenderModelPreview() {
@@ -2157,6 +2234,8 @@ void SpiderManTool::RenderModelPreview() {
     GLint locIsFakeShadow = glGetUniformLocation(modelProgram, "isFakeShadow");
     GLint locIsColorVolume = glGetUniformLocation(modelProgram, "isColorVolume");
     GLint locIsHighlighted = glGetUniformLocation(modelProgram, "isHighlighted");
+    GLint locUseInstancing = glGetUniformLocation(modelProgram, "useInstancing");
+    GLint locSelectedInstanceIndex = glGetUniformLocation(modelProgram, "selectedInstanceIndex");
     GLint locDebugTransparent = glGetUniformLocation(modelProgram, "debugTransparent");
     GLint locIsWater = glGetUniformLocation(modelProgram, "isWater");
     GLint locTime = glGetUniformLocation(modelProgram, "time");
@@ -2268,12 +2347,23 @@ void SpiderManTool::RenderModelPreview() {
         glUniform1f(locAlphaRef, 0.5f);   // matches typical NGLBM_PUNCHTHROUGH threshold
         glUniform1i(locIsFakeShadow, m.isFakeShadow ? 1 : 0);
         glUniform1i(locIsColorVolume, m.isColorVolume ? 1 : 0);
-        glUniform1i(locIsHighlighted, (i == selectedMeshIndex) ? 1 : 0);
+        const bool instanced = !m.instances.empty();
+        glUniform1i(locUseInstancing, instanced ? 1 : 0);
+        glUniform1i(locIsHighlighted, (!instanced && i == selectedMeshIndex) ? 1 : 0);
+        glUniform1f(locSelectedInstanceIndex,
+                    (instanced && i == selectedMeshIndex) ? (float)selectedMeshInstanceIndex : -1.0f);
         glUniform1i(locDebugTransparent, m.isDebugTransparent ? 1 : 0);
         glUniform1i(locIsWater, m.isWater ? 1 : 0);
         uploadSectionBoneMatrices(m);
         glBindVertexArray(m.vao);
-        glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
+        if (instanced) {
+            if (m.instanceDrawCount > 0) {
+                glDrawElementsInstanced(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0,
+                                        m.instanceDrawCount);
+            }
+        } else {
+            glDrawElements(m.mode, m.indexCount, GL_UNSIGNED_SHORT, 0);
+        }
     };
 
     // Pass 1: opaque
@@ -2814,6 +2904,257 @@ void SpiderManTool::CloseDdsPreview() {
     showDdsPopup = false;
 }
 
+void SpiderManTool::StoreActivePreviewTab() {
+    if (activePreviewTab < 0 || activePreviewTab >= (int)previewTabs.size()) return;
+    auto& tab = previewTabs[activePreviewTab];
+    if (tab.hasCachedState) return;
+
+    tab.modelLoaded = isModelLoaded;
+    tab.modelPreview = isModelPreview;
+    tab.worldMode = isWorldMode;
+    tab.meshes = std::move(previewMeshes);
+
+    tab.selectedMeshIndex = selectedMeshIndex;
+    tab.selectedMeshInstanceIndex = selectedMeshInstanceIndex;
+    tab.selectedMeshPcmData = std::move(selectedMeshPcmData);
+    tab.showWorldMeshDetails = showWorldMeshDetails;
+
+    tab.showSkeleton = showSkeleton;
+    tab.selectedBoneIndex = selectedBoneIndex;
+    tab.isRotatingBone = isRotatingBone;
+    tab.boneRotationAngle = boneRotationAngle;
+    tab.boneRotationAxis = boneRotationAxis;
+    tab.manualBoneRotations = std::move(manualBoneRotations);
+    tab.boneRotationsBeforeEdit = std::move(boneRotationsBeforeEdit);
+    tab.skeletonVao = skeletonVao;
+    tab.skeletonVbo = skeletonVbo;
+    tab.skeletonBoneCount = skeletonBoneCount;
+    tab.skeletonLineVertCount = skeletonLineVertCount;
+    tab.skeletonBones = std::move(skeletonBones);
+    tab.nalBonePositions = std::move(nalBonePositions);
+    tab.nalBoneVboOrder = std::move(nalBoneVboOrder);
+    tab.nalMaxBoneIndex = nalMaxBoneIndex;
+
+    std::copy(modelCenter, modelCenter + 3, tab.modelCenter.begin());
+    tab.modelRadius = modelRadius;
+    std::copy(camPos, camPos + 3, tab.camPos.begin());
+    std::copy(camFront, camFront + 3, tab.camFront.begin());
+    std::copy(camUp, camUp + 3, tab.camUp.begin());
+    tab.camYaw = camYaw;
+    tab.camPitch = camPitch;
+    tab.camSpeed = camSpeed;
+
+    tab.loadedSkeleton = std::move(loadedSkeleton);
+    tab.loadedAnimFile = std::move(loadedAnimFile);
+    tab.selectedAnimIndex = selectedAnimIndex;
+    tab.currentAnimFrame = currentAnimFrame;
+    tab.animFrameFraction = animFrameFraction;
+    tab.isAnimPlaying = isAnimPlaying;
+    tab.animPlaybackTime = animPlaybackTime;
+    tab.loadedSkeletonName = std::move(loadedSkeletonName);
+    tab.loadedAnimName = std::move(loadedAnimName);
+    tab.skeletonCandidates = std::move(skeletonCandidates);
+    tab.activeSkeletonCandidate = activeSkeletonCandidate;
+    tab.activeBoneMapping = std::move(activeBoneMapping);
+    tab.activeBoneMappingHash = activeBoneMappingHash;
+    tab.hasCachedState = true;
+
+    // Leave an empty, non-owning renderer state.  No GL object is deleted:
+    // the tab now owns every model-specific handle.
+    isModelLoaded = false;
+    isModelPreview = false;
+    isWorldMode = false;
+    previewMeshes.clear();
+    selectedMeshIndex = -1;
+    selectedMeshInstanceIndex = -1;
+    selectedMeshPcmData.clear();
+    showWorldMeshDetails = false;
+    showSkeleton = false;
+    selectedBoneIndex = -1;
+    isRotatingBone = false;
+    boneRotationAngle = 0.0f;
+    manualBoneRotations.clear();
+    boneRotationsBeforeEdit.clear();
+    skeletonVao = 0;
+    skeletonVbo = 0;
+    skeletonBoneCount = 0;
+    skeletonLineVertCount = 0;
+    skeletonBones.clear();
+    nalBonePositions.clear();
+    nalBoneVboOrder.clear();
+    nalMaxBoneIndex = -1;
+    loadedSkeleton.reset();
+    loadedAnimFile.reset();
+    loadedSkeletonName.clear();
+    loadedAnimName.clear();
+    skeletonCandidates.clear();
+    activeSkeletonCandidate = -1;
+    activeBoneMapping = {};
+    activeBoneMappingHash = 0;
+    selectedAnimIndex = -1;
+    currentAnimFrame = 0;
+    animFrameFraction = 0.0f;
+    isAnimPlaying = false;
+    animPlaybackTime = 0.0f;
+}
+
+void SpiderManTool::RestorePreviewTab(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= (int)previewTabs.size()) return;
+    auto& tab = previewTabs[tabIndex];
+    if (!tab.hasCachedState) return;
+
+    isModelLoaded = tab.modelLoaded;
+    isModelPreview = tab.modelPreview;
+    isWorldMode = tab.worldMode;
+    previewMeshes = std::move(tab.meshes);
+
+    selectedMeshIndex = tab.selectedMeshIndex;
+    selectedMeshInstanceIndex = tab.selectedMeshInstanceIndex;
+    selectedMeshPcmData = std::move(tab.selectedMeshPcmData);
+    showWorldMeshDetails = tab.showWorldMeshDetails;
+
+    showSkeleton = tab.showSkeleton;
+    selectedBoneIndex = tab.selectedBoneIndex;
+    isRotatingBone = tab.isRotatingBone;
+    boneRotationAngle = tab.boneRotationAngle;
+    boneRotationAxis = tab.boneRotationAxis;
+    manualBoneRotations = std::move(tab.manualBoneRotations);
+    boneRotationsBeforeEdit = std::move(tab.boneRotationsBeforeEdit);
+    skeletonVao = tab.skeletonVao;
+    skeletonVbo = tab.skeletonVbo;
+    skeletonBoneCount = tab.skeletonBoneCount;
+    skeletonLineVertCount = tab.skeletonLineVertCount;
+    skeletonBones = std::move(tab.skeletonBones);
+    nalBonePositions = std::move(tab.nalBonePositions);
+    nalBoneVboOrder = std::move(tab.nalBoneVboOrder);
+    nalMaxBoneIndex = tab.nalMaxBoneIndex;
+
+    std::copy(tab.modelCenter.begin(), tab.modelCenter.end(), modelCenter);
+    modelRadius = tab.modelRadius;
+    std::copy(tab.camPos.begin(), tab.camPos.end(), camPos);
+    std::copy(tab.camFront.begin(), tab.camFront.end(), camFront);
+    std::copy(tab.camUp.begin(), tab.camUp.end(), camUp);
+    camYaw = tab.camYaw;
+    camPitch = tab.camPitch;
+    camSpeed = tab.camSpeed;
+
+    loadedSkeleton = std::move(tab.loadedSkeleton);
+    loadedAnimFile = std::move(tab.loadedAnimFile);
+    selectedAnimIndex = tab.selectedAnimIndex;
+    currentAnimFrame = tab.currentAnimFrame;
+    animFrameFraction = tab.animFrameFraction;
+    isAnimPlaying = tab.isAnimPlaying;
+    animPlaybackTime = tab.animPlaybackTime;
+    loadedSkeletonName = std::move(tab.loadedSkeletonName);
+    loadedAnimName = std::move(tab.loadedAnimName);
+    skeletonCandidates = std::move(tab.skeletonCandidates);
+    activeSkeletonCandidate = tab.activeSkeletonCandidate;
+    activeBoneMapping = std::move(tab.activeBoneMapping);
+    activeBoneMappingHash = tab.activeBoneMappingHash;
+    tab.hasCachedState = false;
+}
+
+void SpiderManTool::DestroyPreviewTabResources(PreviewTabState& tab) {
+    for (auto& mesh : tab.meshes) {
+        if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
+        if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
+        if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
+        if (mesh.instanceVbo) glDeleteBuffers(1, &mesh.instanceVbo);
+    }
+    tab.meshes.clear();
+    if (tab.skeletonVao) glDeleteVertexArrays(1, &tab.skeletonVao);
+    if (tab.skeletonVbo) glDeleteBuffers(1, &tab.skeletonVbo);
+    tab.skeletonVao = 0;
+    tab.skeletonVbo = 0;
+}
+
+void SpiderManTool::ActivatePreviewTab(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= (int)previewTabs.size()) return;
+    if (tabIndex == activePreviewTab) return;
+    StoreActivePreviewTab();
+    activePreviewTab = tabIndex;
+    RestorePreviewTab(tabIndex);
+}
+
+void SpiderManTool::ClosePreviewTab(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= (int)previewTabs.size()) return;
+
+    const bool wasActive = tabIndex == activePreviewTab;
+    if (wasActive) StoreActivePreviewTab();
+    DestroyPreviewTabResources(previewTabs[tabIndex]);
+    previewTabs.erase(previewTabs.begin() + tabIndex);
+
+    if (previewTabs.empty()) {
+        activePreviewTab = -1;
+        isModelLoaded = false;
+        isModelPreview = false;
+        isWorldMode = false;
+        return;
+    }
+
+    if (!wasActive) {
+        if (activePreviewTab > tabIndex) --activePreviewTab;
+        return;
+    }
+
+    activePreviewTab = std::min(tabIndex, (int)previewTabs.size() - 1);
+    RestorePreviewTab(activePreviewTab);
+    previewTabs[activePreviewTab].requestSelect = true;
+}
+
+void SpiderManTool::OpenPcmPreviewTab(int entryIndex) {
+    if (entryIndex < 0 || entryIndex >= (int)entries.size()) return;
+    const FileEntry entry = entries[entryIndex];
+    if (!entry.isPcm || pcPackData.empty()) return;
+
+    const std::string key = loadedPCPackPath + "#" +
+        std::to_string(entry.offset) + "#" + std::to_string(entry.size);
+    for (int i = 0; i < (int)previewTabs.size(); ++i) {
+        if (previewTabs[i].key != key) continue;
+        ActivatePreviewTab(i);
+        previewTabs[i].requestSelect = true;
+        return;
+    }
+
+    const bool replacingActiveTab = activePreviewTab >= 0;
+    if (replacingActiveTab) StoreActivePreviewTab();
+
+    // Pack browsing intentionally leaves the active tab's NAL state in
+    // place.  With that state cached (or after the last tab was closed),
+    // resolve the newly requested PCM against the currently browsed pack.
+    // This is an open-time cost only; ActivatePreviewTab never enters either
+    // parser.
+    const bool packHasNalResources = !currentDir.skeletons.empty() ||
+                                     !currentDir.animFiles.empty();
+    if (replacingActiveTab || (packHasNalResources &&
+        skeletonCandidates.empty() && !loadedAnimFile)) {
+        LoadSkeletonForCurrentPack();
+        LoadAnimationForCurrentPack();
+    }
+
+    PreviewTabState tab;
+    tab.id = nextPreviewTabId++;
+    tab.key = key;
+    tab.label = entry.name;
+    tab.packPath = loadedPCPackPath;
+    tab.resourceHash = entry.hash;
+    tab.resourceOffset = entry.offset;
+    tab.requestSelect = true;
+    previewTabs.push_back(std::move(tab));
+    activePreviewTab = (int)previewTabs.size() - 1;
+
+    selectedFileIndex = entryIndex;
+    LoadPreview(entryIndex);
+    Log("Opened preview tab: " + entry.name);
+}
+
+void SpiderManTool::OpenGlobalSearchPcmTab(int resultIndex) {
+    if (resultIndex < 0 || resultIndex >= (int)globalSearchResults.size()) return;
+    if (!globalSearchResults[resultIndex].isPcm) return;
+    SelectGlobalSearchResult(resultIndex);
+    if (selectedFileIndex >= 0) OpenPcmPreviewTab(selectedFileIndex);
+}
+
 void SpiderManTool::LoadPreview(int index) {
     if (index < 0 || index >= (int)entries.size()) return;
     if (pcPackData.empty()) return;
@@ -2830,8 +3171,9 @@ void SpiderManTool::LoadPreview(int index) {
         if (IsWorldPack(packStem) && (fileStem == packStem + "c" || fileStem == packStem)) {
             isWorldMode = true;
             selectedMeshIndex = -1;
+            selectedMeshInstanceIndex = -1;
             selectedMeshPcmData.clear();
-            showWorldMeshHexEditor = false;
+            showWorldMeshDetails = false;
 
             camPos[0] = 0.0f; camPos[1] = 200.0f; camPos[2] = -600.0f;
             camFront[0] = 0.0f; camFront[1] = -0.3f; camFront[2] = -1.0f;
@@ -2935,7 +3277,9 @@ static bool RayIntersectTriangle(const float rayOrigin[3], const float rayDir[3]
     return t > EPSILON;
 }
 
-int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWidth, float vpHeight) {
+int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWidth, float vpHeight,
+                                       int* instanceIndexOut) {
+    if (instanceIndexOut) *instanceIndexOut = -1;
     float ndcX = (2.0f * screenX / vpWidth) - 1.0f;
     float ndcY = 1.0f - (2.0f * screenY / vpHeight);
 
@@ -2961,6 +3305,7 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
     float rayOrigin[3] = { camPos[0], camPos[1], camPos[2] };
 
     int closestMesh = -1;
+    int closestInstance = -1;
     float closestT = 1e30f;
 
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
@@ -2971,6 +3316,55 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
         // the real geometry behind them.
         if (m.isFakeShadow || m.isColorVolume || m.isShadowVolume ||
             m.isDebugTransparent) continue;
+
+        // Instanced meshes retain one local/shared vertex buffer.  Test each
+        // placement's own bounds and transformed triangles so a click selects
+        // exactly one occurrence rather than the entire draw batch.
+        if (!m.instances.empty()) {
+            for (int instanceIndex = 0; instanceIndex < (int)m.instances.size(); ++instanceIndex) {
+                const auto& instance = m.instances[instanceIndex];
+                if (instance.isHidden) continue;
+
+                float bboxT;
+                if (!RayIntersectAABB(rayOrigin, rayDir, instance.bboxMin, instance.bboxMax, bboxT)) continue;
+                if (bboxT >= closestT || m.positions.empty() || m.indices.empty()) continue;
+
+                auto testTriangle = [&](uint16_t i0, uint16_t i1, uint16_t i2) {
+                    if (i0 * 3 + 2 >= m.positions.size() ||
+                        i1 * 3 + 2 >= m.positions.size() ||
+                        i2 * 3 + 2 >= m.positions.size()) return;
+                    float local0[3] = {m.positions[i0*3], m.positions[i0*3+1], m.positions[i0*3+2]};
+                    float local1[3] = {m.positions[i1*3], m.positions[i1*3+1], m.positions[i1*3+2]};
+                    float local2[3] = {m.positions[i2*3], m.positions[i2*3+1], m.positions[i2*3+2]};
+                    float v0[3], v1[3], v2[3];
+                    Mat4TransformPoint(instance.transform.data(), local0, v0);
+                    Mat4TransformPoint(instance.transform.data(), local1, v1);
+                    Mat4TransformPoint(instance.transform.data(), local2, v2);
+                    float t;
+                    if (RayIntersectTriangle(rayOrigin, rayDir, v0, v1, v2, t) && t < closestT) {
+                        closestT = t;
+                        closestMesh = i;
+                        closestInstance = instanceIndex;
+                    }
+                };
+
+                if (m.mode == GL_TRIANGLES) {
+                    for (size_t j = 0; j + 2 < m.indices.size(); j += 3) {
+                        testTriangle(m.indices[j], m.indices[j + 1], m.indices[j + 2]);
+                    }
+                } else {
+                    for (size_t j = 0; j + 2 < m.indices.size(); ++j) {
+                        uint16_t i0 = m.indices[j];
+                        uint16_t i1 = m.indices[j + 1];
+                        uint16_t i2 = m.indices[j + 2];
+                        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                        if ((j & 1) == 0) testTriangle(i0, i1, i2);
+                        else testTriangle(i0, i2, i1);
+                    }
+                }
+            }
+            continue;
+        }
 
         float bboxT;
         if (!RayIntersectAABB(rayOrigin, rayDir, m.bboxMin, m.bboxMax, bboxT)) continue;
@@ -3036,22 +3430,31 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
         }
     }
 
+    if (instanceIndexOut) *instanceIndexOut = closestInstance;
     return closestMesh;
 }
 
 void SpiderManTool::HandleMeshPicking(float viewportX, float viewportY, float viewportWidth, float viewportHeight) {
     if (!isWorldMode || !isModelLoaded) return;
 
-    int pickedMesh = PickMeshAtScreenPos(viewportX, viewportY, viewportWidth, viewportHeight);
+    int pickedInstance = -1;
+    int pickedMesh = PickMeshAtScreenPos(viewportX, viewportY, viewportWidth, viewportHeight,
+                                         &pickedInstance);
 
     if (pickedMesh >= 0) {
         selectedMeshIndex = pickedMesh;
+        selectedMeshInstanceIndex = pickedInstance;
         LoadSelectedMeshPcmData();
-        showWorldMeshHexEditor = true;
+        showWorldMeshDetails = true;
 
         const auto& m = previewMeshes[pickedMesh];
-        if (!m.meshName.empty()) {
-            Log("Selected mesh: " + m.meshName);
+        const std::string selectedName =
+            (pickedInstance >= 0 && pickedInstance < (int)m.instances.size() &&
+             !m.instances[pickedInstance].name.empty())
+                ? m.instances[pickedInstance].name
+                : m.meshName;
+        if (!selectedName.empty()) {
+            Log("Selected mesh: " + selectedName);
         } else {
             Log("Selected mesh index: " + std::to_string(pickedMesh));
         }

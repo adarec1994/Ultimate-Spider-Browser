@@ -61,13 +61,6 @@ if(NOT imguifiledialog_POPULATED)
     FetchContent_Populate(ImGuiFileDialog)
 endif()
 
-FetchContent_Declare(
-        imgui_hex_editor
-        GIT_REPOSITORY https://github.com/Teselka/imgui_hex_editor
-        GIT_TAG        main
-)
-FetchContent_MakeAvailable(imgui_hex_editor)
-
 add_library(imgui STATIC
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_demo.cpp
@@ -101,7 +94,6 @@ add_executable(USM
         Model.cpp
         World.cpp
         ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
-        ${imgui_hex_editor_SOURCE_DIR}/imgui_hex.cpp
         ${PLATFORM_SOURCES}
 )
 
@@ -112,7 +104,6 @@ target_include_directories(USM PRIVATE
         ${imgui_SOURCE_DIR}/backends
         ${glfw_SOURCE_DIR}/include
         ${imguifiledialog_SOURCE_DIR}
-        ${imgui_hex_editor_SOURCE_DIR}
         ${stb_SOURCE_DIR}
 )
 

@@ -34,6 +34,7 @@
       <config projectName="USM" targetName="timeout" folderName="GLFW3/Tests" />
       <config projectName="USM" targetName="monitors" folderName="GLFW3/Tests" />
       <config projectName="USM" targetName="joysticks" folderName="GLFW3/Tests" />
+      <config projectName="USM" targetName="docs" folderName="GLFW3" />
       <config projectName="USM" targetName="clipboard" folderName="GLFW3/Tests" />
       <config projectName="USM" targetName="heightmap" folderName="GLFW3/Examples" />
       <config projectName="USM" targetName="opacity" folderName="GLFW3/Tests" />
@@ -64,24 +65,16 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/editor.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/editor.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Archive.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Archive.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Helpers.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/Helpers.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/source/CMakeLists.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Model.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalAnimCodec.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalAnimCodec.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalAnimation.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalAnimation.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalSkeleton.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalSkeleton.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Render.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/main.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/PackEntities.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/PackEntities.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/world/WorldLoader.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/WorldLoader.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/common/WorldCommon.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/common/WorldCommon.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/interiors/Interiors.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/interiors/Interiors.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/unique/UniquePcms.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/UniquePcms.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -159,6 +152,11 @@
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
+    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="boing" type="CMakeRunConfiguration" factoryName="Application" folderName="GLFW3/Examples" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="boing" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="boing">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
@@ -170,6 +168,11 @@
       </method>
     </configuration>
     <configuration name="cursor" type="CMakeRunConfiguration" factoryName="Application" folderName="GLFW3/Tests" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="cursor" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="cursor">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="docs" type="CMakeRunConfiguration" factoryName="Application" folderName="GLFW3" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="docs" CONFIG_NAME="Debug">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -332,6 +335,7 @@
     <list>
       <item itemvalue="CMake Application.glfw" />
       <item itemvalue="CMake Application.uninstall" />
+      <item itemvalue="CMake Application.docs" />
       <item itemvalue="CMake Application.update_mappings" />
       <item itemvalue="CMake Application.boing" />
       <item itemvalue="CMake Application.gears" />
@@ -413,7 +417,7 @@
       <workItem from="1779730182641" duration="927000" />
       <workItem from="1780471898596" duration="3265000" />
       <workItem from="1783150748095" duration="3061000" />
-      <workItem from="1784537309260" duration="7574000" />
+      <workItem from="1784537309260" duration="9536000" />
     </task>
     <servers />
   </component>

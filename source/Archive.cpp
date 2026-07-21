@@ -6,20 +6,27 @@
 void SpiderManTool::OpenPCPack(const std::string& path) {
     if (loadedPCPackPath == path) return;
 
-    isModelLoaded = false;
-    isModelPreview = false;
+    // Selecting a pack is a browser operation.  Once preview tabs exist, it
+    // must not tear down or mutate the active tab merely because the user is
+    // looking for another asset.
+    const bool preservePreviewTab = activePreviewTab >= 0 && isModelLoaded;
+    if (!preservePreviewTab) {
+        isModelLoaded = false;
+        isModelPreview = false;
+    }
 
     // If the user is browsing the world (isWorldMode), keep the world rendered
     // -- clicking another pack should just switch the file browser, not blow
     // the loaded city away. LoadModelToGL handles the actual teardown when
     // the user opens a single-mesh preview.
-    const bool preserveWorld = isWorldMode;
+    const bool preserveWorld = isWorldMode || preservePreviewTab;
 
     if (!preserveWorld) {
         for (auto& m : previewMeshes) {
             if (m.vao) glDeleteVertexArrays(1, &m.vao);
             if (m.vbo) glDeleteBuffers(1, &m.vbo);
             if (m.ebo) glDeleteBuffers(1, &m.ebo);
+            if (m.instanceVbo) glDeleteBuffers(1, &m.instanceVbo);
         }
         previewMeshes.clear();
 
@@ -36,8 +43,9 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
 
         // World mesh selection only matters when world geometry is loaded.
         selectedMeshIndex = -1;
+        selectedMeshInstanceIndex = -1;
         selectedMeshPcmData.clear();
-        showWorldMeshHexEditor = false;
+        showWorldMeshDetails = false;
 
         // materialMap is per-PCM-being-parsed; ParseMaterialEntries rebuilds
         // it on every AddMeshFromData call. Clearing here is the safe default
@@ -133,14 +141,26 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
 
     Log("Opened " + fs::path(path).filename().string());
 
-    // Auto-detect and load skeleton/animation from pack
-    LoadSkeletonForCurrentPack();
-    LoadAnimationForCurrentPack();
+    // Active preview tabs own their skeleton/animation state.  Loading the
+    // newly browsed pack here would replace that state and corrupt the active
+    // model.  A newly opened PCM tab performs this work after caching the old
+    // tab; headless/export and the first-tab path retain the eager behavior.
+    if (!preservePreviewTab) {
+        LoadSkeletonForCurrentPack();
+        LoadAnimationForCurrentPack();
+    }
 }
 
 void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
     OpenPCPack(packPath);
     if (entries.empty()) return;
+
+    const int suspendedPreviewTab = activePreviewTab;
+    if (convertAll && suspendedPreviewTab >= 0) {
+        StoreActivePreviewTab();
+        LoadSkeletonForCurrentPack();
+        LoadAnimationForCurrentPack();
+    }
 
     fs::path p(packPath);
     fs::path outDir = fs::current_path() / "extracted" / p.stem();
@@ -174,6 +194,9 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
             }
         }
     }
+    if (suspendedPreviewTab >= 0 && previewTabs[suspendedPreviewTab].hasCachedState) {
+        RestorePreviewTab(suspendedPreviewTab);
+    }
     ShowNotification("Pack extracted to:\n" + outDir.string());
 }
 
@@ -191,12 +214,21 @@ void SpiderManTool::ExtractFile(int index, bool asGlb) {
     }
 
     if (e.isPcm && asGlb) {
+        const int suspendedPreviewTab = activePreviewTab;
+        if (suspendedPreviewTab >= 0) {
+            StoreActivePreviewTab();
+            LoadSkeletonForCurrentPack();
+            LoadAnimationForCurrentPack();
+        }
         fs::path glbPath = fullFilePath;
         glbPath.replace_extension(".glb");
         SelectSkeletonForMesh(e.name, e.hash);
         if (!loadedAnimFile) LoadAnimationForCurrentPack();
         std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
         ConvertPCM(pcmData, glbPath.string());
+        if (suspendedPreviewTab >= 0 && previewTabs[suspendedPreviewTab].hasCachedState) {
+            RestorePreviewTab(suspendedPreviewTab);
+        }
         ShowNotification("Saved GLB to:\n" + glbPath.string());
     } else {
         std::ofstream out(fullFilePath, std::ios::binary);

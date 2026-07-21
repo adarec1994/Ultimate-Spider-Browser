@@ -2777,6 +2777,217 @@ static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
     if (len > 0.0001f) { nx /= len; ny /= len; nz /= len; }
 }
 
+static void MultiplyColumnMajor4x4(const float* a, const float* b, float* out) {
+    float result[16];
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            result[col * 4 + row] =
+                a[0 * 4 + row] * b[col * 4 + 0] +
+                a[1 * 4 + row] * b[col * 4 + 1] +
+                a[2 * 4 + row] * b[col * 4 + 2] +
+                a[3 * 4 + row] * b[col * 4 + 3];
+        }
+    }
+    memcpy(out, result, sizeof(result));
+}
+
+static void IdentityColumnMajor4x4(float* out) {
+    memset(out, 0, sizeof(float) * 16);
+    out[0] = out[5] = out[10] = out[15] = 1.0f;
+}
+
+static void TransformBounds(const float localMin[3], const float localMax[3],
+                            const float transform[16], float worldMin[3], float worldMax[3]) {
+    worldMin[0] = worldMin[1] = worldMin[2] = 1e30f;
+    worldMax[0] = worldMax[1] = worldMax[2] = -1e30f;
+    for (int corner = 0; corner < 8; ++corner) {
+        float x = (corner & 1) ? localMax[0] : localMin[0];
+        float y = (corner & 2) ? localMax[1] : localMin[1];
+        float z = (corner & 4) ? localMax[2] : localMin[2];
+        TransformVertex(x, y, z, transform);
+        worldMin[0] = std::min(worldMin[0], x);
+        worldMin[1] = std::min(worldMin[1], y);
+        worldMin[2] = std::min(worldMin[2], z);
+        worldMax[0] = std::max(worldMax[0], x);
+        worldMax[1] = std::max(worldMax[1], y);
+        worldMax[2] = std::max(worldMax[2], z);
+    }
+}
+
+void SpiderManTool::RefreshInstanceBuffer(RenderMesh& mesh) {
+    struct InstanceGpuData {
+        float transform[16];
+        float stableIndex;
+    };
+
+    std::vector<InstanceGpuData> gpuInstances;
+    gpuInstances.reserve(mesh.instances.size());
+    for (size_t i = 0; i < mesh.instances.size(); ++i) {
+        if (mesh.instances[i].isHidden) continue;
+        InstanceGpuData gpu{};
+        memcpy(gpu.transform, mesh.instances[i].transform.data(), sizeof(gpu.transform));
+        gpu.stableIndex = (float)i;
+        gpuInstances.push_back(gpu);
+    }
+    mesh.instanceDrawCount = (int)gpuInstances.size();
+
+    if (!mesh.instanceVbo) glGenBuffers(1, &mesh.instanceVbo);
+    glBindVertexArray(mesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.instanceVbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 gpuInstances.size() * sizeof(InstanceGpuData),
+                 gpuInstances.empty() ? nullptr : gpuInstances.data(),
+                 GL_DYNAMIC_DRAW);
+
+    for (int column = 0; column < 4; ++column) {
+        const GLuint location = 6u + (GLuint)column;
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(location, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceGpuData),
+                              (void*)(sizeof(float) * column * 4));
+        glVertexAttribDivisor(location, 1);
+    }
+    glEnableVertexAttribArray(10);
+    glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, sizeof(InstanceGpuData),
+                          (void*)(sizeof(float) * 16));
+    glVertexAttribDivisor(10, 1);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void SpiderManTool::FlushPendingWholeWorldInstances() {
+    collectWholeWorldInstances = false;
+    auto pending = std::move(pendingWholeWorldInstances);
+    pendingWholeWorldInstances.clear();
+    size_t placementCount = 0;
+    size_t drawMeshCount = 0;
+
+    for (auto& [key, batch] : pending) {
+        (void)key;
+        if (batch.transforms.empty() || batch.pcmData.empty()) continue;
+        placementCount += batch.transforms.size();
+        const size_t firstMesh = previewMeshes.size();
+        AddMeshInstancesFromDataBatched(batch.pcmData, batch.modelName, nullptr,
+                                        batch.sourcePack, batch.sourceOffset,
+                                        batch.transforms, batch.onlyMeshOffset);
+        drawMeshCount += previewMeshes.size() - firstMesh;
+        for (size_t meshIndex = firstMesh; meshIndex < previewMeshes.size(); ++meshIndex) {
+            RenderMesh& mesh = previewMeshes[meshIndex];
+            const size_t namedCount = std::min(mesh.instances.size(), batch.instanceNames.size());
+            for (size_t instanceIndex = 0; instanceIndex < namedCount; ++instanceIndex) {
+                mesh.instances[instanceIndex].name = batch.instanceNames[instanceIndex];
+            }
+        }
+    }
+
+    if (placementCount > 0) {
+        Log("Whole-world instancing: " + std::to_string(placementCount) +
+            " placements, " + std::to_string(pending.size()) +
+            " shared PCM batches, " + std::to_string(drawMeshCount) +
+            " draw meshes");
+    }
+}
+
+void SpiderManTool::InstanceWholeWorldMeshes() {
+    if (!isWorldMode || previewMeshes.empty()) return;
+
+    auto makeKey = [](const RenderMesh& mesh) {
+        std::ostringstream key;
+        key << mesh.sourcePack << '|'
+            << mesh.sourceOffset << '|'
+            << mesh.sourceSize << '|'
+            << mesh.sourceMeshOffset << '|'
+            << mesh.textureId << '|'
+            << mesh.shaderType << '|'
+            << mesh.blendMode << '|'
+            << mesh.mode << '|'
+            << mesh.indexCount << '|'
+            << mesh.positions.size();
+        return key.str();
+    };
+
+    std::map<std::string, std::vector<int>> groups;
+    for (int i = 0; i < (int)previewMeshes.size(); ++i) {
+        const RenderMesh& mesh = previewMeshes[i];
+        if (!mesh.hasPlacementTransform || !mesh.instances.empty() || mesh.isHidden ||
+            mesh.sourcePack.empty() || mesh.positions.empty() || mesh.indices.empty()) {
+            continue;
+        }
+        groups[makeKey(mesh)].push_back(i);
+    }
+
+    std::vector<char> consumed(previewMeshes.size(), 0);
+    std::vector<RenderMesh> instanceBatches;
+    size_t consolidatedPlacements = 0;
+
+    for (const auto& [key, group] : groups) {
+        (void)key;
+        if (group.size() < 2) continue;
+
+        const RenderMesh& first = previewMeshes[group.front()];
+        float inverseFirst[16];
+        if (!InvertMatrix(first.placementTransform.data(), inverseFirst)) continue;
+
+        std::vector<RenderMesh::Instance> instances;
+        instances.reserve(group.size());
+        float unionMin[3] = {1e30f, 1e30f, 1e30f};
+        float unionMax[3] = {-1e30f, -1e30f, -1e30f};
+
+        for (int meshIndex : group) {
+            const RenderMesh& source = previewMeshes[meshIndex];
+            RenderMesh::Instance instance;
+            MultiplyColumnMajor4x4(source.placementTransform.data(), inverseFirst,
+                                   instance.transform.data());
+            memcpy(instance.bboxMin, source.bboxMin, sizeof(instance.bboxMin));
+            memcpy(instance.bboxMax, source.bboxMax, sizeof(instance.bboxMax));
+            instance.name = source.placementName.empty() ? source.meshName : source.placementName;
+            for (int axis = 0; axis < 3; ++axis) {
+                unionMin[axis] = std::min(unionMin[axis], source.bboxMin[axis]);
+                unionMax[axis] = std::max(unionMax[axis], source.bboxMax[axis]);
+            }
+            instances.push_back(std::move(instance));
+            consumed[meshIndex] = 1;
+        }
+
+        RenderMesh batch = std::move(previewMeshes[group.front()]);
+        // Scalar GL handles are copied by the implicit move, so detach them
+        // from the moved-from record before the cleanup pass below.
+        previewMeshes[group.front()].vao = 0;
+        previewMeshes[group.front()].vbo = 0;
+        previewMeshes[group.front()].ebo = 0;
+        previewMeshes[group.front()].instanceVbo = 0;
+        batch.instances = std::move(instances);
+        batch.instanceVbo = 0;
+        batch.instanceDrawCount = 0;
+        batch.hasPlacementTransform = false;
+        batch.meshName += " x" + std::to_string(batch.instances.size());
+        memcpy(batch.bboxMin, unionMin, sizeof(unionMin));
+        memcpy(batch.bboxMax, unionMax, sizeof(unionMax));
+        RefreshInstanceBuffer(batch);
+        instanceBatches.push_back(std::move(batch));
+        consolidatedPlacements += group.size();
+    }
+
+    if (instanceBatches.empty()) return;
+
+    std::vector<RenderMesh> rebuilt;
+    rebuilt.reserve(previewMeshes.size() - consolidatedPlacements + instanceBatches.size());
+    for (size_t i = 0; i < previewMeshes.size(); ++i) {
+        if (!consumed[i]) {
+            rebuilt.push_back(std::move(previewMeshes[i]));
+            continue;
+        }
+        if (previewMeshes[i].vao) glDeleteVertexArrays(1, &previewMeshes[i].vao);
+        if (previewMeshes[i].vbo) glDeleteBuffers(1, &previewMeshes[i].vbo);
+        if (previewMeshes[i].ebo) glDeleteBuffers(1, &previewMeshes[i].ebo);
+        if (previewMeshes[i].instanceVbo) glDeleteBuffers(1, &previewMeshes[i].instanceVbo);
+    }
+    for (auto& batch : instanceBatches) rebuilt.push_back(std::move(batch));
+
+    previewMeshes = std::move(rebuilt);
+    selectedMeshIndex = -1;
+    selectedMeshInstanceIndex = -1;
+}
+
 void SpiderManTool::BatchWorldMeshesByType() {
     if (!isWorldMode || previewMeshes.empty()) return;
 
@@ -3021,6 +3232,7 @@ void SpiderManTool::BatchWorldMeshesByType() {
             if (previewMeshes[i].vao) glDeleteVertexArrays(1, &previewMeshes[i].vao);
             if (previewMeshes[i].vbo) glDeleteBuffers(1, &previewMeshes[i].vbo);
             if (previewMeshes[i].ebo) glDeleteBuffers(1, &previewMeshes[i].ebo);
+            if (previewMeshes[i].instanceVbo) glDeleteBuffers(1, &previewMeshes[i].instanceVbo);
             continue;
         }
         rebuilt.push_back(std::move(previewMeshes[i]));
@@ -3032,11 +3244,30 @@ void SpiderManTool::BatchWorldMeshesByType() {
     int oldCount = (int)previewMeshes.size();
     previewMeshes = std::move(rebuilt);
     selectedMeshIndex = -1;
+    selectedMeshInstanceIndex = -1;
     (void)oldCount;
     (void)batchCount;
 }
 
 void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const float* transform, uint32_t onlyMeshOffset) {
+    if (collectWholeWorldInstances && transform && !sourcePack.empty()) {
+        std::ostringstream key;
+        key << sourcePack << '|' << sourceOffset << '|' << pcmData.size() << '|' << onlyMeshOffset;
+        PendingWorldInstanceBatch& batch = pendingWholeWorldInstances[key.str()];
+        if (batch.transforms.empty()) {
+            batch.pcmData = pcmData;
+            batch.modelName = modelName;
+            batch.sourcePack = sourcePack;
+            batch.sourceOffset = sourceOffset;
+            batch.onlyMeshOffset = onlyMeshOffset;
+        }
+        std::array<float, 16> placement{};
+        memcpy(placement.data(), transform, sizeof(float) * 16);
+        batch.transforms.push_back(placement);
+        batch.instanceNames.push_back(modelName);
+        return;
+    }
+
     ParseMaterialEntries(pcmData);
 
     BinaryReader br(pcmData);
@@ -3329,7 +3560,13 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             mesh.sourcePack = sourcePack;
             mesh.sourceOffset = sourceOffset;
             mesh.sourceSize = (uint32_t)pcmData.size();
+            mesh.sourceMeshOffset = smOfs;
             mesh.meshName = meshName.empty() ? modelName : meshName;
+            mesh.placementName = modelName;
+            if (transform) {
+                mesh.hasPlacementTransform = true;
+                memcpy(mesh.placementTransform.data(), transform, sizeof(float) * 16);
+            }
 
             mesh.skipPicking = false;
 
@@ -3383,6 +3620,47 @@ void SpiderManTool::AddMeshInstancesFromDataBatched(
     const std::vector<std::array<float, 16>>& transforms,
     uint32_t onlyMeshOffset) {
     if (transforms.empty()) return;
+
+    // Parse and upload the PCM geometry exactly once, then supply one compact
+    // matrix per placement.  The previous implementation copied and transformed
+    // every vertex for every occurrence, which reduced draw calls but made
+    // whole-world loading and memory usage scale with vertices * instances.
+    {
+        const size_t firstMesh = previewMeshes.size();
+        AddMeshFromDataWithTransform(pcmData, modelName, textureResolver,
+                                     sourcePack, sourceOffset, nullptr,
+                                     onlyMeshOffset);
+
+        for (size_t meshIndex = firstMesh; meshIndex < previewMeshes.size(); ++meshIndex) {
+            RenderMesh& mesh = previewMeshes[meshIndex];
+            const float localMin[3] = {mesh.bboxMin[0], mesh.bboxMin[1], mesh.bboxMin[2]};
+            const float localMax[3] = {mesh.bboxMax[0], mesh.bboxMax[1], mesh.bboxMax[2]};
+            float unionMin[3] = {1e30f, 1e30f, 1e30f};
+            float unionMax[3] = {-1e30f, -1e30f, -1e30f};
+
+            mesh.instances.clear();
+            mesh.instances.reserve(transforms.size());
+            for (const auto& transform : transforms) {
+                RenderMesh::Instance instance;
+                instance.transform = transform;
+                instance.name = modelName;
+                TransformBounds(localMin, localMax, transform.data(),
+                                instance.bboxMin, instance.bboxMax);
+                for (int axis = 0; axis < 3; ++axis) {
+                    unionMin[axis] = std::min(unionMin[axis], instance.bboxMin[axis]);
+                    unionMax[axis] = std::max(unionMax[axis], instance.bboxMax[axis]);
+                }
+                mesh.instances.push_back(std::move(instance));
+            }
+
+            memcpy(mesh.bboxMin, unionMin, sizeof(unionMin));
+            memcpy(mesh.bboxMax, unionMax, sizeof(unionMax));
+            mesh.hasPlacementTransform = false;
+            mesh.meshName += " x" + std::to_string(mesh.instances.size());
+            RefreshInstanceBuffer(mesh);
+        }
+    }
+    return;
 
     ParseMaterialEntries(pcmData);
 
@@ -3932,6 +4210,7 @@ void SpiderManTool::LoadModelToGL(int index) {
         if (m.vao) glDeleteVertexArrays(1, &m.vao);
         if (m.vbo) glDeleteBuffers(1, &m.vbo);
         if (m.ebo) glDeleteBuffers(1, &m.ebo);
+        if (m.instanceVbo) glDeleteBuffers(1, &m.instanceVbo);
     }
     previewMeshes.clear();
 
@@ -4021,20 +4300,34 @@ void SpiderManTool::LoadModelToGL(int index) {
             float cy = (minP[1] + maxP[1]) * 0.5f;
             float cz = (minP[2] + maxP[2]) * 0.5f;
 
-            float radius = sqrt(pow(maxP[0]-minP[0],2) + pow(maxP[1]-minP[1],2) + pow(maxP[2]-minP[2],2));
-            if (radius < 1.0f) radius = 5.0f;
+            const float diagonal = sqrtf(
+                (maxP[0] - minP[0]) * (maxP[0] - minP[0]) +
+                (maxP[1] - minP[1]) * (maxP[1] - minP[1]) +
+                (maxP[2] - minP[2]) * (maxP[2] - minP[2]));
+            modelCenter[0] = cx;
+            modelCenter[1] = cy;
+            modelCenter[2] = cz;
+            modelRadius = std::max(0.5f, diagonal * 0.5f);
 
-            camPos[0] = cx;
-            camPos[1] = cy + radius * 0.5f;
-            camPos[2] = cz + radius * 1.5f;
-
-            float target[3] = {cx, cy, cz};
-            float dir[3] = {target[0]-camPos[0], target[1]-camPos[1], target[2]-camPos[2]};
-            Normalize(dir);
-            camFront[0] = dir[0]; camFront[1] = dir[1]; camFront[2] = dir[2];
-
-            camYaw = atan2(camFront[2], camFront[0]) * 180.0f / 3.14159f;
-            camPitch = asin(camFront[1]) * 180.0f / 3.14159f;
+            // Orbit coordinates are camera offset angles around modelCenter.
+            // Start slightly above and in front of the model, matching the
+            // previous framing while making subsequent drag/zoom stable.
+            camYaw = 90.0f;
+            camPitch = 18.0f;
+            const float distance = modelRadius * 3.2f;
+            const float yaw = camYaw * 3.14159265358979323846f / 180.0f;
+            const float pitch = camPitch * 3.14159265358979323846f / 180.0f;
+            const float horizontal = cosf(pitch) * distance;
+            camPos[0] = cx + cosf(yaw) * horizontal;
+            camPos[1] = cy + sinf(pitch) * distance;
+            camPos[2] = cz + sinf(yaw) * horizontal;
+            camFront[0] = cx - camPos[0];
+            camFront[1] = cy - camPos[1];
+            camFront[2] = cz - camPos[2];
+            Normalize(camFront);
+            camUp[0] = 0.0f;
+            camUp[1] = 1.0f;
+            camUp[2] = 0.0f;
         }
     }
 }

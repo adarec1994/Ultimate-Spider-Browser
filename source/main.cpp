@@ -280,6 +280,63 @@ static int ValidateAllPacksHeadless(const std::string& packDirArg) {
     return failureCount == 0 ? 0 : 10;
 }
 
+static int TestPreviewTabCacheHeadless() {
+    SpiderManTool tool;
+    tool.previewTabs.resize(2);
+    tool.previewTabs[0].id = 1;
+    tool.previewTabs[0].label = "first.pcm";
+    tool.previewTabs[1].id = 2;
+    tool.previewTabs[1].label = "second.pcm";
+    tool.activePreviewTab = 0;
+
+    RenderMesh firstMesh{};
+    firstMesh.vao = 101;
+    firstMesh.vbo = 102;
+    firstMesh.ebo = 103;
+    tool.previewMeshes.push_back(firstMesh);
+    tool.isModelLoaded = true;
+    tool.isModelPreview = true;
+    tool.camPos[0] = 11.0f;
+    tool.animPlaybackTime = 3.25f;
+    tool.loadedSkeletonName = "first_skeleton";
+    tool.StoreActivePreviewTab();
+
+    RenderMesh secondMesh{};
+    secondMesh.vao = 201;
+    secondMesh.vbo = 202;
+    secondMesh.ebo = 203;
+    auto& second = tool.previewTabs[1];
+    second.hasCachedState = true;
+    second.modelLoaded = true;
+    second.modelPreview = true;
+    second.meshes.push_back(secondMesh);
+    second.camPos[0] = 22.0f;
+    second.animPlaybackTime = 7.5f;
+    second.loadedSkeletonName = "second_skeleton";
+
+    tool.ActivatePreviewTab(1);
+    const bool secondRestored = tool.previewMeshes.size() == 1 &&
+        tool.previewMeshes[0].vao == 201 && tool.camPos[0] == 22.0f &&
+        tool.animPlaybackTime == 7.5f && tool.loadedSkeletonName == "second_skeleton";
+
+    tool.camPos[0] = 23.0f;
+    tool.animPlaybackTime = 8.25f;
+    tool.ActivatePreviewTab(0);
+    const bool firstRestored = tool.previewMeshes.size() == 1 &&
+        tool.previewMeshes[0].vao == 101 && tool.camPos[0] == 11.0f &&
+        tool.animPlaybackTime == 3.25f && tool.loadedSkeletonName == "first_skeleton";
+
+    tool.ActivatePreviewTab(1);
+    const bool secondPreserved = tool.previewMeshes.size() == 1 &&
+        tool.previewMeshes[0].vao == 201 && tool.camPos[0] == 23.0f &&
+        tool.animPlaybackTime == 8.25f;
+
+    const bool ok = secondRestored && firstRestored && secondPreserved;
+    std::cout << "PREVIEW_TAB_CACHE_SUMMARY switches=3 reloads=0 result="
+              << (ok ? "pass" : "fail") << std::endl;
+    return ok ? 0 : 11;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 3 && std::string(argv[1]) == "--export-pack-glb") {
         return ExportPackGlbHeadless(argv[2]);
@@ -287,8 +344,15 @@ int main(int argc, char** argv) {
     if (argc >= 3 && std::string(argv[1]) == "--validate-all-packs") {
         return ValidateAllPacksHeadless(argv[2]);
     }
+    if (argc >= 2 && std::string(argv[1]) == "--test-preview-tab-cache") {
+        return TestPreviewTabCacheHeadless();
+    }
+
+    const bool testWorldInstancingGl =
+        argc >= 2 && std::string(argv[1]) == "--test-world-instancing-gl";
 
     if (!glfwInit()) return 1;
+    if (testWorldInstancingGl) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     const char* glsl_version = "#version 130";
     GLFWwindow* window = glfwCreateWindow(1024, 768, "Ultimate Spider-Browser", NULL, NULL);
     if (!window) return 1;
@@ -329,6 +393,85 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     SpiderManTool tool;
+
+    if (testWorldInstancingGl) {
+        tool.InitModelPreview();
+
+        GLint shaderLinked = GL_FALSE;
+        glGetProgramiv(tool.modelProgram, GL_LINK_STATUS, &shaderLinked);
+        const bool instancingFunctionsLoaded =
+            glDrawElementsInstanced != nullptr && glVertexAttribDivisor != nullptr;
+
+        RenderMesh mesh;
+        struct TestVertex { float x, y, z; float r, g, b, a; };
+        const TestVertex vertices[3] = {
+            {-0.5f, -0.5f, 0.0f, 1, 1, 1, 1},
+            { 0.5f, -0.5f, 0.0f, 1, 1, 1, 1},
+            { 0.0f,  0.5f, 0.0f, 1, 1, 1, 1}
+        };
+        const uint16_t indices[3] = {0, 1, 2};
+        glGenVertexArrays(1, &mesh.vao);
+        glGenBuffers(1, &mesh.vbo);
+        glGenBuffers(1, &mesh.ebo);
+        glBindVertexArray(mesh.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(TestVertex), (void*)0);
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(TestVertex),
+                              (void*)(sizeof(float) * 3));
+        glBindVertexArray(0);
+        mesh.indexCount = 3;
+
+        for (int i = 0; i < 2; ++i) {
+            RenderMesh::Instance instance;
+            instance.transform[0] = instance.transform[5] =
+                instance.transform[10] = instance.transform[15] = 1.0f;
+            instance.transform[12] = (float)i;
+            mesh.instances.push_back(instance);
+        }
+
+        GLint instanceBufferBytes = 0;
+        GLenum drawError = GL_INVALID_OPERATION;
+        if (instancingFunctionsLoaded) {
+            tool.RefreshInstanceBuffer(mesh);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh.instanceVbo);
+            glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &instanceBufferBytes);
+
+            float identity[16] = {0};
+            identity[0] = identity[5] = identity[10] = identity[15] = 1.0f;
+            glUseProgram(tool.modelProgram);
+            glUniformMatrix4fv(glGetUniformLocation(tool.modelProgram, "model"), 1, GL_FALSE, identity);
+            glUniformMatrix4fv(glGetUniformLocation(tool.modelProgram, "view"), 1, GL_FALSE, identity);
+            glUniformMatrix4fv(glGetUniformLocation(tool.modelProgram, "projection"), 1, GL_FALSE, identity);
+            glUniform1i(glGetUniformLocation(tool.modelProgram, "useSkinning"), 0);
+            glUniform1i(glGetUniformLocation(tool.modelProgram, "useInstancing"), 1);
+            glUniform1i(glGetUniformLocation(tool.modelProgram, "hasTexture"), 0);
+            glUniform1i(glGetUniformLocation(tool.modelProgram, "isWater"), 0);
+            glUniform1i(glGetUniformLocation(tool.modelProgram, "debugTransparent"), 0);
+            glUniform1f(glGetUniformLocation(tool.modelProgram, "selectedInstanceIndex"), 1.0f);
+            while (glGetError() != GL_NO_ERROR) {}
+            glBindVertexArray(mesh.vao);
+            glDrawElementsInstanced(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, nullptr, 2);
+            drawError = glGetError();
+        }
+
+        const bool bufferOk = instanceBufferBytes == (GLint)(2 * (17 * sizeof(float)));
+        const bool ok = shaderLinked == GL_TRUE && instancingFunctionsLoaded &&
+                        mesh.instanceDrawCount == 2 && bufferOk && drawError == GL_NO_ERROR;
+        std::cout << "WORLD_INSTANCING_GL_SUMMARY shader="
+                  << (shaderLinked == GL_TRUE ? "pass" : "fail")
+                  << " functions=" << (instancingFunctionsLoaded ? "pass" : "fail")
+                  << " instances=" << mesh.instanceDrawCount
+                  << " buffer_bytes=" << instanceBufferBytes
+                  << " draw=" << (drawError == GL_NO_ERROR ? "pass" : "fail")
+                  << " result=" << (ok ? "pass" : "fail") << std::endl;
+        return ok ? 0 : 12;
+    }
+
     tool.LoadConfig();
 
     if (fs::exists("string_hash_dictionary.txt")) tool.LoadDictionary("string_hash_dictionary.txt");

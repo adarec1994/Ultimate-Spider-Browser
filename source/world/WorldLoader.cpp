@@ -2,13 +2,22 @@
 //  LoadAllWorldGeometries  â€“  zone meshes + instanced props
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 void SpiderManTool::LoadAllWorldGeometries() {
+    for (auto& mesh : previewMeshes) {
+        if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
+        if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
+        if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
+        if (mesh.instanceVbo) glDeleteBuffers(1, &mesh.instanceVbo);
+    }
     previewMeshes.clear();
+    pendingWholeWorldInstances.clear();
+    collectWholeWorldInstances = true;
     isWorldMode = true;
     isModelPreview = true;
 
     selectedMeshIndex = -1;
+    selectedMeshInstanceIndex = -1;
     selectedMeshPcmData.clear();
-    showWorldMeshHexEditor = false;
+    showWorldMeshDetails = false;
 
     camPos[0] = 0.0f; camPos[1] = 200.0f; camPos[2] = -600.0f;
     camFront[0] = 0.0f; camFront[1] = -0.3f; camFront[2] = -1.0f;
@@ -909,9 +918,10 @@ void SpiderManTool::LoadAllWorldGeometries() {
     (void)skippedLegoFiltered;
 
     pcmDataCache.clear();
+    FlushPendingWholeWorldInstances();
 
     LoadSkybox();
-    BatchWorldMeshesByType();
+    InstanceWholeWorldMeshes();
     DumpWorldMeshDebugCategories(*this);
     DumpWorldOriginPlacementDebug(*this);
 

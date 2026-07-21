@@ -7,7 +7,6 @@
 #include <array>
 #include <iostream>
 #include <glad/glad.h>
-#include "imgui_hex.h"
 #include <functional>
 #include <optional>
 #include <memory>
@@ -64,12 +63,25 @@ struct FileEntry {
 };
 
 struct RenderMesh {
-    unsigned int vao;
-    unsigned int vbo;
-    unsigned int ebo;
-    int indexCount;
-    GLenum mode;
-    unsigned int textureId;
+    struct Instance {
+        // Column-major transform consumed directly by OpenGL.  For batches
+        // consolidated after loading this is relative to the first mesh in
+        // the batch; for native instance batches it is the world transform.
+        std::array<float, 16> transform{};
+        float bboxMin[3] = {0, 0, 0};
+        float bboxMax[3] = {0, 0, 0};
+        std::string name;
+        bool isHidden = false;
+    };
+
+    unsigned int vao = 0;
+    unsigned int vbo = 0;
+    unsigned int ebo = 0;
+    unsigned int instanceVbo = 0;
+    int indexCount = 0;
+    int instanceDrawCount = 0;
+    GLenum mode = GL_TRIANGLES;
+    unsigned int textureId = 0;
     bool isTranslucent = false;   // blendMode >= NGLBM_BLEND — needs back-to-front sorted blend pass
     bool isAlphaTest = false;     // blendMode == NGLBM_PUNCHTHROUGH — discard sub-threshold texels
     uint32_t blendMode = NGLBM_OPAQUE;
@@ -106,6 +118,15 @@ struct RenderMesh {
     std::vector<float> colors;
     std::vector<uint16_t> indices;
     std::vector<uint16_t> bonePalette;
+    std::vector<Instance> instances;
+
+    // Placement metadata retained until the whole-world consolidation pass.
+    // This lets identical PCMs share geometry without losing the identity of
+    // the individual world object that was clicked.
+    bool hasPlacementTransform = false;
+    std::array<float, 16> placementTransform{};
+    std::string placementName;
+    uint32_t sourceMeshOffset = 0;
 
 
     std::string textureName;
@@ -300,9 +321,6 @@ public:
     int ddsHeight = 0;
     bool showDdsPopup = false;
 
-    bool showHexEditor = false;
-    ImGuiHexEditorState hexEditor;
-
     std::vector<PCMMeshInfo> currentPcmInfos;
     PCMSkeletonInfo currentPcmSkeleton;
     int currentPcmIndex = -1;
@@ -335,16 +353,18 @@ public:
 
 
     int selectedMeshIndex = -1;
+    int selectedMeshInstanceIndex = -1;
     std::vector<uint8_t> selectedMeshPcmData;
-    bool showWorldMeshHexEditor = false;
-    ImGuiHexEditorState worldMeshHexEditor;
+    bool showWorldMeshDetails = false;
 
 
     bool RayIntersectAABB(const float rayOrigin[3], const float rayDir[3],
                           const float bboxMin[3], const float bboxMax[3], float& tMin);
-    int PickMeshAtScreenPos(float screenX, float screenY, float viewportWidth, float viewportHeight);
+    int PickMeshAtScreenPos(float screenX, float screenY, float viewportWidth, float viewportHeight,
+                            int* instanceIndexOut = nullptr);
     void HandleMeshPicking(float viewportX, float viewportY, float viewportWidth, float viewportHeight);
     void LoadSelectedMeshPcmData();
+    void RefreshInstanceBuffer(RenderMesh& mesh);
 
     bool isWorldMode = false;
 
@@ -388,6 +408,9 @@ public:
     float camYaw = -90.0f;
     float camPitch = 0.0f;
     float camSpeed = 100.0f;
+    bool isFlyCameraMouseLocked = false;
+    double flyCameraLockX = 0.0;
+    double flyCameraLockY = 0.0;
 
     void Log(const std::string& msg);
     void ShowNotification(const std::string& msg);
@@ -407,6 +430,7 @@ public:
     void LoadModelToGL(int index);
     void RenderModelPreview();
     void UpdateWorldCamera(bool isHovered);
+    void UpdateModelOrbitCamera(bool isHovered);
     unsigned int LoadTextureFromHash(uint32_t hash);
     unsigned int LoadTextureFromData(const std::vector<uint8_t>& data);
     unsigned int LoadTextureByName(const std::string& textureName);
@@ -424,6 +448,19 @@ public:
     void AddMeshFromData(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0);
     void AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0, const float* transform = nullptr, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
     void AddMeshInstancesFromDataBatched(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const std::vector<std::array<float, 16>>& transforms, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
+    struct PendingWorldInstanceBatch {
+        std::vector<uint8_t> pcmData;
+        std::string modelName;
+        std::string sourcePack;
+        uint32_t sourceOffset = 0;
+        uint32_t onlyMeshOffset = 0xFFFFFFFFu;
+        std::vector<std::array<float, 16>> transforms;
+        std::vector<std::string> instanceNames;
+    };
+    bool collectWholeWorldInstances = false;
+    std::map<std::string, PendingWorldInstanceBatch> pendingWholeWorldInstances;
+    void FlushPendingWholeWorldInstances();
+    void InstanceWholeWorldMeshes();
     void BatchWorldMeshesByType();
     void LoadBackgroundMeshes();
     void LoadSkybox();
@@ -485,6 +522,83 @@ public:
     uint32_t activeBoneMappingHash = 0;
     void BuildGlobalEntityIndex();
     bool SelectBoneMappingForMesh(uint32_t meshHash);
+
+    // A preview tab owns the expensive, model-specific state (uploaded mesh
+    // buffers, skeleton buffers, decoded animation, camera, and playback
+    // position).  The renderer's framebuffer/programs and texture caches stay
+    // shared.  Inactive tabs therefore keep their model resident without
+    // being rendered and can be restored without reparsing or re-uploading.
+    struct PreviewTabState {
+        uint64_t id = 0;
+        std::string key;
+        std::string label;
+        std::string packPath;
+        uint32_t resourceHash = 0;
+        uint32_t resourceOffset = 0;
+        bool requestSelect = false;
+        bool hasCachedState = false;
+
+        bool modelLoaded = false;
+        bool modelPreview = false;
+        bool worldMode = false;
+        std::vector<RenderMesh> meshes;
+
+        int selectedMeshIndex = -1;
+        int selectedMeshInstanceIndex = -1;
+        std::vector<uint8_t> selectedMeshPcmData;
+        bool showWorldMeshDetails = false;
+
+        bool showSkeleton = false;
+        int selectedBoneIndex = -1;
+        bool isRotatingBone = false;
+        float boneRotationAngle = 0.0f;
+        int boneRotationAxis = 1;
+        std::map<int, std::array<float, 3>> manualBoneRotations;
+        std::map<int, std::array<float, 3>> boneRotationsBeforeEdit;
+        unsigned int skeletonVao = 0;
+        unsigned int skeletonVbo = 0;
+        int skeletonBoneCount = 0;
+        int skeletonLineVertCount = 0;
+        std::vector<BoneData> skeletonBones;
+        std::map<int, std::array<float, 3>> nalBonePositions;
+        std::vector<int> nalBoneVboOrder;
+        int nalMaxBoneIndex = -1;
+
+        std::array<float, 3> modelCenter = {0.0f, 0.0f, 0.0f};
+        float modelRadius = 1.0f;
+        std::array<float, 3> camPos = {0.0f, 10.0f, 50.0f};
+        std::array<float, 3> camFront = {0.0f, 0.0f, -1.0f};
+        std::array<float, 3> camUp = {0.0f, 1.0f, 0.0f};
+        float camYaw = -90.0f;
+        float camPitch = 0.0f;
+        float camSpeed = 100.0f;
+
+        std::shared_ptr<NalSkeletonData> loadedSkeleton;
+        std::shared_ptr<NalAnimFile> loadedAnimFile;
+        int selectedAnimIndex = -1;
+        int currentAnimFrame = 0;
+        float animFrameFraction = 0.0f;
+        bool isAnimPlaying = false;
+        float animPlaybackTime = 0.0f;
+        std::string loadedSkeletonName;
+        std::string loadedAnimName;
+        std::vector<SkeletonCandidate> skeletonCandidates;
+        int activeSkeletonCandidate = -1;
+        EntityBoneMapping activeBoneMapping;
+        uint32_t activeBoneMappingHash = 0;
+    };
+
+    std::vector<PreviewTabState> previewTabs;
+    int activePreviewTab = -1;
+    uint64_t nextPreviewTabId = 1;
+
+    void OpenPcmPreviewTab(int entryIndex);
+    void OpenGlobalSearchPcmTab(int resultIndex);
+    void ActivatePreviewTab(int tabIndex);
+    void ClosePreviewTab(int tabIndex);
+    void StoreActivePreviewTab();
+    void RestorePreviewTab(int tabIndex);
+    void DestroyPreviewTabResources(PreviewTabState& tab);
 
     void LoadSkeletonForCurrentPack();
     void SelectSkeletonForMesh(const std::string& meshName, uint32_t meshHash = 0);
