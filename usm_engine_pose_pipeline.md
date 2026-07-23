@@ -46,7 +46,10 @@ If any hash below differs, the associated transcription must be treated as unaud
 - Reduced Angular follows `sub_5FDD50`, `sub_600ED0`, `sub_6010E0`, and `sub_5F9150`. Its serialized bone table is ten chain-major triples while its offset/default-pose slots are base/middle/tip-major. The parser now performs that exact remap.
 - Reduced default pose is exactly 176 bytes: two quaternions, eight base-Z scalars, eight base-Y scalars, ten middle scalars, and ten tip scalars.
 - Full Rotational follows `sub_5FDE30`, `sub_601280`, `sub_601470`, and `sub_5F9430`: three quaternion tracks for every enabled one of 30 chain-major joints.
-- Tentacles Compressed is not a bone-table component. It owns 15 scalar channels and a 15-float default pose; Carnage's visible tentacle bones and hierarchy are supplied by ArbitraryPO.
+- Tentacles Compressed is not a bone-table component. It owns 15 scalar channels and a 15-float default pose. The channels are five `(base diameter, subtentacle activity, pull factor)` triplets ordered UpLeft, UpRight, LowLeft, LowRight, and Tongue; OpenUSM's `TentaclesPoseDesc` lookup methods confirm the mapping.
+- Venom and Carnage store their four six-point tendril centerlines (plus a six-point tongue) as ArbitraryPO nodes outside the PCM/ENTITY skin palette. The preview therefore keeps controller-only logical matrices alive and evaluates them in serialized order. The renderer then applies the retail descriptor roles found in the character packs: the tongue is a narrow, flattened, pointed `shaded_tongue` profile, while Carnage's `shaded_tentacles` are thin symbiote blades rather than round tubes. A zero diameter hides the associated appendage; this is why `vententa_1` is invisible at its first/last frames but extends during the middle of the clip.
+- Character PCM sections use the 0x54-byte `USPersonMaterial`, not PCUV baked vertex colour. The viewer now preserves both texture names, the RGBA material colour, the lighting switch, and the environment/ink flags. Its shader follows OpenUSM's `3_VS` equation (`c7 * saturate(dot(normal,c6)) + c8`) and `7_PS` sphere-map combine (`lit * ink.a + ink.rgb`). OpenUSM builds the sphere coordinates from `LocalToWorld * WorldToView`, so the preview likewise transforms the skinned normal into view space; Venom's purple/black ink pattern therefore moves as the model view is rotated.
+- OpenUSM resolves an authored texture name as `.IFL` before `.DDS`. The preview now parses those text timelines, strips the authored frame extension, preserves repeated entries as frame holds, resolves the PC texture payloads, and advances them at the retail 30 Hz scene rate. It also honors `USPersonMaterial::m_blend_mode` at `+0x4C`, allowing the frames' alpha channel to mask the eye mesh instead of exposing its black backing polygon. This restores the animated `venom_eye` and `venom_s_eye` surfaces. Carnage's `carnage_03` eyes intentionally have no IFL; they remain a static diffuse texture combined with the view-dependent `us_char_sphrmap_ink_15b` material.
 
 ### Serialized block boundaries
 
@@ -60,9 +63,20 @@ If any hash below differs, the associated transcription must be treated as unaud
 - Pack-directory resource types are advisory. Animation discovery supplements the typed directory list with a bounded `0x10101` PCANIM signature check over every directory resource. This recovered 262 animation records that were present in the retail packs but absent from the former UI list.
 - PCANIM skeleton references use the skeleton header's logical-name hash. Most character skeletons reuse the directory resource hash, but Eddie Brock's `0x10200` generic skeleton does not. Both exact hashes now alias the same parsed skeleton, so `eb_idl` resolves to `eddie_brock` instead of disappearing from the animation list.
 - Rig compatibility is structural rather than pointer-identical: kind, component records, component bone/other-matrix indices, ArbitraryPO output/parent topology, evaluation order, and the final logical parent map must match. Per-clip channel-source indices and animated/constant flags may differ because the animation is evaluated with its own referenced skeleton. Boomerang and `gang_ss` satisfy this contract, exposing 62 valid clips for the Boomerang mesh.
-- A negative serialized frame count is the engine's empty-animation sentinel, not a one-frame clip. The parser retains the complete container bytes, while the UI/export layer omits the sentinel from playable clips. `gss_webblindloop` is the retail Boomerang example.
+- A negative serialized frame count is the engine's empty-animation sentinel, not a one-frame clip. Zero-frame records also occur inside cutscene/controller resources and have no playable samples. The parser retains the complete container bytes, while the UI/export layer omits both forms from playable clips. `gss_webblindloop` is the retail negative-sentinel example.
 - Entity `rel_po_idx` mappings occupy a sparse logical index space and therefore are not required to form a dense permutation of the mesh-pose count. Nick Fury has 59 mesh poses in a 60-slot logical space with slot 57 absent; his left prop hand is logical 59 and right prop hand is logical 58. Preserving the hole prevents every later twist/leg palette entry from shifting by one.
 - Live PCM loading constructs the skeleton and logical palette before resolving section bone indices. Resolving sections against an empty or previous model's palette was the remaining live-view-only cause of otherwise correct exported poses stretching or spinning.
+
+### PCMORPH and viseme playback
+
+- A retail `.PCMORPH` is a normal `PCM 0x601` image whose item type is 3. Its 20-byte root contains the name pointer, target-set count, target-set pointer, owner pointer, and an extra pointer. Each target set is 12 bytes: kind, mesh-section count, and section-record pointer.
+- Every morph section record is exactly `0x88` bytes: vertex count at `+0x00`, channel mask at `+0x04`, then 32 relocated stream pointers at `+0x08`. Section ordinals match the owning PCM LOD exactly; names and materials are not used for association.
+- The position stream consumed by `sub_4140D0` is a chain of `uint16 changedCount`, `uint16 skippedCount`, then `changedCount` packed float3 values. The destination cursor advances through the changed values and following skip; blocks continue while `skippedCount != 0`. A zero changed count is valid and represents an unchanged prefix.
+- Target set zero has kind 2 and stores neutral absolute positions. Its position bits match the owning PCM vertices exactly. Later kind-1 sets store sparse deltas, which the renderer accumulates from the neutral PCM position with the supplied weight.
+- Resource-key type 50 is the retail viseme stream. Its 24-byte header stores channel count, format value, frame count, sample rate, an as-yet-unconsumed float at `+0x10`, and the serialized data pointer. The payload is exactly `frameCount * channelCount` frame-major floats beginning at `+0x18`; there is no padding or trailing data.
+- `sub_6C0EE0` selects `floor(sampleRate * time)` with no inter-frame interpolation. Every non-zero channel `i` addresses PCMORPH target set `i + 1`. `sub_6C6400` advances time and releases the stream when the selected frame reaches the declared frame count; the preview returns the weights to neutral at the same boundary.
+- The generic `USMMorph` 12-byte property is a separate direct-control path: bytes 0-5 are target-set indices terminated by `0xFF`, and bytes 6-11 are weights scaled by the retail `1/255` constant in `sub_7385D0`. This is not substituted for a viseme stream.
+- The standalone Venom and Carnage viewer packs contain neither PCMORPH nor viseme resources. Their ordinary skeletal clips must remain skeletal-only. Morph/viseme resources are present on cutscene assets such as `VENOM_EDDIE`, Eddie Brock, Sable, Nick Fury, Mary Jane, and Peter Parker; the browser exposes only data that the selected pack/model actually supplies.
 
 ## Function-byte ledger
 
@@ -86,6 +100,20 @@ Hashes cover `[function_start, function_end)` exactly as defined in the IDB.
 | `sub_5F7160` | 739 | `ac2252287ab738fa6218a651ab0b969f63d2b92a14c193a6d22b5c422eb8a8c4` | standard arms matrices |
 | `sub_5F7760` | 1274 | `804da040740ed2a6783cdcb553b2dd10758d49a3823650a4156df6037a9b30b2` | IK arms matrices |
 | `sub_5F62E0` | 218 | `fdf7ec0ffc9a1a5713f933af50c06ccf1ca80efb50662c67a34a18a681ecd84e` | fakeroot matrices |
+
+### PCMORPH and viseme playback
+
+| Function | Bytes | SHA-256 | Audited role |
+|---|---:|---|---|
+| `sub_778840` | 268 | `515172796528cf76d45ddfaf077f69c9fecccf7adbdbf73c364496f37e4704ed` | PCMORPH relocation and section-record layout |
+| `sub_4140D0` | 642 | `c50dd8f1ee53cbbb2d1c78eaf075a5315606ec324c0c1692c5c625fb2532c8f8` | sparse position-run application |
+| `sub_408350` | 153 | `b57afdc6acfede422cfde41f0803c88d39442b180e0111c5e9ca71bb3516f075` | `USPersonMorphable` section apply wrapper |
+| `sub_778950` | 56 | `e7903b8cc3c77184d09ead6feb9d7eac9f9f5dcc6ffb10a6506c8cbca6cd47f4` | target-set section dispatch |
+| `sub_7789B0` | 323 | `73df6b198bfd6d3928b0052335d30ebe2d4aeb5f1215f7b501f7952d6750e5dd` | weighted target application across mesh sections |
+| `sub_6C0A60` | 352 | `f30cc7ccaf91093092be2844699efcd4fa655c7963e7cacf8a43f755f55a4a39` | type-50 viseme resource load/fixup |
+| `sub_6C0EE0` | 378 | `533b2eb77fb2134e2f889eaa535804bd495b46883aeaa0acc3de5f8595a8aa1e` | exact frame selection and channel-to-target mapping |
+| `sub_6C6400` | 373 | `6839889032b2d24b583ef93f37504fde9ea4edc7cbc1312064f47b32136cf237` | viseme time advance and end-of-stream behavior |
+| `sub_7385D0` | 717 | `7ea55351fc8b56c8c48acc2189754ef62253f4a47508200657b76fff7d07d716` | direct six-target `USMMorph` property application |
 
 ### Torso, eight-quaternion components, and fakeroot codecs
 
@@ -194,6 +222,10 @@ Hashes cover `[function_start, function_end)` exactly as defined in the IDB.
 The complete installed PC pack directory contains 618 `.PCPACK` files. A raw type-ID scan found Top2 Knuckle Curl in 194 packs and found no occurrences of Individual Curl, Reduced Angular, or Full Rotational. Those three variants are present in `USM.exe` and are instruction-audited above, but this retail dataset cannot provide a character-asset golden test for them.
 
 The post-fix headless corpus run completed with zero failures: 618 packs, 30,501 resources, 733 skeletons, 11,259 playable animation records, 62,261 components, 2,207,439 decoded frames, 43,096,496 decoded values, and 4,123 PCM resources (3,846 renderable conversions plus 277 non-renderable helper/collision PCMs). It reported three retained-data warnings and no decode, bounds, non-finite, or conversion failures.
+
+The morph/viseme corpus audit covers all 618 packs: 80 PCMORPH files, 2,318 target sets, 30,763 section records, 5,225 position streams, 791,171 changed vertices, and 55,753 set-zero vertices compared bit-for-bit with their PCM positions. It also decodes all 185 viseme streams, 18,164 frames, and 272,460 float weights. Both parsers report zero failures. The targeted playback regression proves frame 0 and frame 1 weights are copied bit-for-bit to sets 1-15 and that end-of-stream returns to neutral. A hidden OpenGL regression applies a real Eddie frame, observes changed CPU vertices, and reads the uploaded VBO positions back bit-identically with no GL error.
+
+After omitting negative sentinels and zero-frame controller records, the current animation scan exposes 10,953 positive-frame clips and reports zero character-component decode failures. Thirty-five generic vehicle, door, page-camera, or similar gameplay-controller clips retain warnings because their skeletons intentionally have no renderable matrix payload (two also retain controller/event codec warnings); they are not counted as model-render failures.
 
 Targeted regressions also pass: Sable's idle belt authored seam is `0.03210` radians versus a `0.01988`-radian median step; Venom's jaw seam is `0.01113` radians versus a `0.00397`-radian median and `0.00870`-radian maximum ordinary step. Before the variable-mask correction those seams were `2.3826` and `1.074` radians respectively. Sable's two forearm-twist segments retain constant lengths through all 40 idle frames, and the CPU-skinned idle pose is contiguous.
 

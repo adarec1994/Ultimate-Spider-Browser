@@ -1,4 +1,4 @@
-﻿static bool ShouldSkipLegoPcmName(const std::string& nameLower, const std::string& packStem) {
+static bool ShouldSkipLegoPcmName(const std::string& nameLower, const std::string& packStem) {
     (void)nameLower;
     (void)packStem;
     return false;
@@ -66,20 +66,12 @@ struct LegoBatch {
     std::vector<std::array<float, 16>> transforms;
 };
 
-
 static std::vector<LegoPlacementRecord> FindLegoPlacementRecords(
     const std::vector<uint8_t>& blockData,
     size_t legoStart) {
     std::vector<LegoPlacementRecord> records;
     if (legoStart + 24 > blockData.size()) return records;
 
-    // Matches lego_map_root_node::un_mash at 0x54E5A0:
-    //   mesh handles start at align(root + 31, 8)
-    //   material handles follow
-    //   32-byte lego nodes follow
-    //   node + 24 is a uint16 mesh-array index before the game resolves it.
-    // The node stores its world position as contiguous floats at +4/+8/+12.
-    // The later fields are flags/indices, not alternate coordinate storage.
     const uint16_t meshCount = ReadU16LE(blockData, legoStart + 16);
     const uint16_t materialCount = ReadU16LE(blockData, legoStart + 18);
     const uint16_t nodeCount = ReadU16LE(blockData, legoStart + 20);
@@ -183,9 +175,6 @@ static void QueueLegoPlacementsFromBlock(
             batch.sourceOffset = legoRef.absOffset;
         }
 
-        RecordWorldMeshPlacementDebug("lego", legoName,
-                                      legoRef.packPath, legoRef.absOffset,
-                                      combined);
         std::array<float, 16> transformArray{};
         memcpy(transformArray.data(), combined, sizeof(combined));
         batch.transforms.push_back(transformArray);

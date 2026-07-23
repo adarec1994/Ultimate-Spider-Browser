@@ -17,10 +17,6 @@ inline std::string StrToLower(const std::string& str) {
     return lower;
 }
 
-// Ultimate Spider-Man uses a DJB-33 variant for asset name hashing.
-// Reference: Archive/OpenUSM/src/string_hash.h `to_hash` -- static_assert proves
-// to_hash("combat_state") == 0x5DC44F76. Lowercase only applies to A-Z; non-alpha
-// (digits, '_', '.', '/') is passed through unmodified.
 inline uint32_t CalculateGameHash(const std::string& str) {
     uint32_t res = 0;
     for (unsigned char c : str) {
@@ -30,32 +26,16 @@ inline uint32_t CalculateGameHash(const std::string& str) {
     return res;
 }
 
-// Legacy name retained as alias so existing callsites keep compiling while we
-// migrate. Despite the name it does NOT compute CRC32 -- it dispatches to the
-// game's DJB-33 hash. Prefer CalculateGameHash in new code.
 inline uint32_t CalculateCRC32(const std::string& str) {
     return CalculateGameHash(str);
 }
 
-// Mesh-name pattern check for water surface meshes. These deserve the
-// dedicated water shader path in Render.cpp (rolling wave displacement, UV
-// scroll, fresnel tint) instead of the generic textured surface treatment.
-//
-// We must distinguish actual water from props NAMED "water-something":
-//   YES  oceanmesh                       -- global ocean (background mesh)
-//   YES  *_WATER, *_WATER<digit>         -- interior water bodies (ZGD_WATER_A)
-//   NO   *WATERTOWER*, *WATERTANK*       -- structural props
-//   NO   *WATERFALL*, *WATERFOAM*        -- decorative props / particles
-//   NO   *WATER_EXIT_MARKER, *WATER_EXCL -- gameplay markers / collision
-//   NO   *BREAKWATER*                    -- shore breakers (concrete walls)
-//   NO   *WATERTOW*                      -- water tower truss / wood pieces
 inline bool IsWaterMeshName(const std::string& nameLower) {
     if (nameLower.empty()) return false;
-    // The global ocean is loaded by name (LoadBackgroundMeshes); easy match.
+
     if (nameLower == "oceanmesh") return true;
     if (nameLower.find("oceanmesh") != std::string::npos) return true;
 
-    // Anything containing the disqualifying "water*" props gets rejected first.
     if (nameLower.find("watertower") != std::string::npos) return false;
     if (nameLower.find("watertank")  != std::string::npos) return false;
     if (nameLower.find("watertow")   != std::string::npos) return false;
@@ -64,13 +44,9 @@ inline bool IsWaterMeshName(const std::string& nameLower) {
     if (nameLower.find("breakwater") != std::string::npos) return false;
     if (nameLower.find("water_exit") != std::string::npos) return false;
     if (nameLower.find("waterexit")  != std::string::npos) return false;
-    // Water-exclusion volumes (NH_EXCLUDE_NH_WATER01) are non-renderable
-    // masking regions; they get the debug-transparent ghost overlay via
-    // IsNonRenderableMeshName, and must NOT render as a water surface.
+
     if (nameLower.find("exclude")    != std::string::npos) return false;
 
-    // Match "_water" followed by end-of-string, digit, letter A-Z (water_a,
-    // water_b), or another underscore. So ZGD_WATER_A, NJ_WATER01, etc. hit.
     for (size_t pos = nameLower.find("_water"); pos != std::string::npos;
          pos = nameLower.find("_water", pos + 6)) {
         size_t after = pos + 6;
@@ -81,23 +57,6 @@ inline bool IsWaterMeshName(const std::string& nameLower) {
     return false;
 }
 
-// Mesh-name pattern check for "glow"-class meshes: lens flares, light cones,
-// torch glows, FX glow sprites. The engine renders these with additive
-// blending (so they brighten the scene without occluding it) -- their author
-// shaders aren't fully decoded here, so the material's shader-name string
-// often comes back as "smtranslucent" or even plain opaque and we'd otherwise
-// draw them as flat white quads instead of as glowing bloom.
-//
-// Pattern source: Archive/pcmesh-blender-master/string_hash_dictionary.txt
-//   LTC_LIGHTFLAREA / LIGHTFLAREB / LIGHTFLAREA_TOD  -- city lens flares
-//   TAXI_LIGHTCONES                                  -- vehicle headlight cones
-//   S05_LIGHT_GLOW2                                  -- placed light glow sprites
-//   FX_GLOW_01                                       -- FX system glow sprites
-//   II_TORCHTOP_GLOW                                 -- interior torch glows
-//
-// When we detect one of these in Model.cpp's RenderMesh population we override
-// the material's blend mode to NGLBM_ADDITIVE so they go through the additive
-// blend pass (Render.cpp:2087 NGLBM_ADDITIVE case -> GL_SRC_ALPHA, GL_ONE).
 inline bool IsAdditiveGlowMeshName(const std::string& nameLower) {
     if (nameLower.empty()) return false;
     if (nameLower.find("lightflare") != std::string::npos) return true;
@@ -106,7 +65,7 @@ inline bool IsAdditiveGlowMeshName(const std::string& nameLower) {
     if (nameLower.find("light_glow") != std::string::npos) return true;
     if (nameLower.find("lightcone") != std::string::npos)  return true;
     if (nameLower.find("light_cone") != std::string::npos) return true;
-    // "_glow" followed by end, digit, or underscore (FX_GLOW_01, *_GLOW).
+
     for (size_t pos = nameLower.find("_glow"); pos != std::string::npos;
          pos = nameLower.find("_glow", pos + 5)) {
         size_t after = pos + 5;
@@ -117,25 +76,15 @@ inline bool IsAdditiveGlowMeshName(const std::string& nameLower) {
     return false;
 }
 
-// Mesh-name pattern check for non-renderable engine data: physics collision
-// proxies (*_COL_*, *_COL000, *_COLLISION_*), trigger / exclusion volumes,
-// and the GENERIC_WHITE / GENERIC_BLACK placeholder meshes. Pattern source:
-// Archive/pcmesh-blender-master/string_hash_dictionary.txt. These meshes are
-// loaded so the user can see them (they're rendered as a translucent ghost
-// overlay via RenderMesh::isDebugTransparent), but they're not part of the
-// visible game world.
 inline bool IsNonRenderableMeshName(const std::string& nameLower) {
     if (nameLower.empty()) return false;
 
-    // Collision: starts with "col_" (with or without 2-char area prefix like "hf_").
     if (nameLower.compare(0, 4, "col_") == 0) return true;
     if (nameLower.size() > 3 && nameLower[2] == '_') {
         std::string stripped = nameLower.substr(3);
         if (stripped.compare(0, 4, "col_") == 0) return true;
     }
 
-    // Collision: "_col" followed by end, digit, or another underscore.
-    // "_col" inside "_color" doesn't match (next char is a letter).
     for (size_t pos = nameLower.find("_col"); pos != std::string::npos;
          pos = nameLower.find("_col", pos + 4)) {
         size_t after = pos + 4;
@@ -144,14 +93,11 @@ inline bool IsNonRenderableMeshName(const std::string& nameLower) {
         if (c == '_' || (c >= '0' && c <= '9')) return true;
     }
 
-    // Collision: longer spelling.
     if (nameLower.find("collision") != std::string::npos) return true;
 
-    // Trigger volumes / exclusion zones.
     if (nameLower.find("_trigger") != std::string::npos) return true;
     if (nameLower.find("_exclusion") != std::string::npos) return true;
 
-    // Placeholder / fallback meshes.
     if (nameLower.find("generic_white") != std::string::npos) return true;
     if (nameLower.find("generic_black") != std::string::npos) return true;
 
@@ -254,8 +200,8 @@ public:
 struct GLBMaterial {
     std::string name;
     bool doubleSided;
-    std::string alphaMode;        // "OPAQUE", "MASK", or "BLEND"
-    float alphaCutoff = 0.5f;     // only emitted when alphaMode == "MASK"
+    std::string alphaMode;
+    float alphaCutoff = 0.5f;
     int baseColorTexture = -1;
 };
 

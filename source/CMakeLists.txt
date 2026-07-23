@@ -16,6 +16,9 @@ FetchContent_Declare(
         GIT_REPOSITORY https://github.com/glfw/glfw
         GIT_TAG        3.3.8
 )
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
 FetchContent_Declare(
@@ -44,7 +47,7 @@ endif()
 FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui
-        GIT_TAG        docking
+        GIT_TAG        v1.89.9-docking
 )
 FetchContent_GetProperties(imgui)
 if(NOT imgui_POPULATED)
@@ -59,6 +62,16 @@ FetchContent_Declare(
 FetchContent_GetProperties(ImGuiFileDialog)
 if(NOT imguifiledialog_POPULATED)
     FetchContent_Populate(ImGuiFileDialog)
+endif()
+
+FetchContent_Declare(
+        imgui_node_editor
+        GIT_REPOSITORY https://github.com/thedmd/imgui-node-editor.git
+        GIT_TAG        v0.9.3
+)
+FetchContent_GetProperties(imgui_node_editor)
+if(NOT imgui_node_editor_POPULATED)
+    FetchContent_Populate(imgui_node_editor)
 endif()
 
 add_library(imgui STATIC
@@ -79,7 +92,20 @@ target_include_directories(imgui PUBLIC
 
 target_link_libraries(imgui PUBLIC glfw glad OpenGL::GL)
 
-# Platform-specific sources
+add_library(imgui_node_editor STATIC
+        ${imgui_node_editor_SOURCE_DIR}/crude_json.cpp
+        ${imgui_node_editor_SOURCE_DIR}/imgui_canvas.cpp
+        ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor.cpp
+        ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor_api.cpp
+)
+
+target_include_directories(imgui_node_editor PUBLIC
+        ${imgui_node_editor_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}
+)
+
+target_link_libraries(imgui_node_editor PUBLIC imgui)
+
 set(PLATFORM_SOURCES "")
 if(WIN32)
     list(APPEND PLATFORM_SOURCES resource.rc)
@@ -88,8 +114,10 @@ endif()
 add_executable(USM
         main.cpp
         Interface.cpp
+        AnimationStateMachineView.cpp
         SpiderManTool.cpp
         Archive.cpp
+        AnimationStateMachine.cpp
         Render.cpp
         Model.cpp
         World.cpp
@@ -104,10 +132,11 @@ target_include_directories(USM PRIVATE
         ${imgui_SOURCE_DIR}/backends
         ${glfw_SOURCE_DIR}/include
         ${imguifiledialog_SOURCE_DIR}
+        ${imgui_node_editor_SOURCE_DIR}
         ${stb_SOURCE_DIR}
 )
 
-target_link_libraries(USM PRIVATE imgui glfw glad OpenGL::GL)
+target_link_libraries(USM PRIVATE imgui imgui_node_editor glfw glad OpenGL::GL)
 
 if(EXISTS "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt")
     configure_file(

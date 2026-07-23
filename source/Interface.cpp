@@ -29,7 +29,6 @@ bool IsWorldInteriorPack(const std::string& stemName) {
     return false;
 }
 
-
 void RenderUI(SpiderManTool& tool) {
     if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
         const int PACKS_PER_FRAME = 10;
@@ -41,8 +40,7 @@ void RenderUI(SpiderManTool& tool) {
         if (tool.indexingProgress >= tool.indexingTotal) {
             tool.isIndexing = false;
             tool.currentState = SpiderManTool::STATE_BROWSER;
-            tool.Log("Indexed " + std::to_string(tool.globalTextureIndex.size()) + " textures from " +
-                     std::to_string(tool.foundPacks.size()) + " packs");
+
         }
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -75,7 +73,6 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::End();
         return;
     }
-
 
     if (tool.currentState == SpiderManTool::STATE_SPLASH) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -126,7 +123,12 @@ void RenderUI(SpiderManTool& tool) {
     }
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
+#if IMGUI_VERSION_NUM < 19000
+    ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(
+        viewport, ImGuiDockNodeFlags_PassthruCentralNode);
+#else
     ImGuiID dockspace_id = ImGui::GetID("USM_DockSpace");
+#endif
 
     static bool dockLayoutInitialized = false;
     if (!dockLayoutInitialized) {
@@ -150,7 +152,9 @@ void RenderUI(SpiderManTool& tool) {
         dockLayoutInitialized = true;
     }
 
+#if IMGUI_VERSION_NUM >= 19000
     ImGui::DockSpaceOverViewport(dockspace_id, viewport, ImGuiDockNodeFlags_PassthruCentralNode);
+#endif
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -197,14 +201,12 @@ void RenderUI(SpiderManTool& tool) {
         bool uiHovered = ImGui::GetIO().WantCaptureMouse;
         bool isViewportActive = !uiHovered;
 
-
         if (tool.isWorldMode && viewportImageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
             ImVec2 mousePos = ImGui::GetMousePos();
             float localX = mousePos.x - winPos.x;
             float localY = mousePos.y - winPos.y;
             tool.HandleMeshPicking(localX, localY, winSize.x, winSize.y);
         }
-
 
         if (tool.isWorldMode && tool.selectedMeshIndex >= 0 && tool.selectedMeshIndex < (int)tool.previewMeshes.size()) {
             if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
@@ -214,10 +216,10 @@ void RenderUI(SpiderManTool& tool) {
                     auto& instance = selectedMesh.instances[tool.selectedMeshInstanceIndex];
                     instance.isHidden = true;
                     tool.RefreshInstanceBuffer(selectedMesh);
-                    tool.Log("Hidden mesh: " + (instance.name.empty() ? selectedMesh.meshName : instance.name));
+
                 } else {
                     selectedMesh.isHidden = true;
-                    tool.Log("Hidden mesh: " + selectedMesh.meshName);
+
                 }
                 tool.selectedMeshIndex = -1;
                 tool.selectedMeshInstanceIndex = -1;
@@ -247,7 +249,6 @@ void RenderUI(SpiderManTool& tool) {
                                    instanceName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)).c_str() : instanceName.c_str());
             }
         } else {
-            ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Drag LMB to Rotate | Scroll to Zoom");
             if (tool.skeletonBoneCount > 0) {
                 ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 45));
                 ImGui::Checkbox("Show Skeleton", &tool.showSkeleton);
@@ -278,7 +279,6 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 0.8f), "R = Rotate | X/Y/Z = Axis | Esc = Cancel");
                 }
 
-                // Bone selection (click when skeleton is visible)
                 if (tool.showSkeleton && !tool.isRotatingBone && viewportImageHovered &&
                     ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
                     !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
@@ -292,27 +292,23 @@ void RenderUI(SpiderManTool& tool) {
                     }
                 }
 
-                // R key to start rotation
                 if (tool.selectedBoneIndex >= 0 && ImGui::IsKeyPressed(ImGuiKey_R) && !tool.isRotatingBone) {
                     tool.isRotatingBone = true;
                     tool.boneRotationAngle = 0.0f;
                     tool.boneRotationsBeforeEdit = tool.manualBoneRotations;
                 }
 
-                // Axis selection during rotation
                 if (tool.isRotatingBone) {
                     if (ImGui::IsKeyPressed(ImGuiKey_X)) tool.boneRotationAxis = 0;
                     if (ImGui::IsKeyPressed(ImGuiKey_Y)) tool.boneRotationAxis = 1;
                     if (ImGui::IsKeyPressed(ImGuiKey_Z)) tool.boneRotationAxis = 2;
 
-                    // Mouse movement rotates
                     float delta = ImGui::GetIO().MouseDelta.x * 0.01f;
                     if (delta != 0.0f) {
                         tool.boneRotationAngle += delta;
                         tool.ApplyBoneRotation(tool.selectedBoneIndex, delta, tool.boneRotationAxis);
                     }
 
-                    // Left click confirms, Escape cancels
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         tool.isRotatingBone = false;
                         tool.boneRotationsBeforeEdit.clear();
@@ -355,10 +351,6 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::End();
     }
 
-    // Rigged-model side panel.  Keep the presentation intentionally minimal:
-    // only animation names are visible.  Selecting a name retains the useful
-    // behavior of starting that clip, without exposing codec/debug details,
-    // frame counters, timelines, or skeleton internals.
     bool hasCompatibleAnimations = false;
     if (!tool.isWorldMode && tool.activePreviewTab >= 0 && tool.loadedSkeleton &&
         tool.loadedAnimFile) {
@@ -370,22 +362,103 @@ void RenderUI(SpiderManTool& tool) {
             }
         }
     }
-    if (hasCompatibleAnimations) {
-        if (ImGui::Begin("Animations")) {
-            for (int i = 0; i < (int)tool.loadedAnimFile->animations.size(); ++i) {
-                const auto& anim = tool.loadedAnimFile->animations[i];
-                if (anim.skeleton && !nal_skeleton_pose_compatible(
-                        anim.skeleton.get(), tool.loadedSkeleton.get())) {
-                    continue;
+    const bool hasVisemeAnimations = !tool.isWorldMode && tool.activePreviewTab >= 0 &&
+        tool.loadedMorphFile.valid && !tool.loadedVisemeStreams.empty();
+    // A model "has morphs" whenever it carries a valid morph file with at least one
+    // adjustable target (index 0 is the neutral base), regardless of whether it also
+    // ships viseme lip-sync streams.
+    const bool hasMorphs = !tool.isWorldMode && tool.activePreviewTab >= 0 &&
+        tool.loadedMorphFile.valid && tool.morphTargetWeights.size() > 1;
+    // When a model with morph targets was just loaded/restored, surface this panel and
+    // jump straight to the Morphs tab. One-shot: consume the request once we can honor it.
+    const bool focusMorphs = tool.focusMorphsTab && hasMorphs;
+    if (hasMorphs) tool.focusMorphsTab = false;
+    // One docked panel holding an inner tab bar (Animations / Morphs). It is locked to its dock
+    // slot: NoTabBar hides the dock node's own tab bar — that removes both the redundant outer
+    // "Animations" container AND the "hide tab bar" corner menu (▼) — while the inner tab bar
+    // supplies the two tabs. NoCloseButton = can't be closed; NoMove = can't be dragged/undocked.
+    if (hasCompatibleAnimations || hasVisemeAnimations || hasMorphs) {
+        ImGuiWindowClass lockClass;
+        lockClass.DockNodeFlagsOverrideSet =
+            ImGuiDockNodeFlags_NoTabBar | ImGuiDockNodeFlags_NoCloseButton |
+            ImGuiDockNodeFlags_NoWindowMenuButton | ImGuiDockNodeFlags_NoDockingSplitMe |
+            ImGuiDockNodeFlags_NoDockingOverMe;
+        ImGui::SetNextWindowClass(&lockClass);
+        if (focusMorphs) {
+            ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
+            ImGui::SetNextWindowFocus();
+        }
+        // Keep this window's name exactly "Animations" — it is docked by that name in imgui.ini
+        // (DockId 0x00000004); renaming it detaches it from the saved dock slot.
+        if (ImGui::Begin("Animations", nullptr, ImGuiWindowFlags_NoMove)) {
+            if (ImGui::BeginTabBar("##AnimMorphTabs")) {
+                if ((hasCompatibleAnimations || hasVisemeAnimations) &&
+                        ImGui::BeginTabItem("Animations")) {
+                    if (hasCompatibleAnimations) {
+                        for (int i = 0; i < (int)tool.loadedAnimFile->animations.size(); ++i) {
+                            const auto& anim = tool.loadedAnimFile->animations[i];
+                            if (anim.skeleton && !nal_skeleton_pose_compatible(
+                                    anim.skeleton.get(), tool.loadedSkeleton.get())) {
+                                continue;
+                            }
+                            const std::string label = anim.name + "###Animation" + std::to_string(i);
+                            if (ImGui::Selectable(label.c_str(),
+                                    tool.selectedAnimIndex == i && tool.selectedVisemeIndex < 0)) {
+                                tool.selectedAnimIndex = i;
+                                tool.selectedVisemeIndex = -1;
+                                std::fill(tool.morphTargetWeights.begin(), tool.morphTargetWeights.end(), 0.0f);
+                                tool.currentAnimFrame = 0;
+                                tool.animFrameFraction = 0.0f;
+                                tool.animPlaybackTime = 0.0f;
+                                tool.isAnimPlaying = true;
+                            }
+                        }
+                    }
+                    if (hasVisemeAnimations) {
+                        for (int i = 0; i < (int)tool.loadedVisemeStreams.size(); ++i) {
+                            const auto& stream = tool.loadedVisemeStreams[i];
+                            const std::string label = stream.name + "###Viseme" + std::to_string(i);
+                            if (ImGui::Selectable(label.c_str(), tool.selectedVisemeIndex == i)) {
+                                tool.selectedAnimIndex = -1;
+                                tool.selectedVisemeIndex = i;
+                                std::fill(tool.morphTargetWeights.begin(), tool.morphTargetWeights.end(), 0.0f);
+                                tool.currentAnimFrame = 0;
+                                tool.animFrameFraction = 0.0f;
+                                tool.animPlaybackTime = 0.0f;
+                                tool.isAnimPlaying = true;
+                            }
+                        }
+                    }
+                    ImGui::EndTabItem();
                 }
-                const std::string label = anim.name + "###Animation" + std::to_string(i);
-                if (ImGui::Selectable(label.c_str(), tool.selectedAnimIndex == i)) {
-                    tool.selectedAnimIndex = i;
-                    tool.currentAnimFrame = 0;
-                    tool.animFrameFraction = 0.0f;
-                    tool.animPlaybackTime = 0.0f;
-                    tool.isAnimPlaying = true;
+                if (hasMorphs && ImGui::BeginTabItem("Morphs", nullptr,
+                        focusMorphs ? ImGuiTabItemFlags_SetSelected : 0)) {
+                    if (ImGui::SmallButton("Reset all")) {
+                        std::fill(tool.morphTargetWeights.begin(),
+                                  tool.morphTargetWeights.end(), 0.0f);
+                        tool.selectedVisemeIndex = -1;
+                        tool.selectedAnimIndex = -1;
+                        tool.isAnimPlaying = false;
+                    }
+                    ImGui::Separator();
+                    // The .pcmorph stores targets by index (the game keeps no per-target names):
+                    // target 0 is the neutral base, targets 1..RETAIL_CHANNEL_COUNT are the viseme
+                    // lip-sync channels, the rest are expression/blink shapes.
+                    for (int i = 1; i < (int)tool.morphTargetWeights.size(); ++i) {
+                        char label[64];
+                        if (i <= (int)UsmViseme::RETAIL_CHANNEL_COUNT)
+                            std::snprintf(label, sizeof(label), "Viseme %02d##morph%d", i, i);
+                        else
+                            std::snprintf(label, sizeof(label), "Shape %02d##morph%d", i, i);
+                        if (ImGui::SliderFloat(label, &tool.morphTargetWeights[i], 0.0f, 1.0f)) {
+                            tool.selectedVisemeIndex = -1;
+                            tool.selectedAnimIndex = -1;
+                            tool.isAnimPlaying = false;
+                        }
+                    }
+                    ImGui::EndTabItem();
                 }
+                ImGui::EndTabBar();
             }
         }
         ImGui::End();
@@ -449,7 +522,6 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::Checkbox("Search all packs", &searchAllPacks);
             ImGui::InputTextWithHint("##SearchFiles", "Search files...", fileSearchBuffer, sizeof(fileSearchBuffer));
 
-
             static float searchTimer = 0.0f;
             static std::string pendingSearch = "";
             std::string currentSearch = fileSearchBuffer;
@@ -469,7 +541,6 @@ void RenderUI(SpiderManTool& tool) {
             std::string fileSearchLower = ToLower(fileSearchBuffer);
             bool useFileFilter = !fileSearchLower.empty();
 
-
             if (!searchAllPacks && tool.isGlobalSearchMode) {
                 tool.isGlobalSearchMode = false;
                 tool.globalSearchResults.clear();
@@ -477,13 +548,11 @@ void RenderUI(SpiderManTool& tool) {
 
             ImGui::BeginChild("FileList", ImVec2(0, 0), true);
 
-
             if (searchAllPacks && tool.isGlobalSearchMode && !tool.globalSearchResults.empty()) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Found %d results across all packs", (int)tool.globalSearchResults.size());
                 ImGui::Separator();
 
                 bool hasSelection = tool.selectedGlobalSearchIndex >= 0 && tool.selectedGlobalSearchIndex < (int)tool.globalSearchResults.size();
-                float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
                 if (!hasSelection) ImGui::BeginDisabled();
                 if (ImGui::Button("Extract", ImVec2(-1.0f, 0))) {
@@ -493,14 +562,9 @@ void RenderUI(SpiderManTool& tool) {
 
                 bool isPcm = hasSelection && tool.globalSearchResults[tool.selectedGlobalSearchIndex].isPcm;
                 if (isPcm) {
-                    if (ImGui::Button("Details", ImVec2(halfWidth, 0))) {
+                    if (ImGui::Button("Details", ImVec2(-1.0f, 0))) {
                         tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
                         tool.AnalyzePCM(tool.selectedFileIndex);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("To GLB", ImVec2(halfWidth, 0))) {
-                        tool.SelectGlobalSearchResult(tool.selectedGlobalSearchIndex);
-                        tool.ExtractFile(tool.selectedFileIndex, true);
                     }
                 }
                 if (!hasSelection) ImGui::EndDisabled();
@@ -536,6 +600,25 @@ void RenderUI(SpiderManTool& tool) {
                             tool.selectedGlobalSearchIndex = i;
                             if (r.isPcm) tool.OpenGlobalSearchPcmTab(i);
                         }
+                        if (r.isPcm && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                            tool.selectedGlobalSearchIndex = i;
+                            tool.SelectGlobalSearchResult(i);
+                        }
+                        if (r.isPcm && ImGui::BeginPopupContextItem()) {
+                            if (ImGui::BeginMenu("Export")) {
+                                if (ImGui::MenuItem("To .GLB")) {
+                                    tool.SelectGlobalSearchResult(i);
+                                    tool.ExtractFile(tool.selectedFileIndex, true);
+                                }
+                                ImGui::EndMenu();
+                            }
+                            if (tool.CanViewAnimationStateMachine(tool.selectedFileIndex)) {
+                                if (ImGui::MenuItem("View Animation State Machine")) {
+                                    tool.OpenAnimationStateMachineForModel(tool.selectedFileIndex);
+                                }
+                            }
+                            ImGui::EndPopup();
+                        }
                         if (!r.isPcm && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                             tool.SelectGlobalSearchResult(i);
                             tool.LoadPreview(tool.selectedFileIndex);
@@ -550,18 +633,15 @@ void RenderUI(SpiderManTool& tool) {
             }
             else if (!tool.entries.empty()) {
                 bool fileSelected = tool.selectedFileIndex >= 0 && tool.selectedFileIndex < (int)tool.entries.size();
-                float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
                 if (!fileSelected) ImGui::BeginDisabled();
                 if (ImGui::Button("Extract", ImVec2(-1.0f, 0))) tool.ExtractFile(tool.selectedFileIndex);
 
                 bool isPcm = fileSelected && tool.entries[tool.selectedFileIndex].isPcm;
                 if (isPcm) {
-                    if (ImGui::Button("Details", ImVec2(halfWidth, 0))) {
+                    if (ImGui::Button("Details", ImVec2(-1.0f, 0))) {
                         tool.AnalyzePCM(tool.selectedFileIndex);
                     }
-                    ImGui::SameLine();
-                    if (ImGui::Button("To GLB", ImVec2(halfWidth, 0))) tool.ExtractFile(tool.selectedFileIndex, true);
                 }
                 if (!fileSelected) ImGui::EndDisabled();
 
@@ -596,6 +676,22 @@ void RenderUI(SpiderManTool& tool) {
                             tool.selectedFileIndex = i;
                             if (e.isPcm) tool.OpenPcmPreviewTab(i);
                         }
+                        if (e.isPcm && ImGui::BeginPopupContextItem()) {
+                            if (ImGui::BeginMenu("Export")) {
+                                if (ImGui::MenuItem("To .GLB")) {
+                                    tool.selectedFileIndex = i;
+                                    tool.ExtractFile(i, true);
+                                }
+                                ImGui::EndMenu();
+                            }
+                            if (tool.CanViewAnimationStateMachine(i)) {
+                                if (ImGui::MenuItem("View Animation State Machine")) {
+                                    tool.selectedFileIndex = i;
+                                    tool.OpenAnimationStateMachineForModel(i);
+                                }
+                            }
+                            ImGui::EndPopup();
+                        }
                         if (e.isDds && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                             tool.LoadPreview(i);
                         }
@@ -626,7 +722,6 @@ void RenderUI(SpiderManTool& tool) {
                             ImGui::Text("PCM File Analysis");
                             ImGui::Separator();
 
-
                             ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "File Info");
                             ImGui::Text("  Size: %u bytes (0x%X)", d.fileSize, d.fileSize);
                             ImGui::Text("  Entries: %u", d.numEntries);
@@ -652,7 +747,6 @@ void RenderUI(SpiderManTool& tool) {
 
                             ImGui::EndTabItem();
                         }
-
 
                         if (ImGui::BeginTabItem("LODs")) {
                             const auto& d = tool.currentPcmDetails;
@@ -684,7 +778,6 @@ void RenderUI(SpiderManTool& tool) {
                             ImGui::EndTabItem();
                         }
 
-
                         if (ImGui::BeginTabItem("Materials")) {
                             const auto& d = tool.currentPcmDetails;
 
@@ -695,7 +788,6 @@ void RenderUI(SpiderManTool& tool) {
 
                                 if (ImGui::CollapsingHeader(label.c_str())) {
                                     ImGui::Indent();
-
 
                                     std::string shaderType;
                                     ImVec4 shaderColor = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
@@ -727,7 +819,6 @@ void RenderUI(SpiderManTool& tool) {
                             ImGui::EndTabItem();
                         }
 
-
                         if (ImGui::BeginTabItem("Submeshes")) {
                             const auto& d = tool.currentPcmDetails;
 
@@ -738,7 +829,6 @@ void RenderUI(SpiderManTool& tool) {
 
                                 if (ImGui::CollapsingHeader(label.c_str())) {
                                     ImGui::Indent();
-
 
                                     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Geometry");
                                     ImGui::Text("  Vertices: %u @ 0x%X", sm.vertexCount, sm.vertexOffset);
@@ -751,7 +841,6 @@ void RenderUI(SpiderManTool& tool) {
                                         ImGui::Text("  Bounding Radius: %.3f", sm.boundingRadius);
                                     }
 
-
                                     ImGui::Spacing();
                                     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Vertex Format");
                                     ImGui::BulletText("Position (float3)");
@@ -762,14 +851,12 @@ void RenderUI(SpiderManTool& tool) {
                                         ImGui::BulletText("Bone Weights");
                                     }
 
-
                                     if (sm.boneMapCount > 0) {
                                         ImGui::Spacing();
                                         ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Bone Mapping");
                                         ImGui::Text("  Map Offset: 0x%X", sm.boneMapOffset);
                                         ImGui::Text("  Map Count: %u", sm.boneMapCount);
                                     }
-
 
                                     if (!sm.materialTexture.empty() || !sm.shaderType.empty()) {
                                         ImGui::Spacing();
@@ -792,7 +879,6 @@ void RenderUI(SpiderManTool& tool) {
                             ImGui::EndTabItem();
                         }
 
-
                         if (ImGui::BeginTabItem("Bones")) {
                             const auto& d = tool.currentPcmDetails;
 
@@ -803,7 +889,6 @@ void RenderUI(SpiderManTool& tool) {
                                 ImGui::TextDisabled("Note: Parent indices use linear fallback");
                                 ImGui::TextDisabled("(Hierarchy not stored in PCM)");
                                 ImGui::Separator();
-
 
                                 if (ImGui::BeginTable("BoneTable", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 300))) {
                                     ImGui::TableSetupColumn("Idx", ImGuiTableColumnFlags_WidthFixed, 30.0f);
@@ -836,7 +921,6 @@ void RenderUI(SpiderManTool& tool) {
 
                             ImGui::EndTabItem();
                         }
-
 
                         if (ImGui::BeginTabItem("Legacy")) {
                             ImGui::Text("Skeleton (Legacy)");
@@ -980,4 +1064,6 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::PopStyleColor(3);
         ImGui::PopStyleVar(2);
     }
+
+    RenderAnimationStateMachineViewer(tool);
 }

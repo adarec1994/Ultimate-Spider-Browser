@@ -1,24 +1,18 @@
 #include "SpiderManTool.h"
 #include "NalIntegration.h"
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
 void SpiderManTool::OpenPCPack(const std::string& path) {
     if (loadedPCPackPath == path) return;
 
-    // Selecting a pack is a browser operation.  Once preview tabs exist, it
-    // must not tear down or mutate the active tab merely because the user is
-    // looking for another asset.
     const bool preservePreviewTab = activePreviewTab >= 0 && isModelLoaded;
     if (!preservePreviewTab) {
         isModelLoaded = false;
         isModelPreview = false;
     }
 
-    // If the user is browsing the world (isWorldMode), keep the world rendered
-    // -- clicking another pack should just switch the file browser, not blow
-    // the loaded city away. LoadModelToGL handles the actual teardown when
-    // the user opens a single-mesh preview.
     const bool preserveWorld = isWorldMode || preservePreviewTab;
 
     if (!preserveWorld) {
@@ -35,21 +29,16 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
         }
         textureCache.clear();
 
-        // Clear name-based texture cache too
         for (auto& t : textureNameCache) {
             if (t.second != 0) glDeleteTextures(1, &t.second);
         }
         textureNameCache.clear();
 
-        // World mesh selection only matters when world geometry is loaded.
         selectedMeshIndex = -1;
         selectedMeshInstanceIndex = -1;
         selectedMeshPcmData.clear();
         showWorldMeshDetails = false;
 
-        // materialMap is per-PCM-being-parsed; ParseMaterialEntries rebuilds
-        // it on every AddMeshFromData call. Clearing here is the safe default
-        // for non-world flows.
         materialMap.clear();
     }
 
@@ -64,7 +53,7 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     currentPcmIndex = -1;
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) { Log("Failed to open " + path); return; }
+    if (!file.is_open()) {  return; }
 
     size_t size = file.tellg();
     file.seekg(0);
@@ -72,13 +61,11 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     file.read((char*)pcPackData.data(), size);
     loadedPCPackPath = path;
 
-    // Byte-exact directory parse (replays OpenUSM's resource_directory un-mash;
-    // see PackDirectory.h). Replaces the old 0xE3E3E3E3 filler scan.
     currentDir = PackDirectory::Parse(pcPackData);
 
     entries.clear();
     if (!currentDir.valid) {
-        Log("Invalid PCPACK directory: " + currentDir.error);
+
         return;
     }
     dataOffset = currentDir.dataBase;
@@ -94,8 +81,6 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
         if (dictionary.count(e.hash)) e.name = dictionary[e.hash];
         else { std::stringstream ss; ss << "Unknown_" << std::hex << e.hash; e.name = ss.str(); }
 
-        // Extension: content signature first (drives viewer behavior), then the
-        // directory's authoritative resource_key_type.
         const char* sigExt = nullptr;
         if (e.size > 4 && (size_t)e.offset + 4 <= pcPackData.size()) {
             const char* magicSig = (const char*)&pcPackData[e.offset];
@@ -112,6 +97,7 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
             case RES_KEY_SCN_ENTITY:  e.name += ".scn"; break;
             case RES_KEY_IFL:         e.name += ".ifl"; break;
             case RES_KEY_SCRIPT:      e.name += ".script"; break;
+            case RES_KEY_VISEME_STREAM: e.name += ".viseme"; break;
             default:                  e.name += ".dat"; break;
         }
 
@@ -130,25 +116,88 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
         entries.push_back(e);
     }
 
-    Log("Directory: " + std::to_string(currentDir.resources.size()) + " resources, " +
-        std::to_string(currentDir.skeletons.size()) + " skeleton(s), " +
-        std::to_string(currentDir.animFiles.size()) + " anim file(s), " +
-        std::to_string(currentDir.anims.size()) + " named anim(s)");
-
     std::sort(entries.begin(), entries.end(), [](const FileEntry& a, const FileEntry& b) {
         return a.name < b.name;
     });
 
-    Log("Opened " + fs::path(path).filename().string());
+    LoadAnimationStateMachinesForCurrentPack();
 
-    // Active preview tabs own their skeleton/animation state.  Loading the
-    // newly browsed pack here would replace that state and corrupt the active
-    // model.  A newly opened PCM tab performs this work after caching the old
-    // tab; headless/export and the first-tab path retain the eager behavior.
     if (!preservePreviewTab) {
         LoadSkeletonForCurrentPack();
         LoadAnimationForCurrentPack();
     }
+}
+
+void SpiderManTool::LoadAnimationStateMachinesForCurrentPack() {
+    animationStateMachines.clear();
+    if (!currentDir.valid || pcPackData.empty()) return;
+    for (const auto& resource : currentDir.resources) {
+        if (resource.type != RES_KEY_ALS_FILE || resource.size == 0) continue;
+        if (resource.offset > pcPackData.size() ||
+            resource.size > pcPackData.size() - resource.offset) continue;
+        auto file = UsmAls::Parse(pcPackData.data() + resource.offset,
+                                  resource.size, resource.hash);
+        if (file.valid) animationStateMachines.push_back(std::move(file));
+    }
+}
+
+bool SpiderManTool::PcmModelHasSkeleton(int entryIndex) const {
+    if (entryIndex < 0 || entryIndex >= static_cast<int>(entries.size())) return false;
+    const auto& entry = entries[entryIndex];
+    if (!entry.isPcm || entry.offset > pcPackData.size() ||
+        entry.size > pcPackData.size() - entry.offset || entry.size < 16) return false;
+    const uint8_t* pcm = pcPackData.data() + entry.offset;
+    auto read16 = [&](size_t offset) {
+        uint16_t value = 0;
+        std::memcpy(&value, pcm + offset, sizeof(value));
+        return value;
+    };
+    auto read32 = [&](size_t offset) {
+        uint32_t value = 0;
+        std::memcpy(&value, pcm + offset, sizeof(value));
+        return value;
+    };
+    const uint32_t entryCount = read32(8);
+    const uint32_t tableOffset = read32(12);
+    if (entryCount > 1000 || tableOffset > entry.size ||
+        static_cast<uint64_t>(entryCount) * 12 > entry.size - tableOffset) return false;
+    for (uint32_t index = 0; index < entryCount; ++index) {
+        const size_t record = tableOffset + static_cast<size_t>(index) * 12;
+        const uint16_t tag = read16(record + 2);
+        const uint32_t object = read32(record + 4);
+        if (tag == 768 && object <= entry.size - 4 && read32(object) > 0) return true;
+        if (tag != 512 || object > entry.size - 16) continue;
+        const uint32_t submeshCount = read32(object + 8);
+        const uint32_t submeshTable = read32(object + 12);
+        if (submeshCount > 256 || submeshTable > entry.size ||
+            static_cast<uint64_t>(submeshCount) * 8 > entry.size - submeshTable) continue;
+        for (uint32_t submesh = 0; submesh < submeshCount; ++submesh) {
+            const size_t item = submeshTable + static_cast<size_t>(submesh) * 8;
+            const uint32_t submeshOffset = read32(item + 4);
+            if (submeshOffset <= entry.size - 76 && read32(submeshOffset + 72) >= 44) return true;
+        }
+    }
+    return false;
+}
+
+bool SpiderManTool::CanViewAnimationStateMachine(int entryIndex) const {
+    return !animationStateMachines.empty() && PcmModelHasSkeleton(entryIndex);
+}
+
+void SpiderManTool::OpenAnimationStateMachineForModel(int entryIndex) {
+    if (!CanViewAnimationStateMachine(entryIndex)) return;
+    animationStateMachineModelHash = entries[entryIndex].hash;
+    animationStateMachineModelName = entries[entryIndex].name;
+    selectedAnimationStateMachine = 0;
+    selectedAnimationMachineLayer = 0;
+    const auto& machines = animationStateMachines[0].machines;
+    for (int index = 0; index < static_cast<int>(machines.size()); ++index) {
+        if (machines[index].baseLayer) {
+            selectedAnimationMachineLayer = index;
+            break;
+        }
+    }
+    showAnimationStateMachine = true;
 }
 
 void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
@@ -166,8 +215,6 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
     fs::path outDir = fs::current_path() / "extracted" / p.stem();
     fs::create_directories(outDir);
 
-    Log("Extracting to: " + outDir.string());
-
     for(auto& e : entries) {
         fs::path fullFilePath = outDir / e.name;
         if (fullFilePath.has_parent_path()) {
@@ -177,8 +224,7 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
         if (e.isPcm && convertAll) {
             fs::path glbPath = fullFilePath;
             glbPath.replace_extension(".glb");
-            // Anims are decoded per-skeleton at pack open; only the skinning
-            // skeleton needs to follow the mesh here.
+
             SelectSkeletonForMesh(e.name, e.hash);
             if (!loadedAnimFile) LoadAnimationForCurrentPack();
             std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
@@ -189,7 +235,7 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
                 out.write((char*)&pcPackData[e.offset], e.size);
                 out.close();
             } else {
-                Log("Failed to write file: " + fullFilePath.string());
+
                 continue;
             }
         }
@@ -237,7 +283,7 @@ void SpiderManTool::ExtractFile(int index, bool asGlb) {
             out.close();
             ShowNotification("Saved file to:\n" + fullFilePath.string());
         } else {
-            Log("Failed to write file: " + fullFilePath.string());
+
         }
     }
 }

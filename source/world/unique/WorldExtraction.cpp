@@ -1,4 +1,4 @@
-﻿void SpiderManTool::LoadSkybox() {
+void SpiderManTool::LoadSkybox() {
     for (const auto& path : foundPacks) {
         std::string stem = StrToLower(path.stem().string());
         if (stem != "city_arena") continue;
@@ -70,9 +70,6 @@
                         transformMatrix[10] = 1.0f;
                         transformMatrix[15] = 1.0f;
 
-                        RecordWorldMeshPlacementDebug("unique pcms", "sky_day",
-                                                      path.string(), absOffset,
-                                                      transformMatrix);
                         AddMeshFromDataWithTransform(skyData, "sky_day", nullptr, path.string(), absOffset, transformMatrix);
                         file.close();
                         return;
@@ -86,11 +83,6 @@
         break;
     }
 }
-
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-//  LoadPackEntities â€” load all placed props from a single PCPACK
-//  Called from LoadPreview when viewing a zone mesh in world mode.
-//  Handles: named entity instances (0x0A block) + orphan PCM placement records
 
 static void DecodeDXT1Block(const uint8_t* src, uint8_t out[4][4][4]) {
     uint16_t c0 = src[0] | (src[1] << 8), c1 = src[2] | (src[3] << 8);

@@ -1,10 +1,5 @@
 #pragma once
 
-// Byte-exact decoder for nalGenericAnim (version 0x10200).  Generic clips do
-// not use the character PCANIM component table: the active-component bitset,
-// per-codec headers, length-prefixed entropy streams, and chunk table are all
-// embedded directly after the 0x80-byte animation header.
-
 #include "NalAnimCodec.h"
 #include "NalSkeleton.h"
 #include <array>
@@ -95,9 +90,6 @@ static inline std::vector<int> decode_second_deltas(NalBitStream& bits,
     return result;
 }
 
-// USM.exe sub_78DF40.  The first sample is an absolute quantized integer,
-// the second adds the initial delta, and later samples integrate entropy-coded
-// second differences.
 static inline std::vector<float> decode_scalar(const uint8_t* data,
                                                 size_t size,
                                                 int frame_count,
@@ -185,16 +177,13 @@ static inline std::array<float, 4> quat_from_xyz(float x, float y, float z) {
 
 static inline std::array<float, 4> quat_multiply(const std::array<float, 4>& a,
                                                  const std::array<float, 4>& b) {
-    // sub_5EBBA0: delta quaternion a is pre-multiplied into current b.
+
     std::array<float, 4> out;
     nal_quat_mul(a.data(), b.data(), out.data());
     quat_normalize(out.data());
     return out;
 }
 
-// USM.exe sub_7920C0/sub_792500.  Axis streams are concatenated at bit
-// granularity. X/Y optionally store an explicit skip; otherwise the next axis
-// begins after decoding this axis's frameCount-2 entropy values.
 static inline std::vector<std::array<float, 4>> decode_quaternion(
     const uint8_t* data, size_t size, int frame_count, float scale) {
     std::vector<std::array<float, 4>> out(std::max(0, frame_count));
@@ -285,8 +274,7 @@ static inline void multiply(const std::array<float, 16>& a,
 }
 
 static inline void set_rotation(const float* q, std::array<float, 16>& matrix) {
-    // sub_5FC820/sub_5FC9C0, also used by the character evaluator: NAL's
-    // quaternion is conjugated when expanded into the engine matrix layout.
+
     float x = -q[0], y = -q[1], z = -q[2], w = q[3];
     const float xx = x*x, yy = y*y, zz = z*z;
     const float xy = x*y, xz = x*z, yz = y*z;
@@ -377,7 +365,7 @@ static inline bool build_world_matrices(const NalSkeletonData& skeleton,
     return true;
 }
 
-} // namespace NalGenericCodecDetail
+}
 
 static inline NalGenericDecodedAnimation nal_decode_generic_animation(
     const std::vector<uint8_t>& blob,
@@ -474,8 +462,7 @@ static inline NalGenericDecodedAnimation nal_decode_generic_animation(
                     object_size += record_size;
                     record += record_size;
                 }
-                // sub_4B1070 advances a four-byte per-track prefix plus the
-                // serialized event object size returned by sub_49E950.
+
                 header_cursor += 4 + object_size;
             }
         }
@@ -627,9 +614,7 @@ static inline NalGenericDecodedAnimation nal_decode_generic_animation(
                         result.warnings.push_back("Generic event stream is truncated");
                         return result;
                     }
-                    // sub_78E320 expands (run,value) byte pairs. Preserve the
-                    // resulting event byte in each pose even though it does not
-                    // contribute to a matrix command.
+
                     size_t cursor = stream_cursor;
                     int run = 0; uint8_t value = 0;
                     for (int frame = 0; frame < this_frame_count; ++frame) {

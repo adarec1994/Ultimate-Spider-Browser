@@ -1,4 +1,4 @@
-﻿static bool AdvanceMashVectorData(const std::vector<uint8_t>& data,
+static bool AdvanceMashVectorData(const std::vector<uint8_t>& data,
                                   size_t objectBase,
                                   size_t vectorOffset,
                                   size_t elementSize,
@@ -59,11 +59,10 @@ static std::vector<PackMeshFileResource> ReadPackMeshFileResources(const std::st
     size_t cursor = objectBase + kResourceDirectorySize;
     if (cursor > headerData.size()) return resources;
 
-    // resource_directory::un_mash_start walks these vectors in this order.
     cursor = AlignUp(cursor, 8);
-    if (!AdvanceMashVectorData(headerData, objectBase, 0x00, 4, 4, cursor)) return resources;   // parents
-    if (!AdvanceMashVectorData(headerData, objectBase, 0x08, 16, 8, cursor)) return resources;  // resource_locations
-    if (!AdvanceMashVectorData(headerData, objectBase, 0x10, 12, 8, cursor)) return resources;  // texture_locations
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x00, 4, 4, cursor)) return resources;
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x08, 16, 8, cursor)) return resources;
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x10, 12, 8, cursor)) return resources;
 
     size_t meshFileArrayOffset = 0;
     uint16_t meshFileCount = 0;
@@ -130,12 +129,11 @@ static std::vector<PackTlResourceLocation> ReadPackMeshLocations(const std::stri
     size_t cursor = objectBase + kResourceDirectorySize;
     if (cursor > headerData.size()) return meshLocations;
 
-    // resource_directory::un_mash_start walks these vectors in this order.
     cursor = AlignUp(cursor, 8);
-    if (!AdvanceMashVectorData(headerData, objectBase, 0x00, 4, 4, cursor)) return meshLocations;   // parents
-    if (!AdvanceMashVectorData(headerData, objectBase, 0x08, 16, 8, cursor)) return meshLocations;  // resource_locations
-    if (!AdvanceMashVectorData(headerData, objectBase, 0x10, 12, 8, cursor)) return meshLocations;  // texture_locations
-    if (!AdvanceMashVectorData(headerData, objectBase, 0x18, 12, 8, cursor)) return meshLocations;  // mesh_file_locations
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x00, 4, 4, cursor)) return meshLocations;
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x08, 16, 8, cursor)) return meshLocations;
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x10, 12, 8, cursor)) return meshLocations;
+    if (!AdvanceMashVectorData(headerData, objectBase, 0x18, 12, 8, cursor)) return meshLocations;
 
     size_t meshArrayOffset = 0;
     uint16_t meshCount = 0;
@@ -200,8 +198,6 @@ static std::vector<MeshLocationBinding> BuildMeshLocationBindings(const std::str
                       return a.absOffset < b.absOffset;
                   });
 
-        // OpenUSM's tlresource_location for TLRESOURCE_TYPE_MESH points at the
-        // mesh struct inside the PCM. Resolve only by the containing PCM range.
         for (size_t i = 0; i < meshLocations.size(); i++) {
             uint32_t meshOffset = meshLocations[i].absOffset;
             for (const auto& meshFile : meshFiles) {
@@ -385,9 +381,6 @@ static int LoadWorldOceanMesh(SpiderManTool& tool, const float* baseTransform) {
             if (!file.good()) continue;
             if (pcmData.size() < 4 || ReadU32LE(pcmData, 0) != 0x204D4350) continue;
 
-            RecordWorldMeshPlacementDebug("unique pcms", "oceanmesh",
-                                          path.string(), absOffset,
-                                          baseTransform);
             tool.AddMeshFromDataWithTransform(pcmData, "oceanmesh", nullptr,
                                               path.string(), absOffset,
                                               baseTransform);

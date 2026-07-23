@@ -1,26 +1,10 @@
 #pragma once
-// PackDirectory.h - byte-exact PCPACK resource directory parser.
-//
-// Replays the engine's un-mash logic (Archive/OpenUSM/src/resource_directory.cpp
-// un_mash_start + mashable_vector.cpp custom_un_mash specializations) instead of
-// scanning for 0xE3E3E3E3 filler. Validated against all 618 retail packs: every
-// byte is attributable to header / directory / resource data / fill (00,E3,77,CD).
-//
-// File layout:
-//   +0x00 resource_pack_header (0x2C): 5 version u32s, flags,
-//         directory_offset(+0x18), res_dir_mash_size(+0x1C), 3 spare
-//   at directory_offset: generic_mash_header (0x10):
-//         safety_key, flags, shared_offs, class_id(u16), field_E(u16)
-//   then resource_directory struct image (0x2BC), then the main mash stream;
-//   shared stream at directory_offset + shared_offs.
-//   Resource data begins at res_dir_mash_size (measured from file start).
 
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
 
-// resource_key_type (OpenUSM resource_key.h)
 enum ResourceKeyType : uint32_t {
     RES_KEY_NONE = 0, RES_KEY_ANIMATION = 1, RES_KEY_NAL_SKL = 2, RES_KEY_ALS_FILE = 3,
     RES_KEY_ENTITY = 4, RES_KEY_EXTERNAL_ENT = 5, RES_KEY_TEXTURE = 6, RES_KEY_MPAL_TEXTURE = 7,
@@ -32,7 +16,8 @@ enum ResourceKeyType : uint32_t {
     RES_KEY_MISSION_TABLE = 27, RES_KEY_SCRIPT_HEADER_FILE = 29, RES_KEY_LOD = 40, RES_KEY_SIN = 41,
     RES_KEY_SCRIPT_GV = 42, RES_KEY_SCRIPT_SV = 43, RES_KEY_TOKEN_LIST = 44,
     RES_KEY_DISTRICT_GRAPH = 45, RES_KEY_PATH = 46, RES_KEY_PATROL_DEF = 47, RES_KEY_LANGUAGE = 48,
-    RES_KEY_SLF_LIST = 49, RES_KEY_MESH_FILE_STRUCT = 51, RES_KEY_MORPH_FILE_STRUCT = 52,
+    RES_KEY_SLF_LIST = 49, RES_KEY_VISEME_STREAM = 50, RES_KEY_MESH_FILE_STRUCT = 51,
+    RES_KEY_MORPH_FILE_STRUCT = 52,
     RES_KEY_MATERIAL_FILE_STRUCT = 53, RES_KEY_FX_CACHE = 54, RES_KEY_AI_STATE_GRAPH = 55,
     RES_KEY_BASE_AI = 56, RES_KEY_CUT_SCENE = 57, RES_KEY_AI_INTERACTION = 58,
     RES_KEY_GAB_DATABASE = 59, RES_KEY_SOUND_ALIAS_DATABASE = 60, RES_KEY_IFC_ATTRIBUTE = 67,
@@ -80,6 +65,7 @@ inline const char* ResourceKeyTypeName(uint32_t t) {
     case RES_KEY_PATROL_DEF: return "PATROL_DEF";
     case RES_KEY_LANGUAGE: return "LANGUAGE";
     case RES_KEY_SLF_LIST: return "SLF_LIST";
+    case RES_KEY_VISEME_STREAM: return "VISEME_STREAM";
     case RES_KEY_MESH_FILE_STRUCT: return "MESH_FILE_STRUCT";
     case RES_KEY_MORPH_FILE_STRUCT: return "MORPH_FILE_STRUCT";
     case RES_KEY_MATERIAL_FILE_STRUCT: return "MATERIAL_FILE_STRUCT";
@@ -95,27 +81,24 @@ inline const char* ResourceKeyTypeName(uint32_t t) {
     }
 }
 
-// tlresource_type (OpenUSM tlresource_location.h)
 enum TlResourceType : uint8_t {
     TLRES_NONE = 0, TLRES_TEXTURE = 1, TLRES_MESH_FILE = 2, TLRES_MESH = 3,
     TLRES_MORPH_FILE = 4, TLRES_MORPH = 5, TLRES_MATERIAL_FILE = 6, TLRES_MATERIAL = 7,
     TLRES_ANIM_FILE = 8, TLRES_ANIM = 9, TLRES_SCENE_ANIM = 10, TLRES_SKELETON = 11,
 };
 
-// resource_location: {hash, resource_key_type, offset, size} (16 bytes)
 struct PackResourceEntry {
     uint32_t hash = 0;
-    uint32_t type = 0;    // ResourceKeyType
-    uint32_t offset = 0;  // absolute file offset
+    uint32_t type = 0;
+    uint32_t offset = 0;
     uint32_t size = 0;
 };
 
-// tlresource_location: {name_hash, type|size<<8, data_offset} (12 bytes)
 struct PackTlResource {
     uint32_t nameHash = 0;
-    uint8_t  type = 0;    // TlResourceType
-    uint32_t size = 0;    // m_type >> 8; 0 for interior locations (MESH/ANIM/MATERIAL)
-    uint32_t offset = 0;  // absolute file offset
+    uint8_t  type = 0;
+    uint32_t size = 0;
+    uint32_t offset = 0;
 };
 
 struct PackDirectory {
@@ -125,11 +108,11 @@ struct PackDirectory {
     uint32_t versions[5] = {};
     uint32_t flags = 0;
     uint32_t dirOffset = 0;
-    uint32_t mashSize = 0;   // == absolute offset where resource data begins
+    uint32_t mashSize = 0;
     uint32_t dataBase = 0;
 
     std::vector<PackResourceEntry> resources;
-    // typed name->data tables, in un_mash order
+
     std::vector<PackTlResource> textures, meshFiles, meshes, morphFiles, morphs,
                                 materialFiles, materials, animFiles, anims,
                                 sceneAnims, skeletons;
@@ -139,7 +122,6 @@ struct PackDirectory {
 
 namespace packdir_detail {
 
-// One of the two mash cursors (main / shared).
 struct MashStream {
     const uint8_t* data;
     size_t size;
@@ -165,7 +147,6 @@ struct MashStream {
     }
 };
 
-// mashable_vector image: m_data(4) m_size(u16) m_shared(u8) from_mash(u8)
 struct VecHeader {
     uint16_t size = 0;
     bool shared = false;
@@ -179,7 +160,6 @@ inline VecHeader readVecHeader(const uint8_t* img, size_t imgSize, size_t off) {
     return h;
 }
 
-// parents / fixedstring / int vectors: rebase A, rebase 4, data, rebase 4
 inline const uint8_t* unmashSimpleVector(MashStream& ms, MashStream& ss, const VecHeader& h,
                                          size_t elemSize, bool align8) {
     MashStream& st = h.shared ? ss : ms;
@@ -190,16 +170,13 @@ inline const uint8_t* unmashSimpleVector(MashStream& ms, MashStream& ss, const V
     return data;
 }
 
-// resource_location / tlresource_location / pool vectors. The shared path has a
-// counter block (v24, v11, [skip], v9); v9 == 0 on first un-mash so the
-// duplicate-consume branch is not taken for a freshly loaded pack.
 inline const uint8_t* unmashCountedVector(MashStream& ms, MashStream& ss, const VecHeader& h,
                                           size_t elemSize, bool firstAlign8) {
     if (h.shared) {
         ss.rebase(firstAlign8 ? 8 : 4);
         uint32_t dupMain = ss.getU32();
         uint32_t dupShared = ss.getU32();
-        if (firstAlign8) ss.getU32(); // skipped int
+        if (firstAlign8) ss.getU32();
         uint32_t v9 = ss.getU32();
         ss.rebase(firstAlign8 ? 8 : 4);
         ss.rebase(4);
@@ -218,11 +195,11 @@ inline const uint8_t* unmashCountedVector(MashStream& ms, MashStream& ss, const 
     return data;
 }
 
-} // namespace packdir_detail
+}
 
 inline PackDirectory PackDirectory::Parse(const std::vector<uint8_t>& blob) {
     using namespace packdir_detail;
-    constexpr size_t DIR_IMAGE_SIZE = 0x2BC; // sizeof(resource_directory), PC
+    constexpr size_t DIR_IMAGE_SIZE = 0x2BC;
 
     PackDirectory dir;
     if (blob.size() < 0x40) { dir.error = "file too small"; return dir; }
@@ -238,7 +215,6 @@ inline PackDirectory PackDirectory::Parse(const std::vector<uint8_t>& blob) {
         return dir;
     }
 
-    // generic_mash_header
     uint32_t safetyKey, hFlags; int32_t sharedOffs; uint16_t classId, fieldE;
     memcpy(&safetyKey, blob.data() + dir.dirOffset, 4);
     memcpy(&hFlags, blob.data() + dir.dirOffset + 4, 4);
@@ -257,9 +233,8 @@ inline PackDirectory PackDirectory::Parse(const std::vector<uint8_t>& blob) {
     MashStream ss{blob.data(), blob.size(), dir.dirOffset + (size_t)sharedOffs};
     ms.rebase(8);
 
-    // struct image offsets of the 15 mashable_vectors (resource_directory.h order)
     VecHeader vParents = readVecHeader(img, imgSize, 0x00);
-    unmashSimpleVector(ms, ss, vParents, 4, /*align8=*/false);
+    unmashSimpleVector(ms, ss, vParents, 4,  false);
 
     VecHeader vRes = readVecHeader(img, imgSize, 0x08);
     const uint8_t* resData = unmashCountedVector(ms, ss, vRes, 16, true);
@@ -278,7 +253,6 @@ inline PackDirectory PackDirectory::Parse(const std::vector<uint8_t>& blob) {
         tlData[i] = unmashCountedVector(ms, ss, tlHdr[i], 12, true);
     }
 
-    // resource_pack_group vector (0x20 elems + per-element extra reads)
     VecHeader vGroups = readVecHeader(img, imgSize, 0x68);
     if (vGroups.shared) { dir.error = "shared pack_groups not supported"; return dir; }
     ms.rebase(8);
@@ -286,9 +260,9 @@ inline PackDirectory PackDirectory::Parse(const std::vector<uint8_t>& blob) {
     const uint8_t* groupData = vGroups.size ? ms.get(32u * vGroups.size) : nullptr;
     for (uint16_t gi = 0; gi < vGroups.size && ms.ok; ++gi) {
         const uint8_t* g = groupData + gi * 32;
-        ms.get(8); // resource_key
+        ms.get(8);
         VecHeader fsVec = readVecHeader(g, 32, 8);
-        unmashSimpleVector(ms, ss, fsVec, 16, /*align8=*/true);
+        unmashSimpleVector(ms, ss, fsVec, 16,  true);
         ms.rebase(4);
         int32_t slotCount; memcpy(&slotCount, g + 0x1C, 4);
         if (slotCount > 0) ms.get(4u * (uint32_t)slotCount);
@@ -296,7 +270,7 @@ inline PackDirectory PackDirectory::Parse(const std::vector<uint8_t>& blob) {
     ms.rebase(4);
 
     VecHeader vPools = readVecHeader(img, imgSize, 0x70);
-    unmashCountedVector(ms, ss, vPools, 12, /*firstAlign8=*/false);
+    unmashCountedVector(ms, ss, vPools, 12,  false);
 
     if (!ms.ok || !ss.ok) { dir.error = "mash stream overrun"; return dir; }
 

@@ -1,5 +1,4 @@
-﻿void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const float* baseTransform) {
-    ResetWorldMeshDebugCategories();
+void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const float* baseTransform) {
 
     std::ifstream file(packFilePath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) return;
@@ -21,7 +20,6 @@
     size_t tocStart = FindTocStart(tempHeader, hdrReadSize);
     if (tocStart == 0) { file.close(); return; }
 
-    // â”€â”€ Read TOC â”€â”€
     struct TocEntry { uint32_t hash, type, absOffset, size; };
     std::vector<TocEntry> toc;
     file.clear();
@@ -34,16 +32,13 @@
         toc.push_back({h, t, packDataOffset + o, s});
     }
 
-    // â”€â”€ Identify zone base hash â”€â”€
-    // The zone base mesh (e.g., IGC for IG.PCPACK) is the largest type 0x15 entry.
-    // Also match by name: stem + "c" (e.g., "igc" for "ig").
     std::vector<PackMeshFileResource> packMeshResources = ReadPackMeshFileResources(packFilePath);
 
     fs::path pp(packFilePath);
     std::string stem = StrToLower(pp.stem().string());
     std::string zoneBaseName = stem + "c";
     uint32_t zoneBaseHash = HashString33(zoneBaseName);
-    // Also find by dictionary name match and by largest size
+
     uint32_t largestPcmHash = 0;
     uint32_t largestPcmSize = 0;
     for (auto& te : toc) {
@@ -57,7 +52,6 @@
         }
     }
 
-    // â”€â”€ Build local PCM index â”€â”€
     for (const auto& meshRes : packMeshResources) {
         if (meshRes.size > largestPcmSize) {
             largestPcmSize = meshRes.size;
@@ -89,10 +83,6 @@
 
     if (localPcms.empty()) { file.close(); return; }
 
-    // Textures are resolved automatically by AddMeshFromDataWithTransform
-    // via LoadTextureByName when textureResolver is nullptr
-
-    // â”€â”€ Cache PCM data â”€â”€
     std::map<uint32_t, std::vector<uint8_t>> pcmCache;
     for (auto& lp : localPcms) {
         if (lp.absOffset + lp.size > fileSize) continue;
@@ -101,7 +91,6 @@
         file.read((char*)pcmCache[lp.hash].data(), lp.size);
     }
 
-    // â”€â”€ Build nameâ†’hash lookup â”€â”€
     std::map<std::string, uint32_t> nameToHash;
     std::map<uint32_t, PCMModelRef> localPcmIndex;
     for (auto& lp : localPcms) {
@@ -113,7 +102,6 @@
         localPcmIndex[lp.hash] = ref;
     }
 
-    // â”€â”€ Load CITY_ARENA PCMs for cross-pack references â”€â”€
     {
         fs::path packDir = fs::path(packFilePath).parent_path();
         fs::path caPath;
@@ -132,7 +120,6 @@
                 caFile.read((char*)&caHS, 4);
                 caFile.read((char*)&caDataOff, 4);
 
-                // Read header to find TOC
                 size_t hdrRead = std::min((size_t)caDataOff, std::min(caFileSize, (size_t)0x100000));
                 std::vector<uint8_t> caHdr(hdrRead);
                 caFile.seekg(0);
@@ -149,7 +136,6 @@
                     break;
                 }
 
-                // Pass 1: collect all type 0x15 TOC entries
                 struct CaEntry { uint32_t hash, absOffset, size; };
                 std::vector<CaEntry> caEntries;
                 if (caTocStart > 0 && caTocStart + 16 <= hdrRead) {
@@ -166,7 +152,6 @@
                     }
                 }
 
-                // Pass 2: load PCM data
                 int caLoaded = 0;
                 for (auto& ce : caEntries) {
                     if (ce.absOffset + ce.size > caFileSize) continue;
@@ -188,7 +173,6 @@
         }
     }
 
-    // â”€â”€ Process 0x0A block: entity instances + orphan placement records â”€â”€
     int placedEntities = 0, placedOrphans = 0, placedLegos = 0;
     int skippedLegoNoModel = 0, skippedLegoFiltered = 0;
     std::vector<MeshLocationBinding> meshLocationBindings = BuildMeshLocationBindings(packFilePath);
@@ -269,9 +253,6 @@
                                 ? StrToLower(dictionary[memberPcmHash])
                                 : "scene_member");
 
-                        RecordWorldMeshPlacementDebug("conglomerate", modelName,
-                                                      srcPack, srcOffset,
-                                                      combined);
                         AddMeshFromDataWithTransform(pcmCache[memberPcmHash], modelName, nullptr,
                                                      srcPack, srcOffset, combined,
                                                      member.meshRef.meshOffsetInPcm);
@@ -325,9 +306,7 @@
                 std::string modelName = !meshRef.meshName.empty()
                     ? meshRef.meshName
                     : (!instanceName.empty() ? instanceName : (pcmName.empty() ? "scene_entity" : pcmName));
-                RecordWorldMeshPlacementDebug("streetlights/entities", modelName,
-                                              srcPack, srcOffset,
-                                              combined);
+
                 AddMeshFromDataWithTransform(pcmCache[pcmHash], modelName, nullptr,
                                              srcPack, srcOffset, combined,
                                              meshRef.meshOffsetInPcm);
@@ -339,7 +318,7 @@
         }
 
         if (kEnableSceneEntityNameFallback && !usedSceneEntityRecords) {
-        // Find all 7ACE5BAD markers
+
         const uint32_t MARKER = 0x7ACE5BAD;
         std::vector<size_t> acePositions;
         for (size_t i = 0; i + 4 <= blockSize; i += 4) {
@@ -347,7 +326,6 @@
             if (val == MARKER) acePositions.push_back(i);
         }
 
-        // â”€â”€ Pass 1: Named entity instances â”€â”€
         std::set<uint32_t> matchedPcmHashes;
         int hash0Count = 0, filteredCount = 0, noNameCount = 0;
         for (size_t ai = 0; ai < acePositions.size(); ai++) {
@@ -364,14 +342,12 @@
                 noNameCount++;
                 continue;
             }
-            // Non-renderable instance types are no longer filtered here; they
-            // load and render as a translucent ghost via isDebugTransparent.
+
             if (false) {
                 filteredCount++;
                 continue;
             }
 
-            // Resolve to PCM hash using same pipeline as world loader
             uint32_t pcmHash = 0;
             if (pcmCache.count(instanceHash)) pcmHash = instanceHash;
 
@@ -413,7 +389,7 @@
                     }
                 }
             }
-            // Zone-prefixed model lookup
+
             if (pcmHash == 0 && !instanceName.empty()) {
                 std::string np = StripZonePrefix(instanceName);
                 std::string b = StripNumericSuffix(np);
@@ -433,14 +409,12 @@
                 }
             }
 
-            // Must resolve AND have cached PCM data
             if (pcmHash == 0) continue;
             if (!pcmCache.count(pcmHash)) {
                 continue;
             }
             matchedPcmHashes.insert(pcmHash);
 
-            // Find transform
             float mat[16];
             bool hasTransform = false;
             for (size_t scanOfs = acePos + 0x44;
@@ -468,9 +442,7 @@
             auto refIt = localPcmIndex.find(pcmHash);
             const std::string& srcPack = (refIt != localPcmIndex.end()) ? refIt->second.packPath : packFilePath;
             uint32_t srcOffset = (refIt != localPcmIndex.end()) ? refIt->second.absOffset : 0;
-            RecordWorldMeshPlacementDebug("streetlights/entities", instanceName,
-                                          srcPack, srcOffset,
-                                          combined);
+
             AddMeshFromDataWithTransform(pcmCache[pcmHash], instanceName, nullptr,
                                          srcPack, srcOffset, combined);
             placedEntities++;
@@ -541,9 +513,7 @@
                     const std::string& srcPack = (refIt != localPcmIndex.end()) ? refIt->second.packPath : packFilePath;
                     uint32_t srcOffset = (refIt != localPcmIndex.end()) ? refIt->second.absOffset : 0;
                     std::string modelName = pcmName.empty() ? "lego_prop" : pcmName;
-                    RecordWorldMeshPlacementDebug("lego", modelName,
-                                                  srcPack, srcOffset,
-                                                  combined);
+
                     AddMeshFromDataWithTransform(pcmCache[pcmHash], modelName, nullptr,
                                                  srcPack, srcOffset, combined,
                                                  binding.meshOffsetInPcm);
@@ -555,9 +525,8 @@
             }
         }
 
-        // â”€â”€ Pass 2: Placement records (stride-0x20, type=9) with f14 = PCM index â”€â”€
         if (kEnableGuessedOrphanPlacementRecords) {
-            // Find contiguous type=9 records
+
             size_t recStart = 0;
             int recCount = 0;
             for (size_t probe = 0; probe + 0x20 <= blockSize; probe += 4) {
@@ -583,7 +552,7 @@
             }
 
             if (recCount > 0) {
-                // OpenUSM uses resource_directory.mesh_file_locations order here.
+
                 std::vector<uint32_t> pcm15Hashes;
                 for (const auto& meshRes : packMeshResources) {
                     pcm15Hashes.push_back(meshRes.hash);
@@ -594,11 +563,6 @@
                     }
                 }
                 int numPcm15 = (int)pcm15Hashes.size();
-
-                // Runtime mesh ordering differs from TOC hash order
-
-                // Mesh width does not imply world-space data. Wide local meshes
-                // still need their placement records.
 
                 for (int ri = 0; ri < recCount; ri++) {
                     size_t ro = recStart + ri * 0x20;
@@ -612,10 +576,6 @@
 
                     if (pcmH == zoneBaseHash || pcmH == largestPcmHash) continue;
                     if (!pcmCache.count(pcmH)) continue;
-                    // Non-renderable and "col_" prefix meshes used to skip
-                    // here; they now load as translucent debug overlays via
-                    // RenderMesh::isDebugTransparent. Reason logging kept off
-                    // for those rows since they'd otherwise flood the log.
 
                     uint16_t angle; memcpy(&angle, &blockData[ro + 6], 2);
                     float x, y, z;
@@ -633,9 +593,7 @@
                     };
                     float combined[16];
                     MultiplyMatrix4x4(mat, baseTransform, combined);
-                    RecordWorldMeshPlacementDebug("unique pcms", pcmName,
-                                                  packFilePath, 0,
-                                                  combined);
+
                     AddMeshFromDataWithTransform(pcmCache[pcmH], pcmName, nullptr,
                                                  packFilePath, 0, combined);
                     placedOrphans++;
@@ -646,8 +604,6 @@
 
     file.close();
     BatchWorldMeshesByType();
-    DumpWorldMeshDebugCategories(*this);
-    DumpWorldOriginPlacementDebug(*this);
 
     (void)placedEntities;
     (void)placedLegos;

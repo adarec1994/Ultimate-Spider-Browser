@@ -2,53 +2,56 @@
 #include "Helpers.h"
 #include "PackDirectory.h"
 #include "EntityBoneMapping.h"
+#include "AnimationStateMachine.h"
+#include "Morph.h"
+#include "Viseme.h"
 #include <filesystem>
 #include <map>
 #include <array>
-#include <iostream>
 #include <glad/glad.h>
 #include <functional>
 #include <optional>
 #include <memory>
 
-// Forward declarations for NAL types (full defs in NalIntegration.h)
 struct NalSkeletonData;
 struct NalAnimFile;
 struct NalAnimEntry;
 
 namespace fs = std::filesystem;
 
-// Authoritative blend mode enum from OpenUSM nglMaterialBase::m_blend_mode at +0x4C.
-// See Archive/OpenUSM/src/ngl.h:36-51 — drives D3D alpha test/blend state in
-// RenderState_t::setBlending (ngl_dx_state.cpp:207).
 enum NglBlendMode : uint32_t {
-    NGLBM_OPAQUE              = 0,  // alpha ignored
-    NGLBM_PUNCHTHROUGH        = 1,  // alpha test, no blend (cut-outs)
-    NGLBM_BLEND               = 2,  // src*A + dst*(1-A)
-    NGLBM_ADDITIVE            = 3,  // src*A + dst*1
-    NGLBM_SUBTRACTIVE         = 4,  // dst - src*A
+    NGLBM_OPAQUE              = 0,
+    NGLBM_PUNCHTHROUGH        = 1,
+    NGLBM_BLEND               = 2,
+    NGLBM_ADDITIVE            = 3,
+    NGLBM_SUBTRACTIVE         = 4,
     NGLBM_CONST_BLEND         = 5,
     NGLBM_CONST_ADDITIVE      = 6,
     NGLBM_CONST_SUBTRACTIVE   = 7,
     NGLBM_DESTALPHA_ADDITIVE  = 8,
-    NGLBM_MAX_BLEND_MODES_GUARD = 9,  // sentinel for range validation
+    NGLBM_MAX_BLEND_MODES_GUARD = 9,
 };
 
 struct MaterialDef {
     std::string meshName;
-    std::string alphaFlag;     // shader-name string (heuristic only, kept for the analyze panel)
+    std::string alphaFlag;
     std::string textureName;
+    std::string secondaryTextureName;
+    uint16_t serializedSize = 0;
     uint32_t shaderType = 0;
-    uint32_t blendMode = NGLBM_OPAQUE;  // m_blend_mode at +0x4C — the authoritative field
-    bool isTranslucent = false;          // blendMode >= NGLBM_BLEND
-    bool isAlphaTest = false;            // blendMode == NGLBM_PUNCHTHROUGH
-    // uscolorvol meshes (Archive/OpenUSM/src/ngl/shaders/us_colorvol.h) are
-    // input to a separate post-process pass (USColorVolShaderSpace::gUSColorVolScene)
-    // and are never rendered as visible geometry. Same for stencil shadow
-    // volumes (wds_render_manager::render_stencil_shadows). We tag them here
-    // so the renderer can skip them by default.
+    uint32_t blendMode = NGLBM_OPAQUE;
+    bool isTranslucent = false;
+    bool isAlphaTest = false;
+
     bool isColorVolume = false;
     bool isShadowVolume = false;
+
+    bool isPersonMaterial = false;
+    std::array<float, 4> personBaseColor = {1.0f, 1.0f, 1.0f, 1.0f};
+    uint32_t personLighting = 0;
+    uint32_t personEnvA = 0;
+    uint32_t personEnvB = 0;
+    uint32_t personOutline = 0;
 };
 
 struct FileEntry {
@@ -64,9 +67,7 @@ struct FileEntry {
 
 struct RenderMesh {
     struct Instance {
-        // Column-major transform consumed directly by OpenGL.  For batches
-        // consolidated after loading this is relative to the first mesh in
-        // the batch; for native instance batches it is the world transform.
+
         std::array<float, 16> transform{};
         float bboxMin[3] = {0, 0, 0};
         float bboxMax[3] = {0, 0, 0};
@@ -82,56 +83,56 @@ struct RenderMesh {
     int instanceDrawCount = 0;
     GLenum mode = GL_TRIANGLES;
     unsigned int textureId = 0;
-    bool isTranslucent = false;   // blendMode >= NGLBM_BLEND — needs back-to-front sorted blend pass
-    bool isAlphaTest = false;     // blendMode == NGLBM_PUNCHTHROUGH — discard sub-threshold texels
+    unsigned int secondaryTextureId = 0;
+
+    std::vector<unsigned int> textureFrames;
+    bool isTranslucent = false;
+    bool isAlphaTest = false;
     uint32_t blendMode = NGLBM_OPAQUE;
     bool isFakeShadow = false;
     bool isColorVolume = false;
     bool isShadowVolume = false;
     bool isHidden = false;
-    // Marks meshes the engine never draws as visible geometry: color volumes,
-    // stencil shadow volumes, physics collision proxies (*_COL, *_COLLISION),
-    // trigger / exclusion zones, and the GENERIC_WHITE/BLACK placeholder
-    // meshes. We still load them so they can be inspected, but render them as
-    // a translucent ghost overlay (see drawOne in Render.cpp).
+
     bool isDebugTransparent = false;
-    // Water surfaces (oceanmesh, *_WATER_*, interior pools). Routes the mesh
-    // through the water shader path -- wave displacement in the vertex stage,
-    // fresnel tint + UV-scrolled caustic in the fragment stage.
+
     bool isWater = false;
     bool skipPicking = false;
     uint32_t shaderType = 0;
-
+    bool isPersonMaterial = false;
+    std::array<float, 4> personBaseColor = {1.0f, 1.0f, 1.0f, 1.0f};
+    uint32_t personLighting = 0;
+    uint32_t personEnvA = 0;
+    uint32_t personEnvB = 0;
+    uint32_t personOutline = 0;
 
     float bboxMin[3] = {0, 0, 0};
     float bboxMax[3] = {0, 0, 0};
 
-
     std::vector<float> positions;
     std::vector<float> normals;
     std::vector<float> uvs;
-    // Per-vertex RGBA in [0,1]. Sourced from the D3DCOLOR uint32 at +20 of
-    // each stride-24/32/60 PCM vertex (verified via Archive/pcmesh-blender-master).
-    // For stride-64 skinned vertices the engine has no color slot, so we
-    // default to white (1,1,1,1). Matches OpenUSM's us_pcuv pixel shader:
-    // `tex t0; mul r0, t0, v0` -- final color is texture * vertex color.
+
     std::vector<float> colors;
     std::vector<uint16_t> indices;
     std::vector<uint16_t> bonePalette;
     std::vector<Instance> instances;
 
-    // Placement metadata retained until the whole-world consolidation pass.
-    // This lets identical PCMs share geometry without losing the identity of
-    // the individual world object that was clicked.
+    uint32_t sourceSectionIndex = 0;
+
+    std::vector<float> morphVertexData;
+    std::vector<std::vector<std::array<float, 3>>> morphPositionDeltas;
+    std::vector<std::vector<uint8_t>> morphPositionChanged;
+
     bool hasPlacementTransform = false;
     std::array<float, 16> placementTransform{};
     std::string placementName;
     uint32_t sourceMeshOffset = 0;
 
-
     std::string textureName;
+    std::string secondaryTextureName;
+    std::string materialShaderName;
     uint32_t textureHash = 0;
-
 
     std::string sourcePack;
     uint32_t sourceOffset = 0;
@@ -144,14 +145,12 @@ struct PCMSkeletonInfo {
     uint32_t offset = 0;
 };
 
-
 struct PCMBoneInfo {
     int index;
     float posX, posY, posZ;
     int parentIndex;
     std::string inferredRole;
 };
-
 
 struct PCMLodInfo {
     std::string name;
@@ -162,16 +161,13 @@ struct PCMLodInfo {
     float lodDistance;
     uint32_t nextLodOffset;
 
-
     float boundsMin[3];
     float boundsMax[3];
 };
 
-
 struct PCMSubmeshInfo {
     std::string name;
     uint32_t nameOffset;
-
 
     uint32_t vertexCount;
     uint32_t vertexOffset;
@@ -180,30 +176,24 @@ struct PCMSubmeshInfo {
     uint32_t stride;
     uint32_t primitiveType;
 
-
     bool hasNormals;
     bool hasUV;
     bool hasBones;
 
-
     float boundingRadius;
     uint32_t vertexBufferSize;
 
-
     uint32_t boneMapOffset;
     uint32_t boneMapCount;
-
 
     std::string materialMeshName;
     std::string materialAlphaFlag;
     std::string materialTexture;
     bool isTranslucent;
 
-
     std::string shaderType;
     uint32_t shaderSize;
 };
-
 
 struct PCMMaterialInfo {
     std::string name;
@@ -215,7 +205,6 @@ struct PCMMaterialInfo {
     bool isTranslucent;
 };
 
-
 struct PCMFileInfo {
 
     uint32_t fileSize;
@@ -223,24 +212,20 @@ struct PCMFileInfo {
     uint32_t entryTableOffset;
     uint32_t stringTableOffset;
 
-
     uint32_t materialCount;
     uint32_t lodCount;
     uint32_t totalSubmeshes;
     uint32_t totalVertices;
     uint32_t totalIndices;
 
-
     std::vector<PCMMaterialInfo> materials;
     std::vector<PCMLodInfo> lods;
     std::vector<PCMSubmeshInfo> submeshes;
     std::vector<PCMBoneInfo> bones;
 
-
     uint32_t boneCount;
     uint32_t bonesOffset;
 };
-
 
 struct PCMMeshInfo {
     std::string name;
@@ -252,7 +237,6 @@ struct PCMMeshInfo {
     uint32_t primitiveType;
     bool hasUV;
     bool hasBones;
-
 
     std::string materialMeshName;
     std::string materialAlphaFlag;
@@ -282,7 +266,6 @@ public:
     enum AppState { STATE_SPLASH, STATE_BROWSER, STATE_LOADING };
     AppState currentState = STATE_SPLASH;
 
-
     bool isIndexing = false;
     int indexingProgress = 0;
     int indexingTotal = 0;
@@ -302,11 +285,16 @@ public:
     std::vector<FileEntry> entries;
     std::string loadedPCPackPath;
     std::vector<uint8_t> pcPackData;
-    // Parsed resource directory of the currently open pack (typed resource
-    // tables incl. skeleton/anim-file locations). See PackDirectory.h.
+
     PackDirectory currentDir;
     uint32_t dataOffset = 0;
-    std::string logBuffer;
+
+    std::vector<UsmAls::File> animationStateMachines;
+    bool showAnimationStateMachine = false;
+    int selectedAnimationStateMachine = 0;
+    int selectedAnimationMachineLayer = 0;
+    uint32_t animationStateMachineModelHash = 0;
+    std::string animationStateMachineModelName;
 
     std::string notificationMsg;
     float notificationTimer = 0.0f;
@@ -325,10 +313,8 @@ public:
     PCMSkeletonInfo currentPcmSkeleton;
     int currentPcmIndex = -1;
 
-
     PCMFileInfo currentPcmDetails;
     bool showPcmDetailsPanel = false;
-
 
     std::map<uint32_t, MaterialDef> materialMap;
 
@@ -340,23 +326,22 @@ public:
     unsigned int msRbo = 0;
 
     unsigned int modelProgram = 0;
-    unsigned int skeletonProgram = 0; // Separate shader for skeleton (solid color, no lighting)
+    unsigned int skeletonProgram = 0;
     std::vector<RenderMesh> previewMeshes;
 
     std::map<uint32_t, unsigned int> textureCache;
     std::map<std::string, unsigned int> textureNameCache;
+    std::map<std::string, std::vector<unsigned int>> textureAnimationCache;
     std::map<uint32_t, TextureLocation> globalTextureIndex;
     std::map<std::string, TextureLocation> globalTextureNameIndex;
 
     void BuildGlobalTextureIndex();
     void BuildGlobalTextureIndexStep(int packIndex);
 
-
     int selectedMeshIndex = -1;
     int selectedMeshInstanceIndex = -1;
     std::vector<uint8_t> selectedMeshPcmData;
     bool showWorldMeshDetails = false;
-
 
     bool RayIntersectAABB(const float rayOrigin[3], const float rayDir[3],
                           const float bboxMin[3], const float bboxMax[3], float& tMin);
@@ -368,26 +353,32 @@ public:
 
     bool isWorldMode = false;
 
-    // Skeleton visualization & bone manipulation
     bool showSkeleton = false;
     int selectedBoneIndex = -1;
     bool isRotatingBone = false;
     float boneRotationAngle = 0.0f;
-    int boneRotationAxis = 1; // 0=X, 1=Y, 2=Z
-    std::map<int, std::array<float, 3>> manualBoneRotations;      // NAL/PCM bone index -> XYZ radians
-    std::map<int, std::array<float, 3>> boneRotationsBeforeEdit;   // used for Esc cancel while rotating
+    int boneRotationAxis = 1;
+    std::map<int, std::array<float, 3>> manualBoneRotations;
+    std::map<int, std::array<float, 3>> boneRotationsBeforeEdit;
 
     unsigned int skeletonVao = 0;
     unsigned int skeletonVbo = 0;
     int skeletonBoneCount = 0;
-    int skeletonLineVertCount = 0; // number of line vertices after bone points in VBO
+    int skeletonLineVertCount = 0;
 
     struct BoneData {
-        float bindMatrix[16];     // Original 4x4 matrix from PCM
-        float invBindMatrix[16];  // Inverse of bind matrix
-        float position[3];       // Model-space position (mat[12..14])
+        float bindMatrix[16];
+        float invBindMatrix[16];
+        float position[3];
     };
     std::vector<BoneData> skeletonBones;
+
+    RenderMesh proceduralTentacleMesh;
+
+    bool captureEvaluatedSkinMatrices = false;
+    bool skipDrawAfterPoseEvaluation = false;
+    bool evaluatedSkinningActive = false;
+    std::vector<float> evaluatedGlobalBoneMatrices;
 
     void BuildSkeletonVisual(const std::vector<uint8_t>& pcmData);
     void RenderSkeletonOverlay();
@@ -395,13 +386,17 @@ public:
     void ApplyBoneRotation(int boneIdx, float angle, int axis);
     void ResetBoneRotation();
 
-    // NAL-computed bone world positions (keyed by global NAL bone index)
     std::map<int, std::array<float,3>> nalBonePositions;
-    std::vector<int> nalBoneVboOrder; // VBO index → NAL global index
+    std::vector<int> nalBoneVboOrder;
     int nalMaxBoneIndex = -1;
     void ComputeNALBonePositions();
     float modelCenter[3] = {0.0f, 0.0f, 0.0f};
     float modelRadius = 1.0f;
+    // Orbit/zoom focal point. For a full-body character this is the head, so zooming in
+    // homes in on the face; for compact meshes it falls back to the model centre.
+    float modelHeadTarget[3] = {0.0f, 0.0f, 0.0f};
+    // Persistent orbit radius, so the zoom-driven centre<->head focal pan stays stable.
+    float orbitDistance = 0.0f;
     float camPos[3] = {0.0f, 10.0f, 50.0f};
     float camFront[3] = {0.0f, 0.0f, -1.0f};
     float camUp[3] = {0.0f, 1.0f, 0.0f};
@@ -412,7 +407,6 @@ public:
     double flyCameraLockX = 0.0;
     double flyCameraLockY = 0.0;
 
-    void Log(const std::string& msg);
     void ShowNotification(const std::string& msg);
     void SaveConfig();
     void LoadConfig();
@@ -420,6 +414,10 @@ public:
     void LoadDictionary(const std::string& path);
     void LoadBinaryDictionary(const std::string& path);
     void OpenPCPack(const std::string& path);
+    void LoadAnimationStateMachinesForCurrentPack();
+    bool PcmModelHasSkeleton(int entryIndex) const;
+    bool CanViewAnimationStateMachine(int entryIndex) const;
+    void OpenAnimationStateMachineForModel(int entryIndex);
     void ExtractPack(const std::string& packPath, bool convertAll = false);
 
     void ExtractFile(int index, bool asGlb = false);
@@ -467,7 +465,6 @@ public:
     void LoadAllWorldGeometries();
     void LoadPackEntities(const std::string& packFilePath, const float* baseTransform);
 
-
     std::vector<GlobalSearchResult> globalSearchResults;
     int selectedGlobalSearchIndex = -1;
     bool isGlobalSearchMode = false;
@@ -478,9 +475,15 @@ public:
     void ExportSelectedWorldMesh(bool asGlb);
     void ExtractAllWorldMeshes();
 
-    // === NAL Skeleton / Animation support ===
     std::shared_ptr<NalSkeletonData> loadedSkeleton;
     std::shared_ptr<NalAnimFile>     loadedAnimFile;
+    UsmMorph::File loadedMorphFile;
+    std::vector<float> morphTargetWeights;
+    // One-shot request (consumed by the UI): when a model with morph targets is
+    // loaded or restored, pop the Animations panel to the front on its Morphs tab.
+    bool focusMorphsTab = false;
+    std::vector<UsmViseme::Stream> loadedVisemeStreams;
+    int selectedVisemeIndex = -1;
     int selectedAnimIndex = -1;
     int currentAnimFrame  = 0;
     float animFrameFraction = 0.f;
@@ -489,32 +492,30 @@ public:
     std::string loadedSkeletonName;
     std::string loadedAnimName;
 
-    // All skeletons found in the current pack. Populated by
-    // LoadSkeletonForCurrentPack; loadedSkeleton is one entry from this list,
-    // chosen automatically by name match against the displayed mesh
-    // (SelectSkeletonForMesh). Exposing the full list lets the UI offer a
-    // dropdown when the auto-match picks the wrong one.
     struct SkeletonCandidate {
         std::shared_ptr<NalSkeletonData> data;
-        std::string name;            // skeleton's own name (from header)
-        uint32_t    hash = 0;        // tlresource string_hash (matches anim-file skeleton table)
-        int         entryIndex = -1; // index into entries[]
+        std::string name;
+        uint32_t    hash = 0;
+        int         entryIndex = -1;
     };
     std::vector<SkeletonCandidate> skeletonCandidates;
     int activeSkeletonCandidate = -1;
 
-    // Cross-pack skeleton resolution. Anim files may reference skeletons that
-    // live in another pack (e.g. ultimate_spiderman in GAME.PCPACK) -- the
-    // engine resolves these through its global skeleton directory. The index
-    // maps tlresource hash -> pack location and is built lazily on first miss.
     struct SkeletonLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
     std::map<uint32_t, SkeletonLocation> globalSkeletonIndex;
     bool globalSkeletonIndexBuilt = false;
     void BuildGlobalSkeletonIndex();
     std::shared_ptr<NalSkeletonData> LoadSkeletonFromLocation(const SkeletonLocation& loc);
 
-    // Cooked conglomerate ENTITY resources define the exact permutation from
-    // NAL logical all_model_po indices to PCM/ngl mesh-bone indices.
+    // Face morphs are keyed by mesh hash but may ship in a different pack than the mesh
+    // (e.g. a CH_VWR_* character viewer holds the head mesh, while the morph only lives in
+    // a cutscene/IGC pack). This index lets LoadMorphForCurrentModel resolve a morph from
+    // any pack by mesh hash. Built lazily on first use.
+    struct MorphLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
+    std::map<uint32_t, MorphLocation> globalMorphIndex;
+    bool globalMorphIndexBuilt = false;
+    void BuildGlobalMorphIndex();
+
     struct EntityLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
     std::map<uint32_t, std::vector<EntityLocation>> globalEntityIndex;
     bool globalEntityIndexBuilt = false;
@@ -523,11 +524,6 @@ public:
     void BuildGlobalEntityIndex();
     bool SelectBoneMappingForMesh(uint32_t meshHash);
 
-    // A preview tab owns the expensive, model-specific state (uploaded mesh
-    // buffers, skeleton buffers, decoded animation, camera, and playback
-    // position).  The renderer's framebuffer/programs and texture caches stay
-    // shared.  Inactive tabs therefore keep their model resident without
-    // being rendered and can be restored without reparsing or re-uploading.
     struct PreviewTabState {
         uint64_t id = 0;
         std::string key;
@@ -560,12 +556,15 @@ public:
         int skeletonBoneCount = 0;
         int skeletonLineVertCount = 0;
         std::vector<BoneData> skeletonBones;
+        RenderMesh proceduralTentacleMesh;
         std::map<int, std::array<float, 3>> nalBonePositions;
         std::vector<int> nalBoneVboOrder;
         int nalMaxBoneIndex = -1;
 
         std::array<float, 3> modelCenter = {0.0f, 0.0f, 0.0f};
+        std::array<float, 3> modelHeadTarget = {0.0f, 0.0f, 0.0f};
         float modelRadius = 1.0f;
+        float orbitDistance = 0.0f;
         std::array<float, 3> camPos = {0.0f, 10.0f, 50.0f};
         std::array<float, 3> camFront = {0.0f, 0.0f, -1.0f};
         std::array<float, 3> camUp = {0.0f, 1.0f, 0.0f};
@@ -575,6 +574,10 @@ public:
 
         std::shared_ptr<NalSkeletonData> loadedSkeleton;
         std::shared_ptr<NalAnimFile> loadedAnimFile;
+        UsmMorph::File loadedMorphFile;
+        std::vector<float> morphTargetWeights;
+        std::vector<UsmViseme::Stream> loadedVisemeStreams;
+        int selectedVisemeIndex = -1;
         int selectedAnimIndex = -1;
         int currentAnimFrame = 0;
         float animFrameFraction = 0.0f;
@@ -604,6 +607,9 @@ public:
     void SelectSkeletonForMesh(const std::string& meshName, uint32_t meshHash = 0);
     void ActivateSkeletonCandidate(int candidateIndex);
     void LoadAnimationForCurrentPack();
+    void LoadVisemeStreamsForCurrentPack();
+    void LoadMorphForCurrentModel(uint32_t meshHash);
+    void ApplyMorphTargets();
     void UpdateAnimationPlayback(float deltaTime);
     int FindEntryBySignature(uint32_t sig) const;
 };

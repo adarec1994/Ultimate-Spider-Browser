@@ -1,20 +1,13 @@
 #include "SpiderManTool.h"
 #include "NalIntegration.h"
-#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <cmath>
 
-void SpiderManTool::Log(const std::string& msg) {
-    logBuffer += msg + "\n";
-    std::cout << msg << std::endl;
-}
-
 void SpiderManTool::ShowNotification(const std::string& msg) {
     notificationMsg = msg;
     notificationTimer = NOTIFICATION_DURATION;
-    Log(msg);
 }
 
 void SpiderManTool::SaveConfig() {
@@ -38,14 +31,13 @@ void SpiderManTool::LoadConfig() {
         if (std::getline(f, line) && line == "1") {
             if (fs::exists(searchPath)) {
                 std::string dictPath;
-                // Try text dictionary first
+
                 fs::path targetDict = "string_hash_dictionary.txt";
                 fs::path p1 = fs::path(searchPath) / targetDict;
                 if (fs::exists(p1)) dictPath = p1.string();
                 if (dictPath.empty() && fs::exists(targetDict)) dictPath = targetDict.string();
                 if (!dictPath.empty()) LoadDictionary(dictPath);
 
-                // Also try binary dictionary if text one wasn't found or to supplement
                 if (dictionary.empty()) {
                     fs::path binDict = "string_hash_dictionary.bin";
                     fs::path bp1 = fs::path(searchPath) / binDict;
@@ -72,8 +64,6 @@ void SpiderManTool::BuildGlobalTextureIndex() {
         return;
     }
 
-    Log("Building global texture index...");
-
     isIndexing = true;
     indexingProgress = 0;
     indexingTotal = (int)foundPacks.size();
@@ -96,8 +86,6 @@ void SpiderManTool::BuildGlobalTextureIndexStep(int packIndex) {
         return;
     }
 
-    // Parse only the directory region (everything before res_dir_mash_size);
-    // the typed texture_locations table replaces the old 0xE3E3E3E3 scan.
     uint32_t mashSize = 0;
     file.seekg(0x1C);
     file.read((char*)&mashSize, 4);
@@ -123,7 +111,6 @@ void SpiderManTool::BuildGlobalTextureIndexStep(int packIndex) {
     for (const auto& t : dir.textures) {
         if (t.size <= 4 || (size_t)t.offset + 4 > fileSize) continue;
 
-        // Confirm it's a DDS (MPAL/IFL textures share the table).
         file.seekg(t.offset);
         uint32_t sig = 0;
         file.read((char*)&sig, 4);
@@ -150,10 +137,10 @@ void SpiderManTool::BuildGlobalTextureIndexStep(int packIndex) {
 
 void SpiderManTool::ScanDirectory() {
     foundPacks.clear();
-    Log("Scanning " + searchPath + "...");
+
     try {
         if (!fs::exists(searchPath)) {
-            Log("Path does not exist!");
+
             return;
         }
 
@@ -166,15 +153,14 @@ void SpiderManTool::ScanDirectory() {
                 foundPacks.push_back(p.path());
             }
         }
-        Log("Found " + std::to_string(foundPacks.size()) + " .pcpack files.");
 
         if (!foundPacks.empty()) {
             BuildGlobalTextureIndex();
         } else {
             currentState = STATE_SPLASH;
         }
-    } catch (const std::exception& e) {
-        Log(std::string("Error scanning: ") + e.what());
+    } catch (const std::exception&) {
+
         currentState = STATE_SPLASH;
     }
 }
@@ -185,19 +171,19 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
     std::string line;
     std::getline(file, line); std::getline(file, line);
     while (std::getline(file, line)) {
-        // Strip Windows line endings
+
         if (!line.empty() && line.back() == '\r') line.pop_back();
         std::stringstream ss(line);
         std::string hashStr, name;
         ss >> hashStr;
         std::getline(ss, name);
-        // Strip Windows line endings from name too
+
         if (!name.empty() && name.back() == '\r') name.pop_back();
         size_t first = name.find_first_not_of(" \t");
         if (first != std::string::npos) name = name.substr(first);
         try { dictionary[std::stoul(hashStr, nullptr, 16)] = name; } catch (...) {}
     }
-    Log("Loaded dictionary.");
+
 }
 
 void SpiderManTool::LoadBinaryDictionary(const std::string& path) {
@@ -212,14 +198,11 @@ void SpiderManTool::LoadBinaryDictionary(const std::string& path) {
     file.read((char*)data.data(), fileSize);
     file.close();
 
-    // Verify "shd\0" magic
     if (data[0] != 's' || data[1] != 'h' || data[2] != 'd' || data[3] != 0) {
-        Log("Binary dictionary: invalid magic");
+
         return;
     }
 
-    // Scan for entries: each record has marker 0x15BADBAD
-    // Record layout: [hash:4] [recsize:4] [strlen:4] [0x15BADBAD:4] [data:4] [string...]
     const uint32_t MARKER = 0x15BADBAD;
     int count = 0;
 
@@ -228,7 +211,6 @@ void SpiderManTool::LoadBinaryDictionary(const std::string& path) {
         memcpy(&val, &data[pos], 4);
         if (val != MARKER) continue;
 
-        // Marker found at pos; hash is at pos-12, recsize at pos-8, strlen at pos-4
         if (pos < 12) continue;
 
         uint32_t hash, recSize, strLen;
@@ -238,10 +220,9 @@ void SpiderManTool::LoadBinaryDictionary(const std::string& path) {
 
         if (strLen == 0 || strLen > 255) continue;
 
-        size_t strStart = pos + 8; // skip marker + 4 bytes data
+        size_t strStart = pos + 8;
         if (strStart + strLen > fileSize) continue;
 
-        // Read null-terminated string
         std::string name;
         for (size_t i = strStart; i < strStart + strLen && i < fileSize; i++) {
             if (data[i] == 0) break;
@@ -254,7 +235,6 @@ void SpiderManTool::LoadBinaryDictionary(const std::string& path) {
         }
     }
 
-    Log("Loaded binary dictionary: " + std::to_string(count) + " entries.");
 }
 
 bool SpiderManTool::IsWorldPack(const std::string& name) {
@@ -292,7 +272,6 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
             continue;
         }
 
-        // Directory-region parse (typed entries), replacing the old filler scan.
         uint32_t mashSize = 0;
         file.seekg(0x1C);
         file.read((char*)&mashSize, 4);
@@ -365,7 +344,6 @@ void SpiderManTool::SearchAllPacks(const std::string& query) {
         file.close();
     }
 
-
     std::sort(globalSearchResults.begin(), globalSearchResults.end(),
         [](const GlobalSearchResult& a, const GlobalSearchResult& b) {
             return a.fileName < b.fileName;
@@ -378,13 +356,11 @@ void SpiderManTool::SelectGlobalSearchResult(int index) {
     const auto& result = globalSearchResults[index];
     selectedGlobalSearchIndex = index;
 
-
     std::string packPath = foundPacks[result.packIndex].string();
     if (loadedPCPackPath != packPath) {
         OpenPCPack(packPath);
         selectedPackIndex = result.packIndex;
     }
-
 
     for (int i = 0; i < (int)entries.size(); i++) {
         if (entries[i].hash == result.hash) {
@@ -412,10 +388,6 @@ void SpiderManTool::LoadSkeletonForCurrentPack() {
     activeSkeletonCandidate = -1;
     if (pcPackData.empty()) return;
 
-    // The pack directory lists every skeleton explicitly (skeleton_locations),
-    // including its tlresource name hash -- the same string_hash the anim
-    // file's skeleton table uses, so anims can be bound per-skeleton exactly
-    // like the engine does. No more signature sniffing.
     struct SkelSource { uint32_t hash; uint32_t offset; uint32_t size; int entryIndex; };
     std::vector<SkelSource> sources;
 
@@ -441,12 +413,12 @@ void SpiderManTool::LoadSkeletonForCurrentPack() {
         auto skel = std::make_shared<NalSkeletonData>();
         try {
             *skel = ParseNalSkeleton(tempPath);
-        } catch (const std::exception& ex) {
-            Log("Skeleton parse error at offset " + std::to_string(src.offset) + ": " + ex.what());
+        } catch (const std::exception&) {
+
             std::remove(tempPath.c_str());
             continue;
         } catch (...) {
-            Log("Skeleton parse error (unknown) at offset " + std::to_string(src.offset));
+
             std::remove(tempPath.c_str());
             continue;
         }
@@ -461,18 +433,13 @@ void SpiderManTool::LoadSkeletonForCurrentPack() {
         skeletonCandidates.push_back(cand);
     }
 
-    Log("Found " + std::to_string(skeletonCandidates.size()) + " skeleton(s) in pack");
     for (size_t k = 0; k < skeletonCandidates.size(); ++k) {
         const auto& c = skeletonCandidates[k];
-        Log("  [" + std::to_string(k) + "] " + (c.name.empty() ? "<unnamed>" : c.name) +
-            " (" + std::to_string(c.data->bone_map.size()) + " bones, " +
-            std::to_string(c.data->components.size()) + " components) [" +
-            c.data->skeleton_kind + "]");
+
     }
 
     if (!skeletonCandidates.empty()) {
-        // Default to the first candidate. The mesh-load path will refine this
-        // via SelectSkeletonForMesh once it knows the model name.
+
         ActivateSkeletonCandidate(0);
     }
 }
@@ -490,11 +457,9 @@ void SpiderManTool::ActivateSkeletonCandidate(int candidateIndex) {
     const auto& cand = skeletonCandidates[candidateIndex];
     loadedSkeleton = cand.data;
     loadedSkeletonName = cand.name;
+    selectedVisemeIndex = -1;
+    std::fill(morphTargetWeights.begin(), morphTargetWeights.end(), 0.0f);
 
-    // A pack can contain animations for several rigs. When mesh selection
-    // changes the active skeleton, do not leave an animation from the previous
-    // rig selected: its component bone indices are only meaningful for the
-    // skeleton it was decoded against.
     if (loadedAnimFile && !loadedAnimFile->animations.empty()) {
         bool selectedMatches = selectedAnimIndex >= 0 &&
             selectedAnimIndex < (int)loadedAnimFile->animations.size();
@@ -520,8 +485,6 @@ void SpiderManTool::ActivateSkeletonCandidate(int candidateIndex) {
         }
     }
 
-    Log("Active skeleton: " + (cand.name.empty() ? "<unnamed>" : cand.name) +
-        " (" + std::to_string(cand.data->bone_map.size()) + " bones)");
 }
 
 void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName, uint32_t meshHash) {
@@ -532,13 +495,8 @@ void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName, uint32_t 
         return;
     }
 
-    // Score each candidate by how well its name matches the mesh.
-    //   - exact case-insensitive match (best)
-    //   - prefix match either direction
-    //   - substring match either direction
-    //   - longest common substring (fallback, weighted by length)
     std::string meshLower = StrToLower(meshName);
-    // Strip common suffixes/prefixes that don't help matching
+
     auto stripExt = [](std::string s) {
         size_t dot = s.find_last_of('.');
         if (dot != std::string::npos) s.resize(dot);
@@ -556,13 +514,13 @@ void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName, uint32_t 
             score = 1000;
         } else if (meshLower.find(skelLower) != std::string::npos ||
                    skelLower.find(meshLower) != std::string::npos) {
-            // Substring -- prefer matches near the start.
+
             size_t a = meshLower.find(skelLower);
             size_t b = skelLower.find(meshLower);
             score = 500 - (int)std::min(a == std::string::npos ? 999 : a,
                                         b == std::string::npos ? 999 : b);
         } else {
-            // Cheap longest common prefix in chars (no allocations).
+
             int prefix = 0;
             int lim = (int)std::min(meshLower.size(), skelLower.size());
             while (prefix < lim && meshLower[prefix] == skelLower[prefix]) ++prefix;
@@ -575,7 +533,7 @@ void SpiderManTool::SelectSkeletonForMesh(const std::string& meshName, uint32_t 
     }
 
     if (bestScore <= 0) {
-        // No usable match; keep whatever's currently active (or default to 0).
+
         if (activeSkeletonCandidate < 0) ActivateSkeletonCandidate(0);
         return;
     }
@@ -593,7 +551,6 @@ void SpiderManTool::BuildGlobalSkeletonIndex() {
         size_t fileSize = (size_t)f.tellg();
         if (fileSize < 0x40) continue;
 
-        // Only the directory region is needed; resource data stays on disk.
         uint32_t mashSize = 0;
         f.seekg(0x1C);
         f.read((char*)&mashSize, 4);
@@ -612,8 +569,38 @@ void SpiderManTool::BuildGlobalSkeletonIndex() {
             }
         }
     }
-    Log("Global skeleton index: " + std::to_string(globalSkeletonIndex.size()) + " skeletons across " +
-        std::to_string(foundPacks.size()) + " packs");
+
+}
+
+void SpiderManTool::BuildGlobalMorphIndex() {
+    if (globalMorphIndexBuilt) return;
+    globalMorphIndexBuilt = true;
+    globalMorphIndex.clear();
+
+    for (const auto& packPath : foundPacks) {
+        std::ifstream f(packPath, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) continue;
+        size_t fileSize = (size_t)f.tellg();
+        if (fileSize < 0x40) continue;
+
+        uint32_t mashSize = 0;
+        f.seekg(0x1C);
+        f.read((char*)&mashSize, 4);
+        if (mashSize < 0x40 || mashSize > fileSize) continue;
+
+        std::vector<uint8_t> dirBlob(mashSize);
+        f.seekg(0);
+        f.read((char*)dirBlob.data(), mashSize);
+        if (!f.good()) continue;
+
+        PackDirectory dir = PackDirectory::Parse(dirBlob);
+        if (!dir.valid) continue;
+        for (const auto& r : dir.resources) {
+            if (r.type == RES_KEY_MORPH && r.size != 0 && !globalMorphIndex.count(r.hash)) {
+                globalMorphIndex[r.hash] = {packPath.string(), r.offset, r.size};
+            }
+        }
+    }
 }
 
 std::shared_ptr<NalSkeletonData> SpiderManTool::LoadSkeletonFromLocation(const SkeletonLocation& loc) {
@@ -641,31 +628,58 @@ std::shared_ptr<NalSkeletonData> SpiderManTool::LoadSkeletonFromLocation(const S
     return skel;
 }
 
+void SpiderManTool::LoadVisemeStreamsForCurrentPack() {
+    loadedVisemeStreams.clear();
+    selectedVisemeIndex = -1;
+    if (pcPackData.empty() || !currentDir.valid) return;
+
+    for (const auto& resource : currentDir.resources) {
+        if (resource.type != RES_KEY_VISEME_STREAM || resource.size == 0 ||
+            resource.offset > pcPackData.size() ||
+            resource.size > pcPackData.size() - resource.offset) continue;
+
+        std::vector<uint8_t> bytes(pcPackData.begin() + resource.offset,
+                                   pcPackData.begin() + resource.offset + resource.size);
+        UsmViseme::Stream stream = UsmViseme::Parse(bytes);
+        stream.resource_hash = resource.hash;
+        const auto name = dictionary.find(resource.hash);
+        if (name != dictionary.end()) stream.name = name->second;
+        else {
+            std::ostringstream fallback;
+            fallback << "Unknown_" << std::hex << resource.hash;
+            stream.name = fallback.str();
+        }
+        if (!stream.valid) {
+            continue;
+        }
+        loadedVisemeStreams.push_back(std::move(stream));
+    }
+    std::sort(loadedVisemeStreams.begin(), loadedVisemeStreams.end(),
+        [](const UsmViseme::Stream& a, const UsmViseme::Stream& b) {
+            return a.name < b.name;
+        });
+    if (!loadedVisemeStreams.empty()) {
+
+    }
+}
+
 void SpiderManTool::LoadAnimationForCurrentPack() {
     loadedAnimFile.reset();
     loadedAnimName.clear();
     selectedAnimIndex = -1;
     currentAnimFrame = 0;
     isAnimPlaying = false;
+    LoadVisemeStreamsForCurrentPack();
     if (pcPackData.empty()) return;
 
-    // Every skeleton in the pack, so each anim can bind to its own skeleton
-    // via its skel_index (matched by tlresource hash, then name) -- exactly
-    // what the engine's nalLoadAnimFileInternal does. Decoding with the wrong
-    // skeleton's component-slot table reads garbage flags/masks, which is why
-    // animations used to break on packs with several skeletons.
     std::vector<NalSkeletonRef> skelRefs;
     for (const auto& cand : skeletonCandidates) {
         skelRefs.push_back({cand.hash, cand.name, cand.data});
-        // The directory resource hash and the skeleton header's logical-name
-        // hash are normally equal, but older 0x10200 generic assets use the
-        // latter in PCANIM skeleton tables. Preserve both aliases.
+
         if (cand.data && cand.data->name_hash != 0 && cand.data->name_hash != cand.hash)
             skelRefs.push_back({cand.data->name_hash, cand.name, cand.data});
     }
 
-    // Anim containers straight from the directory; fall back to a signature
-    // scan only if the directory was unparseable.
     struct AnimSource { uint32_t offset; uint32_t size; };
     std::vector<AnimSource> sources;
     auto addAnimSource = [&](uint32_t offset, uint32_t size) {
@@ -680,10 +694,6 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         }
     }
 
-    // Directory resource typing is advisory, while the container magic is
-    // authoritative. Always supplement the typed list with a complete magic
-    // scan; otherwise valid PCANIM resources disappear whenever an otherwise
-    // valid pack directory omits or misclassifies their type.
     for (const auto& e : entries) {
         if (e.isPcm || e.isDds) continue;
         if (e.size < 64 || (size_t)e.offset + e.size > pcPackData.size()) continue;
@@ -692,8 +702,6 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         if (sig == NAL_ANIM_CONTAINER) addAnimSource(e.offset, e.size);
     }
 
-    // Pre-scan each container's skeleton table; pull skeletons that live in
-    // other packs (engine: global nalSkeletonDirectory) into the ref list.
     for (const auto& src : sources) {
         int32_t numSkels = 0;
         if ((size_t)src.offset + 64 > pcPackData.size()) continue;
@@ -717,12 +725,6 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
             if (!skel) continue;
             skelRefs.push_back({skelHash, skel->name, skel});
 
-            // External skeletons participate in rendering too, not only in
-            // animation decoding.  Packs such as CH_VWR_VENOM_VIEWER contain
-            // an animation and PCM but reference the Venom skeleton stored in
-            // CITY_ARENA.PCPACK.  Keeping that skeleton only in skelRefs left
-            // loadedSkeleton null, so the correctly decoded animation could
-            // never reach either the live skinning or GLB export path.
             SkeletonCandidate cand;
             cand.data = skel;
             cand.name = skel->name;
@@ -732,12 +734,10 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
             if (!loadedSkeleton) {
                 ActivateSkeletonCandidate((int)skeletonCandidates.size() - 1);
             }
-            Log("Loaded external skeleton '" + skel->name + "' from " +
-                fs::path(it->second.packPath).filename().string());
+
         }
     }
 
-    // Parse every container and merge into one list for the UI.
     std::shared_ptr<NalAnimFile> merged;
     for (const auto& src : sources) {
         std::string tempPath = "temp_anim.pcanim";
@@ -751,21 +751,14 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         NalAnimFile animFile = ParseNalAnimation(tempPath, skelRefs, fallbackSkel, true);
         std::remove(tempPath.c_str());
 
-        // Some retail containers retain named directory/list nodes whose
-        // animation payload is the engine's 0xFFFFFFFF sentinel.  Preserve
-        // those bytes in ParseNalAnimation/source_bytes, but do not expose the
-        // node as a playable clip: treating -1 as a frame count produces a
-        // one-frame fallback with a nonsensical duration.  Boomerang's
-        // gss_webblindloop is one such node.
         const size_t parsedAnimationCount = animFile.animations.size();
         animFile.animations.erase(
             std::remove_if(animFile.animations.begin(), animFile.animations.end(),
-                [](const NalAnimEntry& anim) { return anim.frame_count < 0; }),
+                [](const NalAnimEntry& anim) { return anim.frame_count <= 0; }),
             animFile.animations.end());
         const size_t sentinelCount = parsedAnimationCount - animFile.animations.size();
         if (sentinelCount > 0) {
-            Log("Ignored " + std::to_string(sentinelCount) +
-                " empty animation sentinel(s) in " + animFile.name);
+
         }
 
         if (animFile.animations.empty()) continue;
@@ -796,8 +789,6 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         animPlaybackTime = 0.0f;
         animFrameFraction = 0.0f;
         isAnimPlaying = selectedAnimIndex >= 0;
-        Log("Loaded " + std::to_string(merged->animations.size()) + " animations from " +
-            std::to_string(sources.size()) + " container(s): " + merged->name);
 
         for (size_t a = 0; a < merged->animations.size(); a++) {
             const auto& anim = merged->animations[a];
@@ -809,13 +800,50 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
             if (anim.is_looping()) info += " [loop]";
             if (anim.is_scene_anim()) info += " [scene]";
             info += " comps=" + std::to_string(anim.components.size());
-            Log(info);
+
         }
     }
 }
 
 void SpiderManTool::UpdateAnimationPlayback(float deltaTime) {
-    if (!isAnimPlaying || !loadedAnimFile || selectedAnimIndex < 0) return;
+    if (!isAnimPlaying) return;
+
+    if (selectedVisemeIndex >= 0) {
+        if (selectedVisemeIndex >= static_cast<int>(loadedVisemeStreams.size()) ||
+            !loadedMorphFile.valid || morphTargetWeights.empty()) {
+            isAnimPlaying = false;
+            return;
+        }
+        const auto& stream = loadedVisemeStreams[selectedVisemeIndex];
+        animPlaybackTime = std::max(0.0f, animPlaybackTime + deltaTime);
+        const uint64_t frame = static_cast<uint64_t>(
+            static_cast<double>(stream.sample_rate) * animPlaybackTime);
+
+        if (frame >= stream.frame_count) {
+            std::fill(morphTargetWeights.begin(), morphTargetWeights.end(), 0.0f);
+            currentAnimFrame = stream.frame_count ? static_cast<int>(stream.frame_count - 1) : 0;
+            animFrameFraction = 0.0f;
+            isAnimPlaying = false;
+            return;
+        }
+
+        std::fill(morphTargetWeights.begin(), morphTargetWeights.end(), 0.0f);
+        const float* weights = stream.frame(static_cast<uint32_t>(frame));
+        if (!weights) {
+            isAnimPlaying = false;
+            return;
+        }
+        const size_t channels = std::min<size_t>(
+            stream.channel_count,
+            loadedMorphFile.sets.size() > 1 ? loadedMorphFile.sets.size() - 1 : 0);
+        for (size_t channel = 0; channel < channels; ++channel)
+            morphTargetWeights[channel + 1] = weights[channel];
+        currentAnimFrame = static_cast<int>(frame);
+        animFrameFraction = 0.0f;
+        return;
+    }
+
+    if (!loadedAnimFile || selectedAnimIndex < 0) return;
     if (selectedAnimIndex >= (int)loadedAnimFile->animations.size()) return;
 
     const auto& anim = loadedAnimFile->animations[selectedAnimIndex];
@@ -825,8 +853,7 @@ void SpiderManTool::UpdateAnimationPlayback(float deltaTime) {
     animPlaybackTime = std::max(0.0f, animPlaybackTime + deltaTime);
 
     if (anim.is_looping()) {
-        // N frames contain N intervals for a looping clip: the last interval
-        // interpolates frame N-1 back to frame 0.
+
         float duration = (float)frameCount / NAL_PREVIEW_FPS;
         if (duration <= 0.0f) return;
         animPlaybackTime = fmodf(animPlaybackTime, duration);
@@ -834,7 +861,7 @@ void SpiderManTool::UpdateAnimationPlayback(float deltaTime) {
         currentAnimFrame = std::max(0, std::min((int)floorf(frameF), frameCount - 1));
         animFrameFraction = frameF - (float)currentAnimFrame;
     } else {
-        // Non-looping clips stop on their final sample instead of wrapping.
+
         float endTime = (float)std::max(0, frameCount - 1) / NAL_PREVIEW_FPS;
         if (animPlaybackTime >= endTime) {
             animPlaybackTime = endTime;
@@ -878,8 +905,7 @@ void SpiderManTool::BuildGlobalEntityIndex() {
             globalEntityIndex[r.hash].push_back({packPath.string(), r.offset, r.size});
         }
     }
-    Log("Global entity index: " + std::to_string(globalEntityIndex.size()) +
-        " names across " + std::to_string(foundPacks.size()) + " packs");
+
 }
 
 bool SpiderManTool::SelectBoneMappingForMesh(uint32_t meshHash) {
@@ -893,12 +919,10 @@ bool SpiderManTool::SelectBoneMappingForMesh(uint32_t meshHash) {
         if (!parsed.valid) return false;
         activeBoneMapping = std::move(parsed);
         activeBoneMappingHash = meshHash;
-        Log("ENTITY bone map: " + std::to_string(activeBoneMapping.meshPoseCount) +
-            " mesh bones from " + sourceName);
+
         return true;
     };
 
-    // The engine's resource directory resolves the local pack first.
     if (currentDir.valid) {
         for (const auto& r : currentDir.resources) {
             if (r.type != RES_KEY_ENTITY || r.hash != meshHash ||
@@ -909,8 +933,6 @@ bool SpiderManTool::SelectBoneMappingForMesh(uint32_t meshHash) {
         }
     }
 
-    // Viewer/cutscene packs often contain only the PCM.  Resolve the character
-    // ENTITY globally by the same resource hash, matching the game directory.
     BuildGlobalEntityIndex();
     auto found = globalEntityIndex.find(meshHash);
     if (found == globalEntityIndex.end()) return false;

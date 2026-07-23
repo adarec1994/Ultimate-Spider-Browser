@@ -23,6 +23,7 @@
       <config projectName="USM" targetName="events" folderName="GLFW3/Tests" />
       <config projectName="USM" targetName="glfwinfo" folderName="GLFW3/Tests" />
       <config projectName="USM" targetName="boing" folderName="GLFW3/Examples" />
+      <config projectName="USM" targetName="imgui_node_editor" />
       <config projectName="USM" targetName="offscreen" folderName="GLFW3/Examples" />
       <config projectName="USM" targetName="threads" folderName="GLFW3/Tests" />
       <config projectName="USM" targetName="simple" folderName="GLFW3/Examples" />
@@ -65,16 +66,38 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/imgui.ini" beforeDir="false" afterPath="$PROJECT_DIR$/imgui.ini" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Archive.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Archive.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/source/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/EntityBoneMapping.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/EntityBoneMapping.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/Helpers.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/Helpers.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/Interface.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Model.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/NalAnimCodec.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalAnimCodec.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/NalAnimation.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalAnimation.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/NalGenericCodec.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalGenericCodec.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/NalIntegration.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalIntegration.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/NalSkeleton.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalSkeleton.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/PackDirectory.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/PackDirectory.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Render.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/World.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/World.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/PackEntities.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/PackEntities.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/world/WorldLoader.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/WorldLoader.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/common/WorldCommon.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/common/WorldCommon.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/conglomerates/Conglomerates.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/conglomerates/Conglomerates.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/interiors/Interiors.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/interiors/Interiors.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/lego/Lego.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/lego/Lego.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/scene/SceneEntities.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/scene/SceneEntities.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/unique/UniquePcms.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/UniquePcms.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/zones/ZoneChunks.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/zones/ZoneChunks.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/usm_engine_pose_pipeline.md" beforeDir="false" afterPath="$PROJECT_DIR$/usm_engine_pose_pipeline.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -147,12 +170,12 @@
   }
 }</component>
   <component name="RunManager" selected="CMake Application.USM">
-    <configuration name="USM" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="USM" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="USM">
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
-        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
       </method>
     </configuration>
-    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
+    <configuration name="USM" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="USM" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="USM">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -228,6 +251,11 @@
       </method>
     </configuration>
     <configuration name="imgui" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="imgui" CONFIG_NAME="Debug">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="imgui_node_editor" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="imgui_node_editor" CONFIG_NAME="Debug">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -369,6 +397,7 @@
       <item itemvalue="CMake Application.USM" />
       <item itemvalue="CMake Application.glad" />
       <item itemvalue="CMake Application.imgui" />
+      <item itemvalue="CMake Application.imgui_node_editor" />
     </list>
   </component>
   <component name="TaskManager">
@@ -418,6 +447,7 @@
       <workItem from="1780471898596" duration="3265000" />
       <workItem from="1783150748095" duration="3061000" />
       <workItem from="1784537309260" duration="9536000" />
+      <workItem from="1784670498308" duration="16093000" />
     </task>
     <servers />
   </component>

@@ -1,7 +1,4 @@
 #pragma once
-// NalAnimCodec.h - C++ port of pcanim_codec.py
-// Full NAL entropy decoder with all 64 codecs + per-component frame integrators
-// LemonHaze / Claude - 2025
 
 #include <cstdint>
 #include <cmath>
@@ -13,7 +10,6 @@
 #include <intrin.h>
 #endif
 
-// ─── Component IDs (match pcanim_codec.py) ───
 namespace NalComp {
     constexpr int ARBITRARY_PO  = 0;
     constexpr int GENERIC       = 1;
@@ -31,13 +27,11 @@ namespace NalComp {
     constexpr int FING5         = 13;
 }
 
-// ─── Constants ───
 constexpr float ENTROPY_BASE_QUANT_STEP = 0.25f;
-constexpr float DEQUANT_SCALE = 0.0009765625f; // 1/1024
+constexpr float DEQUANT_SCALE = 0.0009765625f;
 constexpr int INITIAL_VALUES_BIT_TABLE[] = {2, 4, 7, 20};
 constexpr int SCENE_INITIAL_VALUES_BIT_TABLE[] = {4, 7, 12, 30};
 
-// ─── Helpers ───
 static inline int nal_popcount(uint32_t v) {
 #if defined(_MSC_VER)
     return static_cast<int>(__popcnt(v));
@@ -57,11 +51,9 @@ static inline int nal_count(uint32_t mask, uint32_t filt, int weight = 1) {
     return weight * nal_popcount(mask & filt);
 }
 
-// ─── Track count / byte size per component (matches pcanim_codec.py) ───
 static inline int nal_get_num_tracks_for_comp(int comp_ix, uint32_t mask) {
     switch (comp_ix) {
-    // USM.exe sub_5F3C00 consumes every enabled bit of the 32-bit mask.
-    // Each logical ArbitraryPO channel owns one XYZ/quaternion-vector triple.
+
     case NalComp::ARBITRARY_PO: return 3 * nal_popcount(mask);
     case NalComp::GENERIC:      return 0;
     case NalComp::FAKEROOT_STD: { int t = 9; if (mask & 1) t += 6; if (mask & 2) t += 1; return t; }
@@ -77,25 +69,20 @@ static inline int nal_get_num_tracks_for_comp(int comp_ix, uint32_t mask) {
         return t;
     }
     case NalComp::TENTACLE:      return nal_popcount(mask & 0x7FFF);
-    // USM.exe sub_5FDA60: channels 0..1 are quaternion triples,
-    // 2..9 are scalar pairs, and 10..29 are single scalars.
+
     case NalComp::FING52:
     case NalComp::FING5_REDUCED: return nal_count(mask, 0x3, 3) +
                                            nal_count(mask, 0x3FC, 2) +
                                            nal_count(mask, 0x3FFFFC00, 1);
-    // USM.exe sub_5FDB60: the first two channels contain a quaternion
-    // triple plus a curl scalar; the remaining eight contain scalar pairs.
+
     case NalComp::FING5_CURL:    return nal_count(mask, 0x3, 4) +
                                            nal_count(mask, 0x3FC, 2);
-    // USM.exe sub_5FDE30: every enabled StandardFingers5 channel is a quat.
+
     case NalComp::FING5:         return nal_count(mask, 0x3FFFFFFF, 3);
     default: return 3 * nal_popcount(mask & 0x1F) + ((mask & 0x20) ? 6 : 0);
     }
 }
 
-// Runtime allocation/state footprint returned by the engine's per-component
-// sizing helpers.  This is deliberately not used as an entropy-stream extent;
-// serialized stream boundaries come from the PCANIM track-offset table.
 static inline int nal_get_num_bytes_for_comp(int comp_ix, uint32_t mask) {
     auto to_bytes = [](int tracks, int hdr = 0) { return tracks * 16 + hdr; };
     switch (comp_ix) {
@@ -109,9 +96,7 @@ static inline int nal_get_num_bytes_for_comp(int comp_ix, uint32_t mask) {
     case NalComp::LEGS_IK:
     case NalComp::ARMS_IK:       return to_bytes(nal_count(mask, 0xF, 3) + nal_count(mask, 0xC, 4));
     case NalComp::TENTACLE:      return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 136);
-    // The constants are the exact non-codec state sizes returned by the
-    // engine allocation-size functions: 25, 15, 23, and 61 NalTrackState
-    // records respectively (sub_5FDA40/sub_5FDB60/sub_5FDD50/sub_5FDE30).
+
     case NalComp::FING52:        return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 25 * 16);
     case NalComp::FING5_CURL:    return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 15 * 16);
     case NalComp::FING5_REDUCED: return to_bytes(nal_get_num_tracks_for_comp(comp_ix, mask), 23 * 16);
@@ -121,10 +106,9 @@ static inline int nal_get_num_bytes_for_comp(int comp_ix, uint32_t mask) {
 }
 
 static inline bool nal_has_track(int flags) {
-    return (flags & 0x3) == 0x3; // HAS_TRACK_DATA | HAS_PER_ANIM_DATA
+    return (flags & 0x3) == 0x3;
 }
 
-// ─── BitStream ───
 class NalBitStream {
     const uint8_t* data_;
     size_t size_;
@@ -162,10 +146,8 @@ public:
     }
 };
 
-// ─── Decoder result: (run_length, decoded_value) ───
 struct DecResult { int run; int val; };
 
-// ─── All 64 entropy decoders (exact port of pcanim_codec.py) ───
 static inline DecResult dec_0(NalBitStream&) { return {0, 0}; }
 
 static inline DecResult dec_1a(NalBitStream& bs) {
@@ -207,8 +189,7 @@ static inline DecResult dec_2a(NalBitStream& bs) {
 static inline DecResult dec_2b(NalBitStream& bs) {
     uint32_t c = bs.peek_bits(3);
     if ((c & 3) != 0) { int v = c & 3; bs.consume(2); return {1, v - 2}; }
-    // 3-bit branch keeps the FULL code (0 or 4), so the output here is -2 or +2.
-    // Verified against USM.exe sub_5ECCF0 (decoder table 0x937250, index 7/39).
+
     bs.consume(3); return {1, (int)c - 2};
 }
 static inline DecResult dec_2c(NalBitStream& bs) {
@@ -405,7 +386,7 @@ static inline DecResult dec_f31bit(NalBitStream& bs) {
     int v; if (c & 1) v = ((c >> 5) & 3) + 1; else v = -1 - ((c >> 5) & 3);
     bs.consume(7); return {1, v};
 }
-// --- Upper half (indices 32-63: different output mapping) ---
+
 static inline DecResult dec_15(NalBitStream& bs) { uint32_t c = bs.read_bits(5); if (c != 0) return {1, (int)c - 16}; return {5, 0}; }
 static inline DecResult dec_0_16(NalBitStream& bs) {
     uint32_t c = bs.peek_bits(7);
@@ -459,20 +440,18 @@ static inline DecResult dec_31bit_upper(NalBitStream& bs){
 }
 static inline DecResult dec_err(NalBitStream&) { return {0, 0}; }
 
-// ─── Decoder table (64 entries) ───
 using DecoderFn = DecResult(*)(NalBitStream&);
 static const DecoderFn DECODER_TABLE[64] = {
-    dec_0, dec_1a, dec_1b, dec_1c, dec_1d, dec_1e, dec_2a, dec_2b,           // 0-7
-    dec_2c, dec_3a, dec_3b, dec_5a, dec_7a, dec_7b, dec_7c, dec_f15a,        // 8-15
-    dec_f15b, dec_f15c, dec_f31a, dec_f31b, dec_f31c, dec_f31d, dec_f63a, dec_f63b, // 16-23
-    dec_f127, dec_f255, dec_f2047, dec_f15bit, dec_f23bit, dec_f31bit, dec_err, dec_err, // 24-31
-    dec_0, dec_1a, dec_1b, dec_1c, dec_1d, dec_1e, dec_2a, dec_2b,           // 32-39
-    dec_2c, dec_3a, dec_3b, dec_5a, dec_7a, dec_7b, dec_7c, dec_15,          // 40-47
-    dec_0_16, dec_0_1_17, dec_1_17, dec_31, dec_0_1_33, dec_3_35, dec_63, dec_127, // 48-55
-    dec_255, dec_511, dec_1023, dec_15bit, dec_23bit, dec_31bit_upper, dec_err, dec_err, // 56-63
+    dec_0, dec_1a, dec_1b, dec_1c, dec_1d, dec_1e, dec_2a, dec_2b,
+    dec_2c, dec_3a, dec_3b, dec_5a, dec_7a, dec_7b, dec_7c, dec_f15a,
+    dec_f15b, dec_f15c, dec_f31a, dec_f31b, dec_f31c, dec_f31d, dec_f63a, dec_f63b,
+    dec_f127, dec_f255, dec_f2047, dec_f15bit, dec_f23bit, dec_f31bit, dec_err, dec_err,
+    dec_0, dec_1a, dec_1b, dec_1c, dec_1d, dec_1e, dec_2a, dec_2b,
+    dec_2c, dec_3a, dec_3b, dec_5a, dec_7a, dec_7b, dec_7c, dec_15,
+    dec_0_16, dec_0_1_17, dec_1_17, dec_31, dec_0_1_33, dec_3_35, dec_63, dec_127,
+    dec_255, dec_511, dec_1023, dec_15bit, dec_23bit, dec_31bit_upper, dec_err, dec_err,
 };
 
-// ─── Track state ───
 struct NalTrackState {
     float whole     = 0.f;
     float delta     = 0.f;
@@ -480,7 +459,6 @@ struct NalTrackState {
     int   zeros     = 0;
 };
 
-// ─── Quaternion helpers (for track reconstruction) ───
 static inline void nal_quat_compose_xyz(float x, float y, float z, float out[4]) {
     out[0] = x; out[1] = y; out[2] = z;
     out[3] = sqrtf(fabsf(1.f - (x*x + y*y + z*z)));
@@ -498,7 +476,6 @@ static inline void nal_quat_mul(const float a[4], const float b[4], float out[4]
     out[3] = b[3]*a[3] - (a[1]*b[1] + a[0]*b[0] + b[2]*a[2]);
 }
 
-// Apply delta quaternion to track xyz values (matches _apply_quat_delta_to_tracks)
 static inline void nal_apply_quat_delta(NalTrackState* tracks, int idx) {
     auto& tx = tracks[idx], &ty = tracks[idx+1], &tz = tracks[idx+2];
     float q_base[4], q_delta[4], out[4];
@@ -521,7 +498,6 @@ static inline void nal_apply_quat_delta_accum(NalTrackState* tracks, int idx) {
     nal_apply_quat_delta(tracks, idx);
 }
 
-// ─── Dequantize all tracks for one frame (matches _dequant_tracks) ───
 static inline void nal_dequant_tracks(NalTrackState* tracks, const uint8_t* codec_ixs, int ntracks,
                                        NalBitStream& dec, int frame, float scaled_quant, bool is_scene_anim)
 {
@@ -557,7 +533,6 @@ static inline void nal_dequant_tracks(NalTrackState* tracks, const uint8_t* code
     }
 }
 
-// ─── Per-component frame integrators (match pcanim_codec.py) ───
 using Integrator = void(*)(NalTrackState*, const uint8_t*, uint32_t, int, NalBitStream&, float, bool);
 
 static void integrate_torso(NalTrackState* t, const uint8_t* c, uint32_t mask, int frame, NalBitStream& dec, float ts, bool sa) {
@@ -633,13 +608,9 @@ static void integrate_ik(NalTrackState* t, const uint8_t* c, uint32_t mask, int 
 
 static void integrate_linear(NalTrackState* t, const uint8_t* c, uint32_t mask, int frame, NalBitStream& dec, float ts, bool sa) {
     float sq = DEQUANT_SCALE * ts;
-    // Count all tracks present
-    int ntracks = nal_get_num_tracks_for_comp(-1, mask); // generic
-    // For linear components, all tracks are just integrated linearly
-    // We need to figure out ntracks from the codec_ixs length — use the mask
-    // Actually we need to pass ntracks separately. For now use a reasonable upper bound.
-    // This gets called for tentacles, fingers, etc.
-    // Caller should set ntracks correctly.
+
+    int ntracks = nal_get_num_tracks_for_comp(-1, mask);
+
     nal_dequant_tracks(t, c, ntracks, dec, frame, sq, sa);
     if (frame == 0) return;
     for (int i = 0; i < ntracks; ++i) {
@@ -652,8 +623,7 @@ static void integrate_arbitrary(NalTrackState* t, const uint8_t* c, int ntracks,
                                 int active_quat_channel_count, int frame,
                                 NalBitStream& dec, float ts, bool sa) {
     float sq = DEQUANT_SCALE * ts;
-    // sub_5F2270 counts enabled quaternion and total channels from a
-    // variable-length mask; sub_5F3C00 then consumes their compact triples.
+
     nal_dequant_tracks(t, c, ntracks, dec, frame, sq, sa);
     if (frame == 0) return;
     int ti = 0;
@@ -680,7 +650,6 @@ static void integrate_arms(NalTrackState* t, const uint8_t* c, uint32_t m, int f
 static void integrate_legs_ik(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa)       { integrate_ik(t,c,m,f,d,ts,sa); }
 static void integrate_arms_ik(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa)       { integrate_ik(t,c,m,f,d,ts,sa); }
 
-// Tentacles use scalar tracks only (USM.exe sub_5FE7F0).
 static void integrate_tentacle(NalTrackState* t, const uint8_t* c, uint32_t m, int f, NalBitStream& d, float ts, bool sa) {
     float sq = DEQUANT_SCALE * ts;
     int nt = nal_popcount(m & 0x7FFF);
@@ -701,12 +670,9 @@ static inline void integrate_scalar_tracks(NalTrackState* t, int first, int coun
     }
 }
 
-// Exact mixed quaternion/scalar layout shared by Top2Knuckle and Reduced.
-// See sub_600940/sub_6010E0; bit_count is 20 and 30 respectively.
 static void integrate_finger_mixed(NalTrackState* t, const uint8_t* c, uint32_t m, int bit_count,
                                    int f, NalBitStream& d, float ts, bool sa) {
-    // The allocation/count helper sub_5FDA60 always counts all 30 mask bits,
-    // even though the Top2 pose loop itself stops after bit 19.
+
     int nt = nal_count(m, 0x3, 3) + nal_count(m, 0x3FC, 2) +
              nal_count(m, 0x3FFFFC00, 1);
     float sq = DEQUANT_SCALE * ts;
@@ -760,11 +726,9 @@ static void integrate_fing5(NalTrackState* t, const uint8_t* c, uint32_t m, int 
     integrate_quat_masked(t, c, m, f, d, ts, sa, 30);
 }
 
-// ─── Integrator dispatch ───
 static inline Integrator nal_get_integrator(int comp_ix) {
     switch (comp_ix) {
-    // ArbitraryPO needs its pose-header quaternion count and is dispatched
-    // explicitly by nal_decode_component_frames.
+
     case NalComp::ARBITRARY_PO:   return integrate_noop;
     case NalComp::GENERIC:        return integrate_noop;
     case NalComp::FAKEROOT_STD:   return integrate_fakeroot;
@@ -783,9 +747,8 @@ static inline Integrator nal_get_integrator(int comp_ix) {
     }
 }
 
-// ─── Decode all frames for a component ───
 struct NalDecodedFrames {
-    std::vector<std::vector<float>> frames; // [frame_index][track_values]
+    std::vector<std::vector<float>> frames;
 };
 
 static inline NalDecodedFrames nal_decode_component_frames(

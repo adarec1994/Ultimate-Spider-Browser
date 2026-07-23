@@ -1,7 +1,4 @@
 #pragma once
-// NalSkeleton.h - C++ port of pcskel.py
-// Parses .pcskel files and builds bone hierarchy for Ultimate Spider-Browser
-// LemonHaze / Claude - 2025
 
 #include <cstdint>
 #include <cstring>
@@ -14,7 +11,6 @@
 #include <algorithm>
 #include <functional>
 
-// ─── Component type hashes (match pcskel.py NalComponentType) ───
 namespace NalCompType {
     constexpr uint32_t ArbitraryPO               = 0xC5E45DCF;
     constexpr uint32_t Generic                    = 0xEC4755BD;
@@ -38,11 +34,8 @@ namespace NalCompFlags {
     constexpr int HAS_SKEL_DATA     = 0x4;
 }
 
-// ─── Bone role enums (match pcskel.py) ───
 namespace TorsoBone   { enum E { PELVIS=0, SPINE, SPINE1, SPINE2, NECK, HEAD, NECK_AUX, COUNT=7 }; }
-// Standard legs use the exact in-memory order consumed by USM.exe sub_5F6960:
-// two proximal-to-distal chains followed by their shared root.  IK legs use a
-// different, toe-first table (LegBone below), so these must never share roles.
+
 namespace LegStdBone  { enum E { L_THIGH=0, L_CALF, L_FOOT, L_TOE,
                                  R_THIGH, R_CALF, R_FOOT, R_TOE, ROOT, COUNT=9 }; }
 namespace LegBone     { enum E { L_TOE=0, R_TOE, L_FOOT, R_FOOT, L_THIGH, L_CALF, R_THIGH, R_CALF, PELVIS, COUNT=9 }; }
@@ -53,7 +46,6 @@ namespace ArmIKBone   { enum E { L_CLAV=0, R_CLAV, L_HAND, R_HAND, L_UPPER, R_UP
 namespace FingerBone  { enum E { L0=0,R0,L1,L2,L3,L4,R1,R2,R3,R4, L01,R01,L11,L21,L31,L41,R11,R21,R31,R41,
                                  L02,R02,L12,L22,L32,L42,R12,R22,R32,R42, L_HAND_PARENT,R_HAND_PARENT, COUNT=32 }; }
 
-// ─── IK data (matches pcskel.py read_ik_skel_data) ───
 struct NalIKData {
     float fUpperIKc       = 0.f;
     float fUpperIKInvc    = 0.f;
@@ -63,21 +55,16 @@ struct NalIKData {
     float fLowerArmLength = 0.f;
 };
 
-// ─── Quaternion as (w,x,y,z) ───
 struct NalQuat {
     float w = 1.f, x = 0.f, y = 0.f, z = 0.f;
 };
 
-// ─── Per-component parsed data ───
 struct NalComponentData {
     int    component_index = -1;
     int    component_flags = 0;
     uint32_t type_id       = 0;
     std::string type_name;
 
-    // Preserve the complete serialized blocks. Parsed fields below are views
-    // of these bytes; alignment, reserved, and unconsumed bytes remain
-    // available for byte-exact diagnostics instead of being silently lost.
     uint32_t raw_skel_block_offset = 0;
     std::vector<uint8_t> raw_skel_block;
     uint32_t parsed_skel_bytes = 0;
@@ -85,23 +72,18 @@ struct NalComponentData {
     std::vector<uint8_t> raw_default_pose_block;
     uint32_t parsed_default_pose_bytes = 0;
 
-    // Bone indices for this component (variable size depending on type)
     std::vector<int> bone_indices;
 
-    // Offset locations (vec3 arrays)
     std::vector<std::array<float,3>> offset_locs;
     std::vector<int> other_matrix_indices;
-    std::array<float,4> empty_neck_orient = {0,0,0,1}; // stored as xyzw, matching pcskel.py
+    std::array<float,4> empty_neck_orient = {0,0,0,1};
     std::array<float,3> empty_neck_pos = {0,0,0};
 
-    // IK data (for legs_ik and arms_ik)
     NalIKData ik_data[2];
     bool has_ik = false;
 
-    // Fore twist locs (arms)
     std::vector<std::array<float,3>> fore_twist_locs;
 
-    // For ArbitraryPO: generic nodes
     struct GenericNode {
         uint32_t name_hash = 0;
         std::string name;
@@ -116,29 +98,28 @@ struct NalComponentData {
     std::vector<std::array<float,3>> arb_skel_positions;
     std::vector<uint32_t> arb_eval_order;
 
-    // Default pose data
     struct DefaultPose {
         std::string kind;
         std::vector<NalQuat> quats;
         std::array<float,3> pelvis_pos = {0,0,0};
-        // IK pose extras
+
         std::array<float,3> foot_pos[2] = {};
         float knee_spin[2] = {0,0};
-        // Arms IK
+
         std::array<float,3> hand_pos[2] = {};
         float elbow_spin[2] = {0,0};
         std::vector<NalQuat> hand_quats;
-        // Fakeroot
+
         float floor_offset = 0;
         uint32_t signal_start = 0, num_signals = 0;
-        // Fing52
+
         std::vector<float> base_y_tracks, base_z_tracks, hinge_tracks, other_tracks;
         uint32_t available_tracks = 0;
-        // Finger curl
+
         std::vector<float> finger_curl;
-        // Tentacles
+
         std::vector<float> tentacle_values;
-        // ArbitraryPO pose
+
         std::array<uint32_t,4> arbitrary_header = {};
         int quat_count = 0, position_count = 0;
         std::vector<std::array<float,3>> positions;
@@ -147,31 +128,26 @@ struct NalComponentData {
     DefaultPose default_pose;
 };
 
-// ─── Bone node for hierarchy ───
 struct NalBoneNode {
     int         index       = -1;
     std::string name;
     int         parent_index = -1;
 };
 
-// ─── Parsed skeleton result ───
 struct NalSkeletonData {
-    // Header
+
     uint32_t    cls = 0, version = 0;
     uint32_t    name_hash = 0, category_hash = 0;
     std::string name, category;
-    std::string skeleton_kind = "character"; // "character", "generic", "panel"
+    std::string skeleton_kind = "character";
     int         num_components = 0;
     std::vector<uint8_t> source_bytes;
 
-    // Components with per-skel data
     std::vector<NalComponentData> components;
 
-    // Bone hierarchy (index → name, index → parent_index)
     std::map<int, std::string> bone_map;
     std::map<int, int>         parent_map;
 
-    // Generic skeleton nodes
     struct GenericNode {
         int node_index = -1;
         uint32_t name_hash = 0;
@@ -180,10 +156,6 @@ struct NalSkeletonData {
     };
     std::vector<GenericNode> generic_nodes;
 
-    // Exact 0x10200 generic-skeleton payload.  Unlike character skeletons,
-    // these assets describe pose storage with component-info records and a
-    // compact matrix command stream.  Keep every serialized region so the
-    // generic animation decoder never has to infer offsets from bone names.
     struct GenericComponentInfo {
         uint32_t type_hash = 0;
         std::string type_name;
@@ -208,13 +180,6 @@ struct NalSkeletonData {
     std::vector<std::string> warnings;
 };
 
-// Character animation references identify the skeleton used to decode the
-// component slots, but retail packs also reuse clips across distinct skeleton
-// resources whose logical pose layouts are identical (BOOMERANG reuses
-// GANG_SS).  Pointer/name equality is therefore too strict.  Compatibility is
-// structural: every component writes the same logical matrices and the
-// resulting parent graph is identical.  Default poses and offsets may differ;
-// those remain owned by the animation's referenced skeleton.
 static inline bool nal_skeleton_pose_compatible(const NalSkeletonData* a,
                                                 const NalSkeletonData* b) {
     if (!a || !b) return false;
@@ -238,10 +203,7 @@ static inline bool nal_skeleton_pose_compatible(const NalSkeletonData* a,
         for (size_t n = 0; n < ac.arb_nodes.size(); ++n) {
             const auto& an = ac.arb_nodes[n];
             const auto& bn = bc.arb_nodes[n];
-            // Channel indices/animation flags belong to the skeleton against
-            // which the clip was decoded and may legitimately differ.  For
-            // retargeting, the invariant is which logical matrix is written
-            // and which logical matrix parents it.
+
             if (an.my_matrix_ix != bn.my_matrix_ix ||
                 an.parent_matrix_ix != bn.parent_matrix_ix)
                 return false;
@@ -250,7 +212,6 @@ static inline bool nal_skeleton_pose_compatible(const NalSkeletonData* a,
     return true;
 }
 
-// ─── Helper: read a tlFixedString (4-byte hash + 28-byte name) ───
 static inline std::pair<uint32_t, std::string> nal_read_fixed_string(std::ifstream& f) {
     uint32_t hash = 0;
     char buf[28] = {};
@@ -269,7 +230,7 @@ static inline std::array<float,3> nal_read_vec3(std::ifstream& f) {
 static inline NalQuat nal_read_quat_xyzw(const uint8_t* p) {
     float xyzw[4];
     memcpy(xyzw, p, 16);
-    return {xyzw[3], xyzw[0], xyzw[1], xyzw[2]}; // store as (w,x,y,z)
+    return {xyzw[3], xyzw[0], xyzw[1], xyzw[2]};
 }
 
 static inline std::vector<NalQuat> nal_unpack_quat_list(const uint8_t* blob, int count) {
@@ -281,7 +242,6 @@ static inline std::vector<NalQuat> nal_unpack_quat_list(const uint8_t* blob, int
     return out;
 }
 
-// ─── Component name lookup ───
 static inline std::string nal_comp_type_name(uint32_t t) {
     switch (t) {
     case NalCompType::ArbitraryPO:               return "ArbitraryPO";
@@ -302,7 +262,6 @@ static inline std::string nal_comp_type_name(uint32_t t) {
     }
 }
 
-// ─── Pose index calculator (matches pcskel.py _get_pose_index_for_comp_index) ───
 static inline int nal_get_pose_index(const std::vector<std::pair<int,int>>& meta, int comp_index) {
     if (comp_index < 0 || comp_index >= (int)meta.size()) return -1;
     if (meta[comp_index].second & NalCompFlags::HAS_TRACK_DATA) return -1;
@@ -314,7 +273,6 @@ static inline int nal_get_pose_index(const std::vector<std::pair<int,int>>& meta
     return pose_ix;
 }
 
-// ─── Main parser ───
 inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
     NalSkeletonData result;
     std::ifstream f(filepath, std::ios::binary);
@@ -336,7 +294,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
     f.clear();
     f.seekg(0);
 
-    // Header
     f.read(reinterpret_cast<char*>(&result.cls), 4);
     f.read(reinterpret_cast<char*>(&result.version), 4);
     auto [name_hash, name_str] = nal_read_fixed_string(f);
@@ -349,11 +306,9 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
     std::string cat_lower = cat_str;
     std::transform(cat_lower.begin(), cat_lower.end(), cat_lower.begin(), ::tolower);
 
-    // Generic skeleton
     if (cat_lower.find("generic") != std::string::npos || result.version == 0x10200) {
         result.skeleton_kind = "generic";
-        // USM.exe nalGenericSkeleton::_Process (0x793610) derives every
-        // runtime pointer from these exact serialized sizes/alignments.
+
         auto u32 = [&](size_t off, uint32_t& value) -> bool {
             if (off + 4 > result.source_bytes.size()) return false;
             std::memcpy(&value, result.source_bytes.data() + off, 4);
@@ -475,11 +430,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             result.generic_nodes.push_back(gn);
         }
 
-        // Node metadata is not in matrix order (and RHINO inserts shoulder
-        // nodes mid-table).  Each node's data_offset is the serialized end
-        // offset of the quaternion/PO source consumed for its destination
-        // matrix.  Replaying the exact command-source cursors therefore gives
-        // an unambiguous node->matrix permutation without name heuristics.
         std::map<int, int> data_end_to_matrix;
         size_t command_cursor = 0;
         int animated_cursor = 0;
@@ -529,12 +479,11 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         return result;
     }
 
-    // ─── Character skeleton ───
     result.skeleton_kind = "character";
 
     int32_t num_skel_data;
     f.read(reinterpret_cast<char*>(&num_skel_data), 4);
-    f.seekg(24, std::ios::cur); // gap[24]
+    f.seekg(24, std::ios::cur);
 
     uint32_t num_components;
     int32_t pose_data_align, pose_data_size;
@@ -553,10 +502,9 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         return result;
     }
 
-    // Read component meta: (type, flags) pairs
     struct CompMeta { int32_t index; uint32_t type; int32_t flags; };
     std::vector<CompMeta> comp_meta;
-    // Also store as (type, flags) for pose index lookup
+
     std::vector<std::pair<int,int>> meta_for_pose;
 
     if (num_components > 0 && components_offs > 0 &&
@@ -577,7 +525,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         return result;
     }
 
-    // Initialize component data vector
     result.num_components = (int)comp_meta.size();
     result.components.resize(comp_meta.size());
     for (uint32_t i = 0; i < (uint32_t)comp_meta.size(); ++i) {
@@ -587,7 +534,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         result.components[i].type_name = nal_comp_type_name(comp_meta[i].type);
     }
 
-    // ─── Per-skel data blocks ───
     if (per_skel_data_int_offs > 0 && !comp_meta.empty() &&
         (uint64_t)per_skel_data_int_offs + 4ull <= total_file_size) {
         f.seekg(per_skel_data_int_offs);
@@ -599,7 +545,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         std::vector<int32_t> block_offsets(num_blocks);
         f.read(reinterpret_cast<char*>(block_offsets.data()), num_blocks * 4);
 
-        // Find which component indices have HAS_SKEL_DATA
         std::vector<int> skel_data_indices;
         for (int i = 0; i < (int)comp_meta.size(); ++i) {
             if (comp_meta[i].flags & NalCompFlags::HAS_SKEL_DATA)
@@ -629,7 +574,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             switch (comp_type) {
             case NalCompType::TorsoHead_TwoNeck:
             case NalCompType::TorsoHead_OneNeck: {
-                // Read: emptyNeckOrient(16) + emptyNeckPos(12) + offsetLocs[5](60) + boneIxs[6](24) + otherMatrixIxs[1](4)
+
                 f.read(reinterpret_cast<char*>(cd.empty_neck_orient.data()), 16);
                 cd.empty_neck_pos = nal_read_vec3(f);
                 cd.offset_locs.resize(5);
@@ -640,7 +585,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 break;
             }
             case NalCompType::LegsFeet_IK: {
-                // offsetLocs[8](96) + theIKData[2](48) + boneIxs[8](32) + otherMatrixIxs[1](4)
+
                 cd.offset_locs.resize(8);
                 for (int i = 0; i < 8; ++i) cd.offset_locs[i] = nal_read_vec3(f);
                 for (int i = 0; i < 2; ++i) f.read(reinterpret_cast<char*>(&cd.ik_data[i]), sizeof(NalIKData));
@@ -651,10 +596,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 break;
             }
             case NalCompType::LegsFeet_Compressed: {
-                // Engine object consumed by sub_5F6960: offsetLocs[8] followed
-                // immediately by 8 chain bone indices and one shared root.
-                // The older 9*vec4 interpretation over-read 48 bytes and moved
-                // the bone table into the next structure/padding region.
+
                 cd.offset_locs.resize(8);
                 for (int i = 0; i < 8; ++i) cd.offset_locs[i] = nal_read_vec3(f);
                 cd.bone_indices.resize(LegStdBone::COUNT);
@@ -663,7 +605,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 break;
             }
             case NalCompType::ArmsHands_Compressed: {
-                // offsetLocs[8](96) + foreTwistLocs[4](48) + boneIxs[8](32) + otherMatrixIxs[5](20)
+
                 cd.offset_locs.resize(8);
                 for (int i = 0; i < 8; ++i) cd.offset_locs[i] = nal_read_vec3(f);
                 cd.fore_twist_locs.resize(4);
@@ -678,7 +620,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 break;
             }
             case NalCompType::ArmsHands_IK: {
-                // offsetLocs[8](96) + foreTwistLocs[4](48) + theIKData[2](48) + boneIxs[8](32) + otherMatrixIxs[6](24)
+
                 cd.offset_locs.resize(8);
                 for (int i = 0; i < 8; ++i) cd.offset_locs[i] = nal_read_vec3(f);
                 cd.fore_twist_locs.resize(4);
@@ -698,7 +640,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             case NalCompType::FiveFinger_IndividualCurl:
             case NalCompType::FiveFinger_ReducedAngular:
             case NalCompType::FiveFinger_FullRotational: {
-                // offsetLocs[30](360) + boneIxs[30](120) + otherMatrixIxs[2](8)
+
                 cd.offset_locs.resize(30);
                 for (int i = 0; i < 30; ++i) cd.offset_locs[i] = nal_read_vec3(f);
                 std::array<int32_t, 32> serialized_bones{};
@@ -706,11 +648,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     f.read(reinterpret_cast<char*>(&serialized_bones[i]), 4);
                 cd.bone_indices.resize(FingerBone::COUNT);
                 if (comp_type == NalCompType::FiveFinger_ReducedAngular) {
-                    // sub_5F9150 consumes the bone table as ten consecutive
-                    // three-bone chains but addresses pose/offset slots in the
-                    // base[10], middle[10], tip[10] order used by FingerBone.
-                    // Canonicalize only the table; serialized offsetLocs already
-                    // use pose-slot order.
+
                     static constexpr int canonical_to_serialized[30] = {
                          0,15, 3, 6, 9,12,18,21,24,27,
                          1,16, 4, 7,10,13,19,22,25,28,
@@ -719,9 +657,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     for (int i = 0; i < 30; ++i)
                         cd.bone_indices[i] = serialized_bones[canonical_to_serialized[i]];
                 } else {
-                    // Top2/Curl are already base/middle/tip ordered. Full
-                    // rotational is intentionally retained in its serialized
-                    // chain-major order because its pose mask is chain-major too.
+
                     for (int i = 0; i < 30; ++i)
                         cd.bone_indices[i] = serialized_bones[i];
                 }
@@ -732,28 +668,21 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 break;
             }
             case NalCompType::FakerootEntropyCompressed: {
-                // The retail class has no per-skeleton payload. A block can
-                // only reach this case in a non-retail/invalid file; the raw
-                // bytes above remain preserved for diagnostics.
+
                 break;
             }
             case NalCompType::Tentacles: {
-                // Tentacles Compressed owns 15 scalar animation channels and
-                // a 15-float default pose, but no per-skeleton payload. The
-                // visible tentacle bones are described by ArbitraryPO.
+
                 if (!cd.raw_skel_block.empty())
                     result.warnings.push_back("Unexpected Tentacles per-skeleton payload preserved as raw bytes");
                 break;
             }
             case NalCompType::ArbitraryPO: {
-                // Exact runtime layout used by USM.exe sub_5F5E60:
-                // [0] node count, [1..3] metadata, [4] skeleton-quat offset,
-                // [5] skeleton-position offset, [6] 48-byte node-record offset,
-                // [7] uint32 evaluation-order offset. Zero offsets are null.
+
                 f.read(reinterpret_cast<char*>(cd.arb_header.data()), 32);
                 uint32_t bone_count = cd.arb_header[0];
                 uint32_t block_start_off = cd.arb_header[6];
-                if (bone_count > 200) break; // sanity check
+                if (bone_count > 200) break;
 
                 f.seekg(comp_block_start + block_start_off);
                 cd.arb_nodes.resize(bone_count);
@@ -787,9 +716,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                     }
                 }
 
-                // The builder selects skeleton constants only for channels whose
-                // per-node animation flag is clear. Infer their exact array sizes
-                // from the highest referenced indices, just as the record table does.
                 size_t skel_quat_count = 0;
                 size_t skel_pos_count = 0;
                 for (const auto& node : cd.arb_nodes) {
@@ -837,10 +763,9 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 result.warnings.push_back("Exception parsing per-skel block " + std::to_string(bi));
             }
         }
-        } // end num_blocks bounds check
+        }
     }
 
-    // ─── Default poses ───
     if (default_pose_offsets_offs > 0 && !comp_meta.empty() &&
         (uint64_t)default_pose_offsets_offs + 4ull <= total_file_size) {
         f.seekg(default_pose_offsets_offs);
@@ -871,10 +796,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 if (pi < 0 || pi >= num_pose_blocks) continue;
 
                 uint32_t start = pose_offsets[pi];
-                // The offset table is indexed by component pose, not sorted by
-                // physical location.  Carnage stores Tentacles (1168) after
-                // ArbitraryPO (576), so using pose_offsets[pi+1] merges blocks.
-                // A block ends at the smallest greater physical offset.
+
                 uint32_t end = (uint32_t)total_pose_bytes;
                 for (uint32_t candidate : pose_offsets)
                     if (candidate > start && candidate < end) end = candidate;
@@ -956,8 +878,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 }
                 else if (ct == NalCompType::FiveFinger_ReducedAngular && psize >= 176) {
                     dp.kind = "fing5_reduced_pose";
-                    // Exact layout used by sub_5F9150:
-                    // quat[2], baseZ[8], baseY[8], mid[10], tip[10].
+
                     dp.quats = nal_unpack_quat_list(pdata, 2);
                     dp.base_z_tracks.resize(8);
                     dp.base_y_tracks.resize(8);
@@ -987,9 +908,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 }
                 else if (ct == NalCompType::ArbitraryPO && psize >= 16) {
                     dp.kind = "arbitrary_po_pose";
-                    // The engine consumes only [0] quaternion count and [1]
-                    // total channel count. [2..3] are reserved/stale storage
-                    // in retail files and are retained byte-for-byte.
+
                     memcpy(dp.arbitrary_header.data(), pdata, 16);
                     uint32_t qc = dp.arbitrary_header[0];
                     uint32_t tc = dp.arbitrary_header[1];
@@ -1017,13 +936,9 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 }
             }
         }
-        } // end total_pose_bytes check
+        }
     }
 
-    // ─── Build bone hierarchy from component data ───
-    // Matches pcskel.py apply_torso_chain, apply_leg_chains, apply_arm_chains, apply_finger_chains
-
-    // Collect bone names from components
     auto add_bone = [&](int idx, const std::string& role_name) {
         if (idx < 0) return;
         if (result.bone_map.find(idx) == result.bone_map.end()) {
@@ -1036,7 +951,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         result.parent_map[child_idx] = parent_idx;
     };
 
-    // --- Torso chain ---
     int spine2_id = -1;
     for (auto& cd : result.components) {
         if (cd.type_id != NalCompType::TorsoHead_TwoNeck && cd.type_id != NalCompType::TorsoHead_OneNeck) continue;
@@ -1062,14 +976,11 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             int neck_aux = cd.bone_indices[TorsoBone::NECK_AUX];
             set_parent(neck_aux, sp2);
         }
-        // The animated neck and empty auxiliary neck are siblings.  Verified
-        // in USM.exe sub_5F6610: the five-pose chain is parented first, then
-        // neck_aux is independently multiplied by spine2.
+
         set_parent(neck, sp2);
         set_parent(head, neck);
     }
 
-    // --- Leg chains ---
     for (auto& cd : result.components) {
         bool is_legs_ik = (cd.type_id == NalCompType::LegsFeet_IK);
         bool is_legs    = (cd.type_id == NalCompType::LegsFeet_Compressed);
@@ -1096,13 +1007,11 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         add_bone(l_thigh, "l_thigh"); add_bone(l_calf, "l_calf");
         add_bone(r_thigh, "r_thigh"); add_bone(r_calf, "r_calf");
 
-        // Chains: pelvis→thigh→calf→foot→toe
         if (pelvis >= 0) { set_parent(l_thigh, pelvis); set_parent(r_thigh, pelvis); }
         set_parent(l_calf, l_thigh); set_parent(l_foot, l_calf); set_parent(l_toe, l_foot);
         set_parent(r_calf, r_thigh); set_parent(r_foot, r_calf); set_parent(r_toe, r_foot);
     }
 
-    // --- Arm chains ---
     bool has_arms_ik = false;
     for (auto& cd : result.components) {
         if (cd.type_id == NalCompType::ArmsHands_IK) { has_arms_ik = true; break; }
@@ -1112,7 +1021,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         bool is_arms_ik = (cd.type_id == NalCompType::ArmsHands_IK);
         bool is_arms    = (cd.type_id == NalCompType::ArmsHands_Compressed);
         if (!is_arms_ik && !is_arms) continue;
-        if (is_arms && has_arms_ik) continue; // IK takes priority
+        if (is_arms && has_arms_ik) continue;
 
         if (is_arms_ik && (int)cd.bone_indices.size() >= ArmIKBone::COUNT) {
             int l_clav = cd.bone_indices[ArmIKBone::L_CLAV], r_clav = cd.bone_indices[ArmIKBone::R_CLAV];
@@ -1126,14 +1035,12 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             add_bone(l_fore, "l_forearm"); add_bone(r_fore, "r_forearm");
             add_bone(l_hand, "l_hand"); add_bone(r_hand, "r_hand");
 
-            // Parent clavicles to neck_parent or spine2
             int clav_par = (neck_par >= 0 && result.bone_map.count(neck_par)) ? neck_par : spine2_id;
             if (clav_par >= 0) { set_parent(l_clav, clav_par); set_parent(r_clav, clav_par); }
 
             set_parent(l_upper, l_clav); set_parent(l_fore, l_upper); set_parent(l_hand, l_fore);
             set_parent(r_upper, r_clav); set_parent(r_fore, r_upper); set_parent(r_hand, r_fore);
 
-            // Twist bones
             if ((int)cd.bone_indices.size() > ArmIKBone::R_TWIST1) {
                 int lt0 = cd.bone_indices[ArmIKBone::L_TWIST0], lt1 = cd.bone_indices[ArmIKBone::L_TWIST1];
                 int rt0 = cd.bone_indices[ArmIKBone::R_TWIST0], rt1 = cd.bone_indices[ArmIKBone::R_TWIST1];
@@ -1170,7 +1077,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         }
     }
 
-    // --- Finger chains ---
     for (auto& cd : result.components) {
         bool is_finger = (cd.type_id == NalCompType::FiveFinger_Top2KnuckleCurl ||
                           cd.type_id == NalCompType::FiveFinger_IndividualCurl ||
@@ -1190,8 +1096,7 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
             "l_hand_parent", "r_hand_parent"
         };
         if (cd.type_id == NalCompType::FiveFinger_FullRotational) {
-            // sub_5F9430 stores both offsets and bone indices chain-major:
-            // five left triples followed by five right triples.
+
             static const char* chain_major_names[30] = {
                 "l_finger_0", "l_finger_01", "l_finger_02",
                 "l_finger_1", "l_finger_11", "l_finger_12",
@@ -1219,14 +1124,13 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
         for (int role = 0; role < FingerBone::COUNT; ++role)
             add_bone(bi(role), finger_names[role]);
 
-        // Left thumb: 0→01→02, Left fingers: N→N1→N2
         std::vector<std::pair<int,int>> chains = {
             {bi(FingerBone::L0), bi(FingerBone::L01)}, {bi(FingerBone::L01), bi(FingerBone::L02)},
             {bi(FingerBone::L1), bi(FingerBone::L11)}, {bi(FingerBone::L11), bi(FingerBone::L12)},
             {bi(FingerBone::L2), bi(FingerBone::L21)}, {bi(FingerBone::L21), bi(FingerBone::L22)},
             {bi(FingerBone::L3), bi(FingerBone::L31)}, {bi(FingerBone::L31), bi(FingerBone::L32)},
             {bi(FingerBone::L4), bi(FingerBone::L41)}, {bi(FingerBone::L41), bi(FingerBone::L42)},
-            // Right
+
             {bi(FingerBone::R0), bi(FingerBone::R01)}, {bi(FingerBone::R01), bi(FingerBone::R02)},
             {bi(FingerBone::R1), bi(FingerBone::R11)}, {bi(FingerBone::R11), bi(FingerBone::R12)},
             {bi(FingerBone::R2), bi(FingerBone::R21)}, {bi(FingerBone::R21), bi(FingerBone::R22)},
@@ -1238,7 +1142,6 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
                 set_parent(c, p);
         }
 
-        // Parent finger bases to hand parents
         int l_hp = bi(FingerBone::L_HAND_PARENT), r_hp = bi(FingerBone::R_HAND_PARENT);
         for (int b : {bi(FingerBone::L0), bi(FingerBone::L1), bi(FingerBone::L2), bi(FingerBone::L3), bi(FingerBone::L4)})
             if (l_hp >= 0 && b >= 0 && result.bone_map.count(l_hp)) set_parent(b, l_hp);
@@ -1249,12 +1152,9 @@ inline NalSkeletonData ParseNalSkeleton(const std::string& filepath) {
     return result;
 }
 
-// ─── Helper: find skeleton file in PCPACK for an entity ───
 inline std::string FindSkeletonInPacks(const std::vector<std::string>& pack_paths,
                                         const std::string& entity_name) {
-    // Skeleton files typically match the entity name
-    // This is a placeholder - in practice you'd search resource_directory entries
-    // For now, search for .pcskel files in the same directory
+
     for (auto& pp : pack_paths) {
         std::string dir = pp.substr(0, pp.find_last_of("/\\"));
         std::string skel_path = dir + "/" + entity_name + ".pcskel";

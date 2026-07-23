@@ -5,11 +5,14 @@
 #include "imgui.h"
 #include <fstream>
 #include <algorithm>
+#include <cctype>
+#include <limits>
 #include <map>
 #include <functional>
 #include <cmath>
+#include <sstream>
 
-static const int MAX_BONES = 64;        // per-section shader palette, matching OpenUSM
+static const int MAX_BONES = 64;
 static const int MAX_GLOBAL_BONES = 256;
 
 static void Mat4Identity(float* m) {
@@ -210,8 +213,6 @@ static void Mat4FromQuat(QuatWXYZ q, float* m) {
     q = QuatNormalize(q);
     Mat4Identity(m);
 
-    // Matches Blender plugin pcanim_transforms._mat_from_quat_pos:
-    // NAL engine quats are conjugated before becoming engine matrices.
     float x = -q.x;
     float y = -q.y;
     float z = -q.z;
@@ -240,8 +241,7 @@ static void Mat4BuildTwistLineXform(const std::array<float, 3>& pos, float angle
     float s = sinf(angle);
     float c = cosf(angle);
     Mat4Identity(m);
-    // USM.exe sub_5F2FD0 writes a normal X-axis rotation.  The former
-    // quarter-turn-biased matrix made an unanimated twist bone rotate 90°.
+
     m[5] = c;
     m[6] = -s;
     m[9] = s;
@@ -260,9 +260,7 @@ static float WrapPi(float angle) {
 }
 
 static float ExtractForearmTwist(QuatWXYZ handQuat, bool left) {
-    // Swing/twist projection about local X, with the same ±90° hand reference
-    // used by sub_5F4960.  sub_5F7160/sub_5F7760 distribute 0.33 of the result
-    // to each of the two serial forearm twist bones.
+
     handQuat = QuatNormalize(handQuat);
     float axial = 2.0f * atan2f(handQuat.x, handQuat.w);
     float reference = left ? -1.57079632679f : 1.57079632679f;
@@ -386,10 +384,7 @@ static void SolveNalIk(const float* baseModelMatrix,
         Mat4AxisVec(targetModelMatrix, 1, targetY);
         Vec3CrossLocal(targetDir, targetY, midDir);
     } else {
-        // Byte-exact algebra and ABI from the callbacks passed by USM.exe
-        // sub_5F7760 to sub_5F16E0: sub_5EEEE0 (left) and sub_5EF100
-        // (right). sub_5F16E0 invokes callback(out, clavicleMatrix,
-        // handMatrix, direction...), and both callbacks read parameter 2.
+
         float row0[3], row1[3], row2[3];
         Mat4AxisVec(baseModelMatrix, 0, row0);
         Mat4AxisVec(baseModelMatrix, 1, row1);
@@ -491,6 +486,244 @@ static bool GetDefaultQuat(const NalComponentData* comp, int index, QuatWXYZ& ou
     return true;
 }
 
+struct TentaclePreviewChain {
+    std::string name;
+    std::vector<std::array<float, 3>> controlPoints;
+    float diameter = 0.0f;
+    float activity = 0.0f;
+    float pull = 0.0f;
+    bool tongue = false;
+};
+
+static std::array<float, 3> TentacleCatmullRom(
+    const std::array<float, 3>& p0, const std::array<float, 3>& p1,
+    const std::array<float, 3>& p2, const std::array<float, 3>& p3, float t) {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    std::array<float, 3> out{};
+    for (int axis = 0; axis < 3; ++axis) {
+        out[axis] = 0.5f * ((2.0f * p1[axis]) +
+            (-p0[axis] + p2[axis]) * t +
+            (2.0f * p0[axis] - 5.0f * p1[axis] + 4.0f * p2[axis] - p3[axis]) * t2 +
+            (-p0[axis] + 3.0f * p1[axis] - 3.0f * p2[axis] + p3[axis]) * t3);
+    }
+    return out;
+}
+
+static void UpdateTentaclePreviewMesh(RenderMesh& mesh,
+                                      const std::vector<TentaclePreviewChain>& chains,
+                                      bool carnage) {
+    constexpr int kCurveStepsPerSpan = 4;
+    constexpr int kTongueCurveStepsPerSpan = 8;
+    constexpr int kTubeSides = 8;
+    constexpr int kTongueSides = 12;
+    constexpr int kFloatsPerVertex = 20;
+    constexpr float kTau = 6.2831853071795864769f;
+
+    std::vector<float> vertices;
+    std::vector<uint16_t> indices;
+    mesh.positions.clear();
+    mesh.normals.clear();
+    mesh.uvs.clear();
+    mesh.colors.clear();
+    mesh.bboxMin[0] = mesh.bboxMin[1] = mesh.bboxMin[2] =
+        std::numeric_limits<float>::max();
+    mesh.bboxMax[0] = mesh.bboxMax[1] = mesh.bboxMax[2] =
+        std::numeric_limits<float>::lowest();
+
+    for (const auto& chain : chains) {
+        if (chain.controlPoints.size() < 2 || chain.diameter <= 0.0001f) continue;
+
+        const bool carnageBlade = carnage && !chain.tongue;
+        const int curveSteps = (chain.tongue || carnageBlade)
+            ? kTongueCurveStepsPerSpan : kCurveStepsPerSpan;
+        const int ringSides = chain.tongue ? kTongueSides : (carnageBlade ? 10 : kTubeSides);
+        std::vector<std::array<float, 3>> curve;
+        curve.reserve((chain.controlPoints.size() - 1) * curveSteps + 1);
+        for (size_t span = 0; span + 1 < chain.controlPoints.size(); ++span) {
+            const auto& p0 = chain.controlPoints[span == 0 ? span : span - 1];
+            const auto& p1 = chain.controlPoints[span];
+            const auto& p2 = chain.controlPoints[span + 1];
+            const auto& p3 = chain.controlPoints[
+                std::min(span + 2, chain.controlPoints.size() - 1)];
+            for (int step = 0; step < curveSteps; ++step) {
+                curve.push_back(TentacleCatmullRom(
+                    p0, p1, p2, p3,
+                    static_cast<float>(step) / static_cast<float>(curveSteps)));
+            }
+        }
+        curve.push_back(chain.controlPoints.back());
+
+        if (curve.size() * ringSides + vertices.size() / kFloatsPerVertex > 65535)
+            break;
+        const uint16_t baseVertex = static_cast<uint16_t>(vertices.size() / kFloatsPerVertex);
+        float transportedSide[3] = {0.0f, 0.0f, 0.0f};
+        bool hasTransportedSide = false;
+
+        for (size_t pointIndex = 0; pointIndex < curve.size(); ++pointIndex) {
+            const auto& previous = curve[pointIndex == 0 ? 0 : pointIndex - 1];
+            const auto& next = curve[std::min(pointIndex + 1, curve.size() - 1)];
+            float tangent[3] = {
+                next[0] - previous[0], next[1] - previous[1], next[2] - previous[2]};
+            Vec3Normalize(tangent);
+            if (Vec3Len(tangent) < 0.5f) {
+                tangent[0] = 0.0f; tangent[1] = 1.0f; tangent[2] = 0.0f;
+            }
+
+            float side[3];
+            if (hasTransportedSide) {
+
+                const float projection = transportedSide[0] * tangent[0] +
+                    transportedSide[1] * tangent[1] + transportedSide[2] * tangent[2];
+                side[0] = transportedSide[0] - tangent[0] * projection;
+                side[1] = transportedSide[1] - tangent[1] * projection;
+                side[2] = transportedSide[2] - tangent[2] * projection;
+                Vec3Normalize(side);
+                if (Vec3Len(side) < 0.5f) hasTransportedSide = false;
+            }
+            if (!hasTransportedSide) {
+                float reference[3] = {0.0f, 1.0f, 0.0f};
+                if (fabsf(tangent[1]) > 0.9f) {
+                    reference[0] = 1.0f; reference[1] = 0.0f;
+                }
+                Vec3CrossLocal(tangent, reference, side);
+                Vec3Normalize(side);
+                hasTransportedSide = true;
+            }
+            transportedSide[0] = side[0];
+            transportedSide[1] = side[1];
+            transportedSide[2] = side[2];
+            float up[3];
+            Vec3CrossLocal(side, tangent, up);
+            Vec3Normalize(up);
+
+            const float along = curve.size() > 1
+                ? static_cast<float>(pointIndex) / static_cast<float>(curve.size() - 1)
+                : 0.0f;
+
+            const float diameter = std::min(chain.diameter, 4.0f);
+            const float radius = diameter * 0.5f * (1.0f - 0.72f * along);
+
+            const float tongueRoot = std::min(1.0f, 0.58f + along * 3.0f);
+            const float tongueTip = along < 0.52f
+                ? 1.0f
+                : std::max(0.0f, 1.0f - (along - 0.52f) / 0.48f);
+            const float tongueProfile = tongueRoot * tongueTip;
+            const float halfWidth = diameter * 0.22f * tongueProfile;
+            const float halfThickness = diameter * 0.052f * tongueProfile;
+
+            const float carnageRoot = std::min(1.0f, 0.72f + along * 2.0f);
+            const float carnageTip = along < 0.44f
+                ? 1.0f
+                : powf(std::max(0.0f, 1.0f - (along - 0.44f) / 0.56f), 1.18f);
+            const float carnageProfile = carnageRoot * carnageTip;
+            const float carnageHalfWidth = diameter * 0.26f * carnageProfile;
+            const float carnageHalfThickness = diameter * 0.070f * carnageProfile;
+            const float baseColor[3] = {
+                chain.tongue ? 0.55f : (carnage ? 0.62f : 0.16f),
+                chain.tongue ? 0.060f : (carnage ? 0.035f : 0.055f),
+                chain.tongue ? 0.095f : (carnage ? 0.025f : 0.23f)};
+
+            for (int sideIndex = 0; sideIndex < ringSides; ++sideIndex) {
+                const float angle = kTau * static_cast<float>(sideIndex) /
+                    static_cast<float>(ringSides);
+                const float cosine = cosf(angle);
+                const float sine = sinf(angle);
+                float normal[3] = {
+                    side[0] * cosine + up[0] * sine,
+                    side[1] * cosine + up[1] * sine,
+                    side[2] * cosine + up[2] * sine};
+                float offset[3] = {normal[0] * radius, normal[1] * radius, normal[2] * radius};
+                if (chain.tongue || carnageBlade) {
+                    const float profileWidth = chain.tongue ? halfWidth : carnageHalfWidth;
+                    const float profileThickness = chain.tongue ? halfThickness : carnageHalfThickness;
+                    offset[0] = side[0] * cosine * profileWidth + up[0] * sine * profileThickness;
+                    offset[1] = side[1] * cosine * profileWidth + up[1] * sine * profileThickness;
+                    offset[2] = side[2] * cosine * profileWidth + up[2] * sine * profileThickness;
+
+                    const float safeWidth = std::max(profileWidth, 0.0001f);
+                    const float safeThickness = std::max(profileThickness, 0.0001f);
+                    normal[0] = side[0] * cosine / safeWidth + up[0] * sine / safeThickness;
+                    normal[1] = side[1] * cosine / safeWidth + up[1] * sine / safeThickness;
+                    normal[2] = side[2] * cosine / safeWidth + up[2] * sine / safeThickness;
+                    Vec3Normalize(normal);
+                }
+                const float position[3] = {
+                    curve[pointIndex][0] + offset[0],
+                    curve[pointIndex][1] + offset[1],
+                    curve[pointIndex][2] + offset[2]};
+
+                const float crease = chain.tongue && sine > 0.7f ? 0.72f : 1.0f;
+
+                const float packed[kFloatsPerVertex] = {
+                    position[0], position[1], position[2],
+                    normal[0], normal[1], normal[2],
+                    static_cast<float>(sideIndex) / static_cast<float>(ringSides), along,
+                    0.0f, 0.0f, 0.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f,
+                    baseColor[0] * crease, baseColor[1] * crease,
+                    baseColor[2] * crease, 1.0f};
+                vertices.insert(vertices.end(), packed, packed + kFloatsPerVertex);
+                mesh.positions.insert(mesh.positions.end(), position, position + 3);
+                mesh.normals.insert(mesh.normals.end(), normal, normal + 3);
+                mesh.uvs.push_back(packed[6]);
+                mesh.uvs.push_back(packed[7]);
+                mesh.colors.insert(mesh.colors.end(), packed + 16, packed + 20);
+                for (int axis = 0; axis < 3; ++axis) {
+                    mesh.bboxMin[axis] = std::min(mesh.bboxMin[axis], position[axis]);
+                    mesh.bboxMax[axis] = std::max(mesh.bboxMax[axis], position[axis]);
+                }
+            }
+        }
+
+        for (size_t ring = 0; ring + 1 < curve.size(); ++ring) {
+            for (int sideIndex = 0; sideIndex < ringSides; ++sideIndex) {
+                const uint16_t a = static_cast<uint16_t>(baseVertex + ring * ringSides + sideIndex);
+                const uint16_t b = static_cast<uint16_t>(baseVertex + ring * ringSides +
+                    (sideIndex + 1) % ringSides);
+                const uint16_t c = static_cast<uint16_t>(a + ringSides);
+                const uint16_t d = static_cast<uint16_t>(b + ringSides);
+                indices.push_back(a); indices.push_back(c); indices.push_back(b);
+                indices.push_back(b); indices.push_back(c); indices.push_back(d);
+            }
+        }
+    }
+
+    mesh.indices = indices;
+    mesh.indexCount = static_cast<int>(indices.size());
+    mesh.mode = GL_TRIANGLES;
+    mesh.meshName = "Animated Tentacles";
+    mesh.skipPicking = true;
+    mesh.isHidden = false;
+    mesh.isTranslucent = false;
+    mesh.blendMode = NGLBM_OPAQUE;
+    mesh.textureId = 0;
+
+    if (vertices.empty() || indices.empty()) return;
+    if (!mesh.vao) glGenVertexArrays(1, &mesh.vao);
+    if (!mesh.vbo) glGenBuffers(1, &mesh.vbo);
+    if (!mesh.ebo) glGenBuffers(1, &mesh.ebo);
+    glBindVertexArray(mesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16_t), indices.data(), GL_DYNAMIC_DRAW);
+    const GLsizei stride = kFloatsPerVertex * sizeof(float);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void*)(8 * sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride, (void*)(12 * sizeof(float)));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, stride, (void*)(16 * sizeof(float)));
+    glEnableVertexAttribArray(5);
+    glBindVertexArray(0);
+}
+
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
     uint32_t dwFlags;
@@ -551,7 +784,7 @@ unsigned int SpiderManTool::LoadTextureFromData(const std::vector<uint8_t>& data
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
-    if (pfFlags & 0x4) { // DDPF_FOURCC — compressed DXT
+    if (pfFlags & 0x4) {
         GLenum format = 0;
         if (fourCC == 0x31545844) format = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
         else if (fourCC == 0x33545844) format = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
@@ -560,7 +793,7 @@ unsigned int SpiderManTool::LoadTextureFromData(const std::vector<uint8_t>& data
         uint32_t blockSize = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
         uint32_t imageSize = ((width + 3) / 4) * ((height + 3) / 4) * blockSize;
         glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, imageSize, pixelData);
-    } else if (pfFlags & 0x40) { // DDPF_RGB — uncompressed
+    } else if (pfFlags & 0x40) {
         uint32_t aMask = header->ddspf.dwABitMask;
         if (rgbBits == 32) {
             size_t numPx = (size_t)width * height;
@@ -578,7 +811,7 @@ unsigned int SpiderManTool::LoadTextureFromData(const std::vector<uint8_t>& data
             }
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
         } else { glDeleteTextures(1, &tex); return 0; }
-    } else if (pfFlags & 0x20000) { // DDPF_LUMINANCE
+    } else if (pfFlags & 0x20000) {
         size_t numPx = (size_t)width * height;
         std::vector<uint8_t> rgba(numPx * 4);
         if (rgbBits == 8) {
@@ -632,6 +865,51 @@ unsigned int SpiderManTool::LoadTextureByName(const std::string& textureName) {
 
     if (textureNameCache.count(nameLower)) {
         return textureNameCache[nameLower];
+    }
+
+    if (!textureAnimationCache.count(nameLower)) {
+        textureAnimationCache[nameLower] = {};
+        const FileEntry* iflEntry = nullptr;
+        for (const auto& entry : entries) {
+            if (entry.type != RES_KEY_IFL) continue;
+            std::string entryName = StrToLower(entry.name);
+            while (entryName.size() >= 4 && entryName.substr(entryName.size() - 4) == ".ifl") {
+                entryName.resize(entryName.size() - 4);
+            }
+            if (entryName == nameLower) {
+                iflEntry = &entry;
+                break;
+            }
+        }
+        if (iflEntry && static_cast<size_t>(iflEntry->offset) + iflEntry->size <= pcPackData.size()) {
+            const char* begin = reinterpret_cast<const char*>(pcPackData.data() + iflEntry->offset);
+            std::string iflText(begin, begin + iflEntry->size);
+            std::istringstream lines(iflText);
+            std::string line;
+            auto& frames = textureAnimationCache[nameLower];
+            while (std::getline(lines, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                std::istringstream fields(line);
+                std::string frameName;
+                int repetitions = 1;
+                if (!(fields >> frameName)) continue;
+                fields >> repetitions;
+                repetitions = std::max(1, std::min(repetitions, 1024));
+                const size_t dot = frameName.find('.');
+                if (dot != std::string::npos) frameName.resize(dot);
+                const unsigned int frameTexture = LoadTextureByName(frameName);
+                if (frameTexture == 0) continue;
+                for (int repeat = 0; repeat < repetitions && frames.size() < 1024; ++repeat) {
+                    frames.push_back(frameTexture);
+                }
+            }
+            if (!frames.empty()) {
+                textureNameCache[nameLower] = frames.front();
+                return frames.front();
+            }
+        }
+    } else if (!textureAnimationCache[nameLower].empty()) {
+        return textureAnimationCache[nameLower].front();
     }
 
     int foundIdx = -1;
@@ -716,32 +994,44 @@ unsigned int SpiderManTool::LoadTextureByName(const std::string& textureName) {
         }
     }
 
-    // Area-prefix fallback. Many materials reference area-specific texture
-    // names that don't actually exist as DDS files -- the engine resolves
-    // them at runtime to a generic counterpart (typically the `nat_` variant
-    // or the prefix-stripped name). Example: tree leaves in GG.PCPACK have
-    // material->field_60 = "gg_tree_leaves" but no pack ships a DDS with
-    // that hash; the actual texture is "nat_tree_leaves" in GJ.PCPACK +
-    // HK*.PCPACK. Without this fallback the leaves render textureless and
-    // the fragment shader paints them as solid vertex color (= green square,
-    // hence "no alpha" in the user's report). The fallback tries two names:
-    //   1. swap a 2-3 char area prefix for "nat_"  (gg_tree_leaves -> nat_tree_leaves)
-    //   2. strip the prefix entirely               (gg_tree_leaves -> tree_leaves)
-    // We bail out if the name already starts with "nat_" to avoid recursion,
-    // and we only call ourselves recursively (so any subsequent fallback hits
-    // the caches just set up).
+    uint32_t hashTga = CalculateCRC32(nameLower + ".tga");
+    if (globalTextureIndex.count(hashTga)) {
+        auto& loc = globalTextureIndex[hashTga];
+        std::ifstream texFile(loc.packPath, std::ios::binary);
+        if (texFile.is_open()) {
+            texFile.seekg(loc.offset);
+            std::vector<uint8_t> ddsData(loc.size);
+            texFile.read((char*)ddsData.data(), loc.size);
+            texFile.close();
+            unsigned int tex = LoadTextureFromData(ddsData);
+            if (tex != 0) {
+                textureNameCache[nameLower] = tex;
+                return tex;
+            }
+        }
+    }
+
     auto tryFallback = [&](const std::string& candidate) -> unsigned int {
         if (candidate.empty() || candidate == nameLower) return 0;
         unsigned int tex = LoadTextureByName(candidate);
         if (tex != 0) {
-            // Cache the result against the ORIGINAL name so future lookups
-            // skip the fallback work entirely.
+
             textureNameCache[nameLower] = tex;
         }
         return tex;
     };
+
+    if (nameLower == "us_char_spheremap_ink") {
+        unsigned int tex = tryFallback("us_char_spheremap_inkb");
+        if (tex != 0) return tex;
+    } else if (nameLower == "us_char_spheremap_noink") {
+        unsigned int tex = tryFallback("us_char_spheremap_noink_3");
+        if (tex != 0) return tex;
+        tex = tryFallback("us_char_spheremap_noink_2b");
+        if (tex != 0) return tex;
+    }
     if (nameLower.compare(0, 4, "nat_") != 0) {
-        // Pattern: "{prefix}_{rest}" where prefix is 2 or 3 chars (area code).
+
         size_t under = nameLower.find('_');
         if (under == 2 || under == 3) {
             std::string rest = nameLower.substr(under + 1);
@@ -798,10 +1088,6 @@ void SpiderManTool::InitModelPreview() {
 
     if (modelProgram != 0 && skeletonProgram != 0) return;
 
-    // Vertex shader -- skinning is the only thing the game's vertex shader does
-    // that we still emulate (per us_person/0_VS.txt and friends). The interesting
-    // detail is that we now pass the per-vertex baked color straight through to
-    // the fragment shader, matching the `mov oD0, v2` line of us_pcuv_VS.txt.
     const char* vShaderCode = "#version 130\n"
         "in vec3 pos;\n"
         "in vec3 normal;\n"
@@ -816,7 +1102,9 @@ void SpiderManTool::InitModelPreview() {
         "in float instanceIndex;\n"
         "out vec2 TexCoord;\n"
         "out vec4 VertColor;\n"
-        "out vec3 WorldPos;\n"   // for water fresnel
+        "out vec3 WorldPos;\n"
+        "out vec3 WorldNormal;\n"
+        "out vec3 ViewNormal;\n"
         "out float InstanceIndex;\n"
         "uniform mat4 model;\n"
         "uniform mat4 view;\n"
@@ -824,16 +1112,12 @@ void SpiderManTool::InitModelPreview() {
         "uniform bool useSkinning;\n"
         "uniform bool useInstancing;\n"
         "uniform mat4 boneMatrices[64];\n"
-        // Water: rolling-wave displacement and a small UV scroll. The engine
-        // ports a high-poly `oceanmesh` (USOcean2Shader, Archive/OpenUSM ngl.cpp:
-        // OceanMesh) plus per-TOD water textures (water_day.dat / water_night.dat
-        // etc.). We don't replicate the original DX9 shader pipeline; instead we
-        // animate the existing mesh: two cross-summed sin waves displace Y, and
-        // the texCoords get a slow scroll so any caustic-like texture looks alive.
+
         "uniform bool isWater;\n"
         "uniform float time;\n"
         "void main() {\n"
         "    vec4 skinnedPos;\n"
+        "    vec3 skinnedNormal = normal;\n"
         "    if (useSkinning && (boneWeights.x + boneWeights.y + boneWeights.z + boneWeights.w) > 0.01) {\n"
         "        mat4 skinMat = mat4(0.0);\n"
         "        float usedWeight = 0.0;\n"
@@ -848,6 +1132,7 @@ void SpiderManTool::InitModelPreview() {
         "        if (usedWeight > 0.001) {\n"
         "            if (usedWeight < 0.999) skinMat += (1.0 - usedWeight) * mat4(1.0);\n"
         "            skinnedPos = skinMat * vec4(pos, 1.0);\n"
+        "            skinnedNormal = mat3(skinMat) * normal;\n"
         "        } else {\n"
         "            skinnedPos = vec4(pos, 1.0);\n"
         "        }\n"
@@ -855,9 +1140,7 @@ void SpiderManTool::InitModelPreview() {
         "        skinnedPos = vec4(pos, 1.0);\n"
         "    }\n"
         "    if (isWater) {\n"
-        // Two sin waves at orthogonal scales (a low slow swell + faster ripple)
-        // summed for a less repetitive surface. Amplitudes are conservative
-        // because the game uses game-unit scale (~1.0 ~= 1 metre).
+
         "        float wave1 = sin(skinnedPos.x * 0.0040 + time * 0.7);\n"
         "        float wave2 = sin(skinnedPos.z * 0.0055 + time * 0.9);\n"
         "        float wave3 = sin((skinnedPos.x + skinnedPos.z) * 0.012 + time * 1.6);\n"
@@ -867,9 +1150,13 @@ void SpiderManTool::InitModelPreview() {
         "    vec4 placedPos = useInstancing ? (instanceTransform * skinnedPos) : skinnedPos;\n"
         "    vec4 worldPos = model * placedPos;\n"
         "    WorldPos = worldPos.xyz;\n"
+        "    vec3 placedNormal = useInstancing ? (mat3(instanceTransform) * skinnedNormal) : skinnedNormal;\n"
+        "    WorldNormal = normalize(mat3(model) * placedNormal);\n"
+
+        "    ViewNormal = normalize(mat3(view) * WorldNormal);\n"
         "    InstanceIndex = useInstancing ? instanceIndex : -1.0;\n"
         "    if (isWater) {\n"
-        // Slow UV scroll so any baked caustic / specular texture moves.
+
         "        TexCoord = texCoord + vec2(time * 0.012, time * 0.009);\n"
         "    } else {\n"
         "        TexCoord = texCoord;\n"
@@ -878,47 +1165,40 @@ void SpiderManTool::InitModelPreview() {
         "    gl_Position = projection * view * worldPos;\n"
         "}\n";
 
-    // Fragment shader -- mirror of OpenUSM's us_pcuv pixel shader:
-    //     tex t0
-    //     mul r0, t0, v0    // texture * interpolated vertex color
-    // The game has NO per-pixel lighting; the cel-shaded look comes from baked
-    // per-vertex colors stored in the PCM. We add the alpha-mode handling we
-    // already had (PUNCHTHROUGH discard, BLEND zero-alpha discard) and a couple
-    // of editor-only branches (isFakeShadow / isColorVolume / isHighlighted)
-    // that have no analogue in the original engine.
-    //
-    // blendMode values match OpenUSM nglBlendModeType (ngl.h:36-51):
-    //   0 = OPAQUE, 1 = PUNCHTHROUGH (alpha test discard), 2+ = BLEND/ADDITIVE/etc.
     const char* fShaderCode = "#version 130\n"
         "in vec2 TexCoord;\n"
         "in vec4 VertColor;\n"
         "in vec3 WorldPos;\n"
+        "in vec3 WorldNormal;\n"
+        "in vec3 ViewNormal;\n"
         "in float InstanceIndex;\n"
         "out vec4 FragColor;\n"
         "uniform sampler2D diffTexture;\n"
+        "uniform sampler2D detailTexture;\n"
         "uniform bool hasTexture;\n"
+        "uniform bool hasDetailTexture;\n"
+        "uniform bool isPersonMaterial;\n"
+        "uniform bool personLighting;\n"
+        "uniform bool personUseInk;\n"
+        "uniform bool proceduralLit;\n"
+        "uniform vec4 personBaseColor;\n"
+        "uniform vec3 previewLightDir;\n"
         "uniform int  blendMode;\n"
         "uniform float alphaRef;\n"
         "uniform bool isFakeShadow;\n"
         "uniform bool isColorVolume;\n"
         "uniform bool isHighlighted;\n"
         "uniform float selectedInstanceIndex;\n"
-        // Debug-transparent meshes (collision proxies, color/shadow volumes,
-        // GENERIC_WHITE placeholders, triggers) render as a faint white ghost
-        // so the user can see them without them dominating the view.
+
         "uniform bool debugTransparent;\n"
-        // Water: tint, fresnel-style alpha, and a fake spec highlight. The
-        // engine has a dedicated USOcean2Shader pass we can't reproduce in
-        // detail; this is a stylised approximation that reads as water in our
-        // viewer (semi-transparent blue, brighter at grazing angles, animated
-        // by the vertex shader's wave displacement + UV scroll).
+
         "uniform bool isWater;\n"
         "uniform float time;\n"
         "uniform vec3 viewPosWorld;\n"
         "void main() {\n"
         "    vec4 result;\n"
         "    if (isWater) {\n"
-        // Two sample taps with offset UVs to imitate moving surface detail.
+
         "        vec3 deepColor    = vec3(0.05, 0.20, 0.32);\n"
         "        vec3 shallowColor = vec3(0.30, 0.55, 0.62);\n"
         "        vec4 base = vec4(deepColor, 0.85);\n"
@@ -928,13 +1208,12 @@ void SpiderManTool::InitModelPreview() {
         "            float caustic = (tex1.r + tex2.r) * 0.5;\n"
         "            base.rgb = mix(deepColor, shallowColor, caustic);\n"
         "        }\n"
-        // Fresnel: water gets bluer at low grazing angles and brighter looking
-        // straight down. WorldPos and viewPosWorld are in world space.
+
         "        vec3 viewDir = normalize(viewPosWorld - WorldPos);\n"
         "        float fres = pow(1.0 - clamp(viewDir.y, 0.0, 1.0), 3.0);\n"
         "        base.rgb = mix(base.rgb, shallowColor, fres * 0.4);\n"
         "        base.a   = mix(0.78, 0.94, fres);\n"
-        // Tiny fake highlight near top of view (cheap sun-on-water glint).
+
         "        float glint = pow(max(0.0, viewDir.y), 8.0) * 0.25;\n"
         "        base.rgb += vec3(glint);\n"
         "        result = base;\n"
@@ -942,20 +1221,41 @@ void SpiderManTool::InitModelPreview() {
         "        result = vec4(0.85, 0.85, 0.9, 0.18);\n"
         "    } else if (isFakeShadow || isColorVolume) {\n"
         "        result = vec4(0.0, 0.0, 0.0, 0.3);\n"
+        "    } else if (isPersonMaterial) {\n"
+
+        "        vec4 texColor = hasTexture ? texture(diffTexture, TexCoord) : vec4(1.0);\n"
+        "        if (blendMode == 1 && texColor.a < alphaRef) discard;\n"
+        "        if (blendMode >= 2 && texColor.a < 0.004) discard;\n"
+        "        vec3 n = normalize(WorldNormal);\n"
+        "        float diffuse = max(dot(n, normalize(previewLightDir)), 0.0);\n"
+
+        "        vec3 lightColor = personBaseColor.rgb;\n"
+        "        if (personLighting) {\n"
+        "            lightColor += (vec3(1.0) - personBaseColor.rgb) * diffuse;\n"
+        "        }\n"
+        "        result = vec4(texColor.rgb * lightColor,\n"
+        "                      texColor.a * personBaseColor.a);\n"
+        "        if (personUseInk && hasDetailTexture) {\n"
+        "            vec3 viewN = normalize(ViewNormal);\n"
+        "            vec2 sphereUv = vec2(viewN.x * 0.5 + 0.5, 0.5 - viewN.y * 0.5);\n"
+        "            vec4 ink = texture(detailTexture, sphereUv);\n"
+        "            result.rgb = result.rgb * ink.a + ink.rgb;\n"
+        "        }\n"
+        "    } else if (proceduralLit) {\n"
+        "        vec3 n = normalize(WorldNormal);\n"
+        "        float diffuse = max(dot(n, normalize(previewLightDir)), 0.0);\n"
+        "        result = vec4(VertColor.rgb * (0.18 + 0.82 * diffuse), VertColor.a);\n"
         "    } else if (hasTexture) {\n"
         "        vec4 texColor = texture(diffTexture, TexCoord);\n"
-        "        if (blendMode == 1) {\n"               // PUNCHTHROUGH
+        "        if (blendMode == 1) {\n"
         "            if (texColor.a < alphaRef) discard;\n"
-        "        } else if (blendMode >= 2) {\n"        // BLEND / ADDITIVE / etc.
-        // OpenUSM's setBlending sets alpha-test AlphaFunc=GREATER ref=0 for BLEND
-        // (ngl_dx_state.cpp:226-235). Discard fully-transparent texels so foliage
-        // cutouts don't leak as opaque rectangles.
+        "        } else if (blendMode >= 2) {\n"
+
         "            if (texColor.a < 0.004) discard;\n"
         "        }\n"
-        "        result = texColor * VertColor;\n"      // mul r0, t0, v0
+        "        result = texColor * VertColor;\n"
         "    } else {\n"
-        // No texture bound -- fall back to plain vertex color so the mesh still
-        // shows its baked shading instead of solid gray.
+
         "        result = VertColor;\n"
         "    }\n"
         "    if (isHighlighted || (selectedInstanceIndex >= 0.0 && abs(InstanceIndex - selectedInstanceIndex) < 0.25)) {\n"
@@ -967,14 +1267,10 @@ void SpiderManTool::InitModelPreview() {
     unsigned int vertex = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex, 1, &vShaderCode, NULL);
     glCompileShader(vertex);
-    { int ok; glGetShaderiv(vertex, GL_COMPILE_STATUS, &ok);
-      if (!ok) { char log[512]; glGetShaderInfoLog(vertex, 512, NULL, log); printf("VS ERROR: %s\n", log); } }
 
     unsigned int fragment = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fragment, 1, &fShaderCode, NULL);
     glCompileShader(fragment);
-    { int ok; glGetShaderiv(fragment, GL_COMPILE_STATUS, &ok);
-      if (!ok) { char log[512]; glGetShaderInfoLog(fragment, 512, NULL, log); printf("FS ERROR: %s\n", log); } }
 
     modelProgram = glCreateProgram();
     glAttachShader(modelProgram, vertex);
@@ -991,13 +1287,10 @@ void SpiderManTool::InitModelPreview() {
     glBindAttribLocation(modelProgram, 9, "instanceTransform3");
     glBindAttribLocation(modelProgram, 10, "instanceIndex");
     glLinkProgram(modelProgram);
-    { int ok; glGetProgramiv(modelProgram, GL_LINK_STATUS, &ok);
-      if (!ok) { char log[512]; glGetProgramInfoLog(modelProgram, 512, NULL, log); printf("LINK ERROR: %s\n", log); } }
 
     glDeleteShader(vertex);
     glDeleteShader(fragment);
 
-    // Skeleton shader: simple solid color, no lighting
     const char* skelVS = "#version 130\n"
         "in vec3 pos;\n"
         "in vec3 color;\n"
@@ -1139,57 +1432,111 @@ void SpiderManTool::UpdateModelOrbitCamera(bool isHovered) {
         camPitch = std::max(-85.0f, std::min(85.0f, camPitch));
     }
 
-    float offset[3] = {
-        camPos[0] - modelCenter[0],
-        camPos[1] - modelCenter[1],
-        camPos[2] - modelCenter[2]
-    };
-    float distance = sqrtf(offset[0] * offset[0] +
-                           offset[1] * offset[1] +
-                           offset[2] * offset[2]);
-    if (!std::isfinite(distance) || distance < 0.001f) {
-        distance = std::max(1.0f, modelRadius * 3.2f);
+    // Persistent orbit radius. Deriving it from camPos each frame would feed back into the
+    // moving focal point below and drift, so keep it as state (seeded from the camera once).
+    if (!std::isfinite(orbitDistance) || orbitDistance <= 0.0f) {
+        const float dx = camPos[0] - modelCenter[0];
+        const float dy = camPos[1] - modelCenter[1];
+        const float dz = camPos[2] - modelCenter[2];
+        orbitDistance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(orbitDistance) || orbitDistance < 0.001f)
+            orbitDistance = std::max(1.0f, modelRadius * 3.2f);
     }
 
     const float wheel = ImGui::GetIO().MouseWheel;
-    if (wheel != 0.0f) {
-        distance *= powf(0.85f, wheel);
-        const float minDistance = std::max(0.05f, modelRadius * 0.20f);
-        const float maxDistance = std::max(100.0f, modelRadius * 40.0f);
-        distance = std::max(minDistance, std::min(maxDistance, distance));
-    }
+    if (wheel != 0.0f) orbitDistance *= powf(0.85f, wheel);
+    const float minDistance = std::max(0.05f, modelRadius * 0.20f);
+    const float maxDistance = std::max(100.0f, modelRadius * 40.0f);
+    orbitDistance = std::max(minDistance, std::min(maxDistance, orbitDistance));
+
+    // Focal point pans from the body centre (zoomed out) up to the head (zoomed in), and
+    // eases back down as you zoom out. t: 0 when far, 1 when close.
+    const float farD  = std::max(1.0f, modelRadius * 3.0f);
+    const float nearD = std::max(0.05f, modelRadius * 0.8f);
+    float t = (farD - orbitDistance) / std::max(0.001f, farD - nearD);
+    t = std::max(0.0f, std::min(1.0f, t));
+    const float target[3] = {
+        modelCenter[0] + (modelHeadTarget[0] - modelCenter[0]) * t,
+        modelCenter[1] + (modelHeadTarget[1] - modelCenter[1]) * t,
+        modelCenter[2] + (modelHeadTarget[2] - modelCenter[2]) * t
+    };
 
     const float yaw = camYaw * kPi / 180.0f;
     const float pitch = camPitch * kPi / 180.0f;
-    const float horizontal = cosf(pitch) * distance;
-    camPos[0] = modelCenter[0] + cosf(yaw) * horizontal;
-    camPos[1] = modelCenter[1] + sinf(pitch) * distance;
-    camPos[2] = modelCenter[2] + sinf(yaw) * horizontal;
+    const float horizontal = cosf(pitch) * orbitDistance;
+    camPos[0] = target[0] + cosf(yaw) * horizontal;
+    camPos[1] = target[1] + sinf(pitch) * orbitDistance;
+    camPos[2] = target[2] + sinf(yaw) * horizontal;
 
-    camFront[0] = modelCenter[0] - camPos[0];
-    camFront[1] = modelCenter[1] - camPos[1];
-    camFront[2] = modelCenter[2] - camPos[2];
+    camFront[0] = target[0] - camPos[0];
+    camFront[1] = target[1] - camPos[1];
+    camFront[2] = target[2] - camPos[2];
     Normalize(camFront);
     camUp[0] = 0.0f;
     camUp[1] = 1.0f;
     camUp[2] = 0.0f;
 }
 
+void SpiderManTool::ApplyMorphTargets() {
+    if (isWorldMode || !loadedMorphFile.valid || morphTargetWeights.empty()) return;
+
+    for (auto& mesh : previewMeshes) {
+        if (!mesh.vbo || mesh.morphVertexData.empty() ||
+            mesh.positions.size() % 3 != 0) continue;
+        const size_t vertexCount = mesh.positions.size() / 3;
+        if (mesh.morphVertexData.size() != vertexCount * 20) continue;
+
+        for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+            float* destination = mesh.morphVertexData.data() + vertex * 20;
+            destination[0] = mesh.positions[vertex * 3 + 0];
+            destination[1] = mesh.positions[vertex * 3 + 1];
+            destination[2] = mesh.positions[vertex * 3 + 2];
+        }
+        const size_t targetCount = std::min({
+            morphTargetWeights.size(),
+            mesh.morphPositionDeltas.size(),
+            loadedMorphFile.sets.size()});
+        for (size_t target = 1; target < targetCount; ++target) {
+            const float weight = morphTargetWeights[target];
+            if (weight == 0.0f) continue;
+            const auto& deltas = mesh.morphPositionDeltas[target];
+            const auto& changed = mesh.morphPositionChanged[target];
+            if (deltas.size() != vertexCount || changed.size() != vertexCount) continue;
+            for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+                if (!changed[vertex]) continue;
+                float* destination = mesh.morphVertexData.data() + vertex * 20;
+                destination[0] += weight * deltas[vertex][0];
+                destination[1] += weight * deltas[vertex][1];
+                destination[2] += weight * deltas[vertex][2];
+            }
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0,
+                        static_cast<GLsizeiptr>(mesh.morphVertexData.size() * sizeof(float)),
+                        mesh.morphVertexData.data());
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 void SpiderManTool::RenderModelPreview() {
-    glBindFramebuffer(GL_FRAMEBUFFER, msFbo);
     int width = 3840;
     int height = 2160;
-    glViewport(0, 0, width, height);
-    glClearColor(0.15f, 0.15f, 0.2f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (!skipDrawAfterPoseEvaluation) {
+        glBindFramebuffer(GL_FRAMEBUFFER, msFbo);
+        glViewport(0, 0, width, height);
+        glClearColor(0.15f, 0.15f, 0.2f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
 
     if (previewMeshes.empty()) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return;
     }
 
+    ApplyMorphTargets();
+
     glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);  // Disable backface culling globally - all meshes are double-sided
+    glDisable(GL_CULL_FACE);
 
     glUseProgram(modelProgram);
 
@@ -1229,25 +1576,47 @@ void SpiderManTool::RenderModelPreview() {
         activeBoneMapping.meshToLogical.size() == (size_t)meshBoneCount &&
         !activeBoneMapping.logicalToMesh.empty() &&
         activeBoneMapping.logicalToMesh.size() <= (size_t)MAX_GLOBAL_BONES;
-    const int logicalBoneCount = entityBoneMapActive
-        ? (int)activeBoneMapping.logicalToMesh.size()
-        : meshBoneCount;
+    int skeletonLogicalCount = meshBoneCount;
+    if (loadedSkeleton) {
+        auto includeLogical = [&](int index) {
+            if (index >= 0 && index < MAX_GLOBAL_BONES)
+                skeletonLogicalCount = std::max(skeletonLogicalCount, index + 1);
+        };
+        for (const auto& entry : loadedSkeleton->bone_map) includeLogical(entry.first);
+        for (const auto& entry : loadedSkeleton->parent_map) {
+            includeLogical(entry.first);
+            includeLogical(entry.second);
+        }
+        for (const auto& component : loadedSkeleton->components) {
+            for (int index : component.bone_indices) includeLogical(index);
+            for (const auto& node : component.arb_nodes) {
+                includeLogical(node.my_matrix_ix);
+                includeLogical(node.parent_matrix_ix);
+            }
+        }
+    }
+    const int logicalBoneCount = std::min(MAX_GLOBAL_BONES, std::max(
+        skeletonLogicalCount,
+        entityBoneMapActive ? static_cast<int>(activeBoneMapping.logicalToMesh.size()) : 0));
     auto nalToMeshBone = [&](int logicalIdx) -> int {
         if (logicalIdx < 0 || logicalIdx >= logicalBoneCount) return -1;
-        return entityBoneMapActive ? activeBoneMapping.logicalToMesh[logicalIdx] : logicalIdx;
+        if (entityBoneMapActive) {
+            if (logicalIdx >= static_cast<int>(activeBoneMapping.logicalToMesh.size())) return -1;
+            const int mesh = activeBoneMapping.logicalToMesh[logicalIdx];
+            return mesh >= 0 && mesh < meshBoneCount ? mesh : -1;
+        }
+        return logicalIdx < meshBoneCount ? logicalIdx : -1;
     };
 
-    // Global skin matrices are keyed by actual PCM/NAL bone index. They are
-    // remapped to each mesh section's local palette before draw, like OpenUSM.
+    std::vector<TentaclePreviewChain> evaluatedTentacles;
+
     bool skinningActive = false;
     std::vector<float> globalBoneMatData(MAX_GLOBAL_BONES * 16, 0.f);
-    // Identity = rest pose (vertices are already in bind pose, so identity = no deformation)
+
     for (int i = 0; i < MAX_GLOBAL_BONES; i++) {
         Mat4Identity(&globalBoneMatData[i * 16]);
     }
 
-    // For skeleton overlay: track world-space bone positions (animated or bind pose)
-    // These are the BIND positions by default, updated if animation is active
     std::vector<float> bonePosWorld(MAX_GLOBAL_BONES * 3, 0.f);
     for (int i = 0; i < meshBoneCount; i++) {
         bonePosWorld[i*3+0] = skeletonBones[i].position[0];
@@ -1255,7 +1624,6 @@ void SpiderManTool::RenderModelPreview() {
         bonePosWorld[i*3+2] = skeletonBones[i].position[2];
     }
 
-    // Compute and upload bone matrices if animation is selected
     if (!isWorldMode && loadedAnimFile && loadedSkeleton && selectedAnimIndex >= 0 &&
         selectedAnimIndex < (int)loadedAnimFile->animations.size() &&
         (!loadedAnimFile->animations[selectedAnimIndex].skeleton ||
@@ -1273,13 +1641,6 @@ void SpiderManTool::RenderModelPreview() {
             if (frame1 >= playbackFrameCount) frame1 = anim.is_looping() ? 0 : frame0;
             const float fraction = frame0 != frame1 ? animFrameFraction : 0.0f;
 
-            // The generic evaluator returns absolute PCM/game-space worlds.
-            // Its root PO already carries the NAL-to-PCM adapter.  Skinning
-            // must therefore use the mesh's exact inverse bind directly:
-            // skin = animatedWorld * inverse(meshBindWorld).  Reconstructing
-            // a delta through the generic default pose is only approximately
-            // equivalent because a few assets (notably Rhino's neck/head)
-            // have intentionally different generic and PCM rest matrices.
             const auto& worlds0 = anim.generic_decoded.world_frames[frame0];
             const auto& worlds1 = anim.generic_decoded.world_frames[frame1];
             const size_t matrixCount = std::min({
@@ -1318,10 +1679,7 @@ void SpiderManTool::RenderModelPreview() {
             }
             skinningActive = true;
         } else if (!anim.is_gen_anim()) {
-        // Component data (slot table, bone indices, default poses) must come
-        // from the skeleton the anim was DECODED against, not whichever
-        // skeleton is active for the mesh -- they differ in multi-skeleton
-        // packs and the slot indices are skeleton-relative.
+
         const NalSkeletonData* animSkel = anim.skeleton ? anim.skeleton.get() : loadedSkeleton.get();
         int playbackFrameCount = anim.playback_frame_count();
         int frame0 = std::max(0, std::min(currentAnimFrame, std::max(0, playbackFrameCount - 1)));
@@ -1339,6 +1697,8 @@ void SpiderManTool::RenderModelPreview() {
         float rootRotMat[16]; Mat4Identity(rootRotMat);
         bool hasRootRot = false;
         std::map<int, std::array<float, 16>> runtimeWorld;
+        std::array<float, 15> tentaclePose{};
+        bool hasTentaclePose = false;
 
         auto parentOf = [&](int idx) -> int {
             auto it = animSkel->parent_map.find(idx);
@@ -1595,11 +1955,7 @@ void SpiderManTool::RenderModelPreview() {
                         for (int i = 0; i < 4; ++i) {
                             int bone = sc->bone_indices[twistBones[i]];
                             int parent = sc->bone_indices[twistParents[i]];
-                            // sub_5F7160 only derives/distributes hand twist while
-                            // byte_959561 is set by two special engine call sites.
-                            // Normal character evaluation takes the zero-angle
-                            // branch; applying twist unconditionally corkscrews
-                            // Sable's forearm-weighted sleeve vertices.
+
                             Mat4BuildTwistLineXform(sc->fore_twist_locs[i], 0.0f, local);
                             localToRuntimeParent(local, parent, world);
                             storeRuntimeWorld(bone, world);
@@ -1738,8 +2094,7 @@ void SpiderManTool::RenderModelPreview() {
                         int twistParents[4] = {ArmIKBone::L_FORE, ArmIKBone::L_TWIST0,
                                                ArmIKBone::R_FORE, ArmIKBone::R_TWIST0};
                         for (int i = 0; i < 4; ++i) {
-                            // Exact normal path in sub_5F7760: byte_959561 is
-                            // zero, so both serial twist nodes receive angle 0.
+
                             Mat4BuildTwistLineXform(sc->fore_twist_locs[i], 0.0f, local);
                             localToRuntimeParent(local, sc->bone_indices[twistParents[i]], world);
                             storeRuntimeWorld(sc->bone_indices[twistBones[i]], world);
@@ -1763,15 +2118,21 @@ void SpiderManTool::RenderModelPreview() {
                     }
                 }
             }
+            else if (comp.comp_ix == NalComp::TENTACLE) {
+                for (size_t valueIndex = 0;
+                     valueIndex < tentaclePose.size() &&
+                     valueIndex < sc->default_pose.tentacle_values.size(); ++valueIndex) {
+                    tentaclePose[valueIndex] = sc->default_pose.tentacle_values[valueIndex];
+                }
+                for (int channel = 0; channel < 15; ++channel) {
+                    if ((comp.mask & (1u << channel)) == 0) continue;
+                    if (cursor >= static_cast<int>(fv0.size())) break;
+                    tentaclePose[channel] = SampleTrack(fv0, fv1, cursor++, sampleFrac);
+                }
+                hasTentaclePose = true;
+            }
             else if (comp.comp_ix == NalComp::ARBITRARY_PO) {
-                // ArbitraryPO drives weapon/holster/prop attachment bones.
-                // Without this branch the bones stay at their bind pose while
-                // the rest of the character moves around them, producing the
-                // stretched-spike artifacts visible on Sable's swords.
-                //
-                // USM.exe sub_5F3C00/sub_5F3D40/sub_5F6000 use the pose header's
-                // quaternion count, not a fixed 12/4 split. Mask bits address the
-                // logical channels: quaternions first, then positions.
+
                 int quatCount = std::max(0, sc->default_pose.quat_count);
                 int posCount = std::max(0, sc->default_pose.position_count);
                 int channelCount = quatCount + posCount;
@@ -1793,8 +2154,6 @@ void SpiderManTool::RenderModelPreview() {
                     }
                 }
 
-                // sub_5F5E60 indexes the 48-byte node table through the serialized
-                // uint32 order array; that order guarantees parent matrices exist.
                 for (size_t oi = 0; oi < sc->arb_eval_order.size(); ++oi) {
                     uint32_t nodeIndex = sc->arb_eval_order[oi];
                     if (nodeIndex >= sc->arb_nodes.size()) continue;
@@ -2077,6 +2436,59 @@ void SpiderManTool::RenderModelPreview() {
             }
         }
 
+        if (hasTentaclePose) {
+            const NalComponentData* arbitrary = nullptr;
+            for (const auto& component : animSkel->components) {
+                if (component.type_id == NalCompType::ArbitraryPO) {
+                    arbitrary = &component;
+                    break;
+                }
+            }
+            if (arbitrary) {
+                static const char* kPrefixes[5] = {
+                    "uplefttent_", "uprighttent_", "lowlefttent_",
+                    "lowrighttent_", "tongue_"};
+                static const char* kNames[5] = {
+                    "UpLeftTent", "UpRightTent", "LowLeftTent",
+                    "LowRightTent", "Tongue"};
+                std::array<std::map<int, std::array<float, 3>>, 5> controlPoints;
+                for (const auto& node : arbitrary->arb_nodes) {
+                    std::string lowerName = node.name;
+                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+                    for (int chainIndex = 0; chainIndex < 5; ++chainIndex) {
+                        const std::string prefix = kPrefixes[chainIndex];
+                        if (lowerName.rfind(prefix, 0) != 0) continue;
+                        const int pointNumber = std::atoi(lowerName.c_str() + prefix.size());
+                        const int logical = node.my_matrix_ix;
+                        if (pointNumber <= 0 || logical < 0 || logical >= logicalBoneCount)
+                            break;
+                        controlPoints[chainIndex][pointNumber] = {
+                            animWorld[logical * 16 + 12],
+                            animWorld[logical * 16 + 13],
+                            animWorld[logical * 16 + 14]};
+                        nalBonePositions[logical] = controlPoints[chainIndex][pointNumber];
+                        nalMaxBoneIndex = std::max(nalMaxBoneIndex, logical);
+                        break;
+                    }
+                }
+
+                for (int chainIndex = 0; chainIndex < 5; ++chainIndex) {
+                    if (controlPoints[chainIndex].size() < 2) continue;
+                    TentaclePreviewChain chain;
+                    chain.name = kNames[chainIndex];
+                    chain.diameter = std::max(0.0f, tentaclePose[chainIndex * 3]);
+                    chain.activity = tentaclePose[chainIndex * 3 + 1];
+                    chain.pull = tentaclePose[chainIndex * 3 + 2];
+                    chain.tongue = chainIndex == 4;
+                    for (const auto& point : controlPoints[chainIndex])
+                        chain.controlPoints.push_back(point.second);
+                    if (chain.diameter > 0.0001f)
+                        evaluatedTentacles.push_back(std::move(chain));
+                }
+            }
+        }
+
         for (int logical = 0; logical < logicalBoneCount; logical++) {
             int mesh = nalToMeshBone(logical);
             if (mesh < 0) continue;
@@ -2103,7 +2515,7 @@ void SpiderManTool::RenderModelPreview() {
 
     std::map<int, std::array<float, 16>> manualPivotTransforms;
     for (const auto& entry : manualBoneRotations) {
-        int boneIdx = entry.first; // NAL logical index
+        int boneIdx = entry.first;
         int meshIdx = nalToMeshBone(boneIdx);
         const auto& angles = entry.second;
         if (meshIdx < 0 || !HasAnyRotation(angles)) continue;
@@ -2225,10 +2637,44 @@ void SpiderManTool::RenderModelPreview() {
         glBufferData(GL_ARRAY_BUFFER, allVerts.size() * sizeof(BoneVert), allVerts.data(), GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
+    std::string skeletonLabel = loadedSkeletonName;
+    std::transform(skeletonLabel.begin(), skeletonLabel.end(), skeletonLabel.begin(),
+        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    bool carnageTentacleStyle = skeletonLabel.find("carnage") != std::string::npos;
+    if (!carnageTentacleStyle) {
+        for (const auto& previewMesh : previewMeshes) {
+            std::string meshLabel = previewMesh.meshName + " " + previewMesh.sourcePack;
+            std::transform(meshLabel.begin(), meshLabel.end(), meshLabel.begin(),
+                [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+            if (meshLabel.find("carnage") != std::string::npos) {
+                carnageTentacleStyle = true;
+                break;
+            }
+        }
+    }
+    UpdateTentaclePreviewMesh(
+        proceduralTentacleMesh, evaluatedTentacles, carnageTentacleStyle);
+
+    if (captureEvaluatedSkinMatrices) {
+        evaluatedSkinningActive = skinningActive;
+        evaluatedGlobalBoneMatrices = globalBoneMatData;
+    }
+    if (skipDrawAfterPoseEvaluation) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return;
+    }
     glUniform1i(locUseSkinning, skinningActive ? 1 : 0);
 
     GLint locDiffTexture = glGetUniformLocation(modelProgram, "diffTexture");
+    GLint locDetailTexture = glGetUniformLocation(modelProgram, "detailTexture");
     GLint locHasTexture = glGetUniformLocation(modelProgram, "hasTexture");
+    GLint locHasDetailTexture = glGetUniformLocation(modelProgram, "hasDetailTexture");
+    GLint locIsPersonMaterial = glGetUniformLocation(modelProgram, "isPersonMaterial");
+    GLint locPersonLighting = glGetUniformLocation(modelProgram, "personLighting");
+    GLint locPersonUseInk = glGetUniformLocation(modelProgram, "personUseInk");
+    GLint locProceduralLit = glGetUniformLocation(modelProgram, "proceduralLit");
+    GLint locPersonBaseColor = glGetUniformLocation(modelProgram, "personBaseColor");
+    GLint locPreviewLightDir = glGetUniformLocation(modelProgram, "previewLightDir");
     GLint locBlendMode = glGetUniformLocation(modelProgram, "blendMode");
     GLint locAlphaRef = glGetUniformLocation(modelProgram, "alphaRef");
     GLint locIsFakeShadow = glGetUniformLocation(modelProgram, "isFakeShadow");
@@ -2240,12 +2686,12 @@ void SpiderManTool::RenderModelPreview() {
     GLint locIsWater = glGetUniformLocation(modelProgram, "isWater");
     GLint locTime = glGetUniformLocation(modelProgram, "time");
     GLint locViewPosWorld = glGetUniformLocation(modelProgram, "viewPosWorld");
-    // Wall-clock time in seconds since process start; drives water animation
-    // (vertex wave displacement + UV scroll). Set once per frame here so all
-    // water meshes share the same phase.
+
     float nowSeconds = (float)glfwGetTime();
     glUniform1f(locTime, nowSeconds);
     glUniform3f(locViewPosWorld, camPos[0], camPos[1], camPos[2]);
+
+    glUniform3f(locPreviewLightDir, 0.0f, 0.57735026f, 0.81649655f);
 
     auto uploadSectionBoneMatrices = [&](const RenderMesh& mesh) {
         if (!skinningActive) return;
@@ -2298,29 +2744,19 @@ void SpiderManTool::RenderModelPreview() {
         return true;
     };
 
-    glDisable(GL_CULL_FACE);  // No backface culling - render both sides of all geometry
+    glDisable(GL_CULL_FACE);
 
-    // Bucket meshes by blend mode. Three passes:
-    //   1. Opaque        — depth on, depth-write on, no blend
-    //   2. Punchthrough  — same, fragment shader discards sub-threshold texels
-    //   3. Translucent   — depth on, depth-write OFF, blend on, back-to-front sorted
-    // Mirrors OpenUSM's sort-info classification (NGLSORT_OPAQUE vs NGLSORT_TRANSLUCENT
-    // at the blend_mode < 2 boundary, us_person.cpp:1017-1041).
     std::vector<int> opaqueBucket, punchBucket, blendBucket;
     opaqueBucket.reserve(previewMeshes.size());
     for (int i = 0; i < (int)previewMeshes.size(); i++) {
         const auto& m = previewMeshes[i];
         if ((!isWorldMode && m.isHidden) || m.indexCount <= 0) continue;
         if (!isWorldMode && !isInFrustum(m.bboxMin, m.bboxMax)) continue;
-        // Debug-transparent meshes (color volumes, shadow volumes, collision
-        // proxies, triggers, GENERIC_WHITE/BLACK placeholders) go through the
-        // translucent bucket with a special shader path -- see the
-        // `debugTransparent` uniform in drawOne. They render as a faint ghost
-        // so the user can see what's there without it dominating the view.
+
         if (m.isDebugTransparent) {
             blendBucket.push_back(i);
         } else if (m.isFakeShadow) {
-            blendBucket.push_back(i);   // decal-style overlay, draw translucent
+            blendBucket.push_back(i);
         } else if (m.isAlphaTest) {
             punchBucket.push_back(i);
         } else if (m.isTranslucent) {
@@ -2332,19 +2768,42 @@ void SpiderManTool::RenderModelPreview() {
 
     auto drawOne = [&](int i) {
         const auto& m = previewMeshes[i];
-        if (m.textureId != 0) {
+        unsigned int activeDiffuseTexture = m.textureId;
+        if (!m.textureFrames.empty()) {
+
+            const size_t frame = static_cast<size_t>(std::max(0.0f, floorf(nowSeconds * 30.0f))) %
+                m.textureFrames.size();
+            activeDiffuseTexture = m.textureFrames[frame];
+        }
+        if (activeDiffuseTexture != 0) {
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m.textureId);
+            glBindTexture(GL_TEXTURE_2D, activeDiffuseTexture);
             glUniform1i(locDiffTexture, 0);
             glUniform1i(locHasTexture, 1);
         } else {
             glUniform1i(locHasTexture, 0);
         }
-        // Debug-transparent meshes need BLEND so the alpha=0.18 fragment works.
+        if (m.secondaryTextureId != 0) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, m.secondaryTextureId);
+            glUniform1i(locDetailTexture, 1);
+            glUniform1i(locHasDetailTexture, 1);
+            glActiveTexture(GL_TEXTURE0);
+        } else {
+            glUniform1i(locHasDetailTexture, 0);
+        }
+        glUniform1i(locIsPersonMaterial, m.isPersonMaterial ? 1 : 0);
+        glUniform1i(locPersonLighting, (m.isPersonMaterial && m.personLighting != 0) ? 1 : 0);
+        glUniform1i(locPersonUseInk,
+                    (m.isPersonMaterial && (m.personEnvA != 0 || m.personEnvB != 0)) ? 1 : 0);
+        glUniform1i(locProceduralLit, 0);
+        glUniform4f(locPersonBaseColor, m.personBaseColor[0], m.personBaseColor[1],
+                    m.personBaseColor[2], m.personBaseColor[3]);
+
         int effectiveBlend = (m.isFakeShadow || m.isColorVolume || m.isDebugTransparent)
                              ? 2 : (int)m.blendMode;
         glUniform1i(locBlendMode, effectiveBlend);
-        glUniform1f(locAlphaRef, 0.5f);   // matches typical NGLBM_PUNCHTHROUGH threshold
+        glUniform1f(locAlphaRef, 0.5f);
         glUniform1i(locIsFakeShadow, m.isFakeShadow ? 1 : 0);
         glUniform1i(locIsColorVolume, m.isColorVolume ? 1 : 0);
         const bool instanced = !m.instances.empty();
@@ -2366,18 +2825,38 @@ void SpiderManTool::RenderModelPreview() {
         }
     };
 
-    // Pass 1: opaque
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     for (int i : opaqueBucket) drawOne(i);
 
-    // Pass 2: punchthrough (alpha-test via discard, depth still writes)
+    if (proceduralTentacleMesh.vao && proceduralTentacleMesh.indexCount > 0) {
+        glUniform1i(locUseSkinning, 0);
+        glUniform1i(locHasTexture, 0);
+        glUniform1i(locHasDetailTexture, 0);
+        glUniform1i(locIsPersonMaterial, 0);
+        glUniform1i(locPersonLighting, 0);
+        glUniform1i(locPersonUseInk, 0);
+        glUniform1i(locProceduralLit, 1);
+        glUniform4f(locPersonBaseColor, 1.0f, 1.0f, 1.0f, 1.0f);
+        glUniform1i(locBlendMode, static_cast<int>(NGLBM_OPAQUE));
+        glUniform1f(locAlphaRef, 0.5f);
+        glUniform1i(locIsFakeShadow, 0);
+        glUniform1i(locIsColorVolume, 0);
+        glUniform1i(locUseInstancing, 0);
+        glUniform1i(locIsHighlighted, 0);
+        glUniform1f(locSelectedInstanceIndex, -1.0f);
+        glUniform1i(locDebugTransparent, 0);
+        glUniform1i(locIsWater, 0);
+        glBindVertexArray(proceduralTentacleMesh.vao);
+        glDrawElements(proceduralTentacleMesh.mode, proceduralTentacleMesh.indexCount,
+                       GL_UNSIGNED_SHORT, nullptr);
+        glUniform1i(locUseSkinning, skinningActive ? 1 : 0);
+    }
+
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     for (int i : punchBucket) drawOne(i);
 
-    // Pass 3: translucent — sort back-to-front by bbox-center distance to camera,
-    // disable depth writes so transparent surfaces don't occlude each other.
     if (!blendBucket.empty()) {
         std::sort(blendBucket.begin(), blendBucket.end(), [&](int a, int b) {
             const auto& ma = previewMeshes[a];
@@ -2394,19 +2873,17 @@ void SpiderManTool::RenderModelPreview() {
             float db = (cb[0]-camPos[0])*(cb[0]-camPos[0]) +
                        (cb[1]-camPos[1])*(cb[1]-camPos[1]) +
                        (cb[2]-camPos[2])*(cb[2]-camPos[2]);
-            return da > db;  // farthest first
+            return da > db;
         });
 
         glEnable(GL_BLEND);
         glDepthMask(GL_FALSE);
-        // Pull translucent surfaces forward in depth so decals like fake_shadow
-        // don't z-fight with the ground they sit on.
+
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(-1.0f, -1.0f);
         for (int i : blendBucket) {
             const auto& m = previewMeshes[i];
-            // Map nglBlendModeType to OpenGL src/dst factors (mirrors setBlending in
-            // OpenUSM ngl_dx_state.cpp:207-313).
+
             switch (m.blendMode) {
                 case NGLBM_ADDITIVE:
                 case NGLBM_CONST_ADDITIVE:
@@ -2439,7 +2916,6 @@ void SpiderManTool::RenderModelPreview() {
     glDepthMask(GL_TRUE);
     glBlendEquation(GL_FUNC_ADD);
 
-    // Skeleton overlay (NAL-based positions set in BuildSkeletonVisual)
     if (showSkeleton && !isWorldMode && skeletonBoneCount > 0) {
         RenderSkeletonOverlay();
     }
@@ -2451,10 +2927,6 @@ void SpiderManTool::RenderModelPreview() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-
-// Compute bone world positions from NAL skeleton data
-// Primary: use offset_locs chained through hierarchy
-// Fallback: generate positions from bone names (always works)
 void SpiderManTool::ComputeNALBonePositions() {
     nalBonePositions.clear();
     nalMaxBoneIndex = -1;
@@ -2465,10 +2937,8 @@ void SpiderManTool::ComputeNALBonePositions() {
         return;
     }
 
-    // Fallback: generate humanoid positions from bone names.
-    // This always works as long as we have bone_map and parent_map.
     auto nameToPos = [](const std::string& name) -> std::array<float,3> {
-        // Humanoid position estimates (Y-up, model centered at origin)
+
         if (name == "pelvis")       return {0.0f, 2.8f, 0.0f};
         if (name == "spine")        return {0.0f, 3.2f, 0.0f};
         if (name == "spine1")       return {0.0f, 3.6f, 0.0f};
@@ -2495,11 +2965,9 @@ void SpiderManTool::ComputeNALBonePositions() {
         if (name == "l_fore_twist1") return {1.6f, 3.9f, 0.0f};
         if (name == "r_fore_twist0") return {-1.5f, 4.0f, 0.0f};
         if (name == "r_fore_twist1") return {-1.6f, 3.9f, 0.0f};
-        return {0.0f, 3.0f, 0.0f}; // unknown bones near center
+        return {0.0f, 3.0f, 0.0f};
     };
 
-    // First use PCM bind matrices when available. This matches the Blender
-    // importer path and keeps the skeleton overlay aligned with the mesh.
     auto setPos = [&](int idx, float x, float y, float z) {
         if (idx < 0) return;
         nalBonePositions[idx] = {x, y, z};
@@ -2537,12 +3005,11 @@ void SpiderManTool::ComputeNALBonePositions() {
         nalMaxBoneIndex = -1;
     }
 
-    // Try offset_locs from torso
     bool hasOffsetLocs = false;
     for (auto& c : loadedSkeleton->components) {
         if (c.type_id != NalCompType::TorsoHead_TwoNeck && c.type_id != NalCompType::TorsoHead_OneNeck) continue;
         if (c.bone_indices.size() >= 6 && c.offset_locs.size() >= 5) {
-            // Check if any offset_loc is non-zero
+
             for (auto& ol : c.offset_locs) {
                 if (fabsf(ol[0]) > 0.001f || fabsf(ol[1]) > 0.001f || fabsf(ol[2]) > 0.001f) {
                     hasOffsetLocs = true;
@@ -2554,7 +3021,7 @@ void SpiderManTool::ComputeNALBonePositions() {
     }
 
     if (hasOffsetLocs) {
-        // -- Use offset_locs (exact positions from skeleton file) --
+
         for (auto& c : loadedSkeleton->components) {
             if (c.type_id != NalCompType::TorsoHead_TwoNeck && c.type_id != NalCompType::TorsoHead_OneNeck) continue;
             if (c.bone_indices.size() < 6 || c.offset_locs.size() < 5) continue;
@@ -2623,7 +3090,7 @@ void SpiderManTool::ComputeNALBonePositions() {
             chainBone(r_upper, r_clav, c.offset_locs[5]);
             chainBone(r_fore, r_upper, c.offset_locs[6]);
             chainBone(r_hand, r_fore, c.offset_locs[7]);
-            // Twist bones
+
             if (c.fore_twist_locs.size() >= 4) {
                 int lt0=-1, lt1=-1, rt0=-1, rt1=-1;
                 if (c.type_id == NalCompType::ArmsHands_IK && (int)c.bone_indices.size() > ArmIKBone::R_TWIST1) {
@@ -2642,7 +3109,6 @@ void SpiderManTool::ComputeNALBonePositions() {
         }
     }
 
-    // Fallback: if we got fewer than 3 bones from offset_locs, use name-based positions
     if ((int)nalBonePositions.size() < 3) {
         nalBonePositions.clear();
         nalMaxBoneIndex = -1;
@@ -2666,7 +3132,6 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
     manualBoneRotations.clear();
     boneRotationsBeforeEdit.clear();
 
-    // Also read PCM bone matrices (for GPU skinning later)
     if (pcmData.size() >= 16) {
         BinaryReader br(pcmData);
         br.Seek(8);
@@ -2698,19 +3163,16 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
         }
     }
 
-    // Compute NAL bone positions (the Python approach)
     ComputeNALBonePositions();
     if (nalBonePositions.empty()) {
         return;
     }
 
-    // Build sorted bone index list for VBO ordering
     std::vector<int> sortedIndices;
     for (auto& [idx, pos] : nalBonePositions) sortedIndices.push_back(idx);
     std::sort(sortedIndices.begin(), sortedIndices.end());
-    nalBoneVboOrder = sortedIndices; // store for picking/name lookup
+    nalBoneVboOrder = sortedIndices;
 
-    // Map: NAL global index → VBO position
     std::map<int, int> nalToVbo;
     for (int i = 0; i < (int)sortedIndices.size(); i++)
         nalToVbo[sortedIndices[i]] = i;
@@ -2721,13 +3183,11 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
     std::vector<BoneVert> pointVerts;
     std::vector<BoneVert> lineVerts;
 
-    // Points for each bone (yellow)
     for (int nalIdx : sortedIndices) {
         auto& p = nalBonePositions[nalIdx];
         pointVerts.push_back({p[0], p[1], p[2], 1.0f, 1.0f, 0.0f});
     }
 
-    // Hierarchy lines from parent_map (cyan)
     if (loadedSkeleton) {
         for (const auto& [childIdx, parentIdx] : loadedSkeleton->parent_map) {
             if (parentIdx < 0) continue;
@@ -2787,23 +3247,20 @@ void SpiderManTool::RenderSkeletonOverlay() {
     glBindVertexArray(skeletonVao);
     glDisable(GL_DEPTH_TEST);
 
-    // Hierarchy lines (cyan)
     if (skeletonLineVertCount > 0) {
         glLineWidth(2.0f);
         glDrawArrays(GL_LINES, skeletonBoneCount, skeletonLineVertCount);
     }
 
-    // Bone joints (yellow)
     glPointSize(6.0f);
     glDrawArrays(GL_POINTS, 0, skeletonBoneCount);
 
-    // Selected bone (red, bigger)
     if (selectedBoneIndex >= 0 && selectedBoneIndex < skeletonBoneCount) {
         struct BoneVert { float x, y, z, r, g, b; };
-        // selectedBoneIndex is a VBO index here
+
         glBindBuffer(GL_ARRAY_BUFFER, skeletonVbo);
         BoneVert sel;
-        // Read current position from VBO
+
         glGetBufferSubData(GL_ARRAY_BUFFER, selectedBoneIndex * sizeof(BoneVert), sizeof(BoneVert), &sel);
         sel.r = 1.0f; sel.g = 0.2f; sel.b = 0.2f;
         glBufferSubData(GL_ARRAY_BUFFER, selectedBoneIndex * sizeof(BoneVert), sizeof(BoneVert), &sel);
@@ -2913,6 +3370,8 @@ void SpiderManTool::StoreActivePreviewTab() {
     tab.modelPreview = isModelPreview;
     tab.worldMode = isWorldMode;
     tab.meshes = std::move(previewMeshes);
+    tab.proceduralTentacleMesh = std::move(proceduralTentacleMesh);
+    proceduralTentacleMesh = {};
 
     tab.selectedMeshIndex = selectedMeshIndex;
     tab.selectedMeshInstanceIndex = selectedMeshInstanceIndex;
@@ -2936,7 +3395,9 @@ void SpiderManTool::StoreActivePreviewTab() {
     tab.nalMaxBoneIndex = nalMaxBoneIndex;
 
     std::copy(modelCenter, modelCenter + 3, tab.modelCenter.begin());
+    std::copy(modelHeadTarget, modelHeadTarget + 3, tab.modelHeadTarget.begin());
     tab.modelRadius = modelRadius;
+    tab.orbitDistance = orbitDistance;
     std::copy(camPos, camPos + 3, tab.camPos.begin());
     std::copy(camFront, camFront + 3, tab.camFront.begin());
     std::copy(camUp, camUp + 3, tab.camUp.begin());
@@ -2946,6 +3407,10 @@ void SpiderManTool::StoreActivePreviewTab() {
 
     tab.loadedSkeleton = std::move(loadedSkeleton);
     tab.loadedAnimFile = std::move(loadedAnimFile);
+    tab.loadedMorphFile = std::move(loadedMorphFile);
+    tab.morphTargetWeights = std::move(morphTargetWeights);
+    tab.loadedVisemeStreams = std::move(loadedVisemeStreams);
+    tab.selectedVisemeIndex = selectedVisemeIndex;
     tab.selectedAnimIndex = selectedAnimIndex;
     tab.currentAnimFrame = currentAnimFrame;
     tab.animFrameFraction = animFrameFraction;
@@ -2959,12 +3424,11 @@ void SpiderManTool::StoreActivePreviewTab() {
     tab.activeBoneMappingHash = activeBoneMappingHash;
     tab.hasCachedState = true;
 
-    // Leave an empty, non-owning renderer state.  No GL object is deleted:
-    // the tab now owns every model-specific handle.
     isModelLoaded = false;
     isModelPreview = false;
     isWorldMode = false;
     previewMeshes.clear();
+    proceduralTentacleMesh = {};
     selectedMeshIndex = -1;
     selectedMeshInstanceIndex = -1;
     selectedMeshPcmData.clear();
@@ -2985,6 +3449,10 @@ void SpiderManTool::StoreActivePreviewTab() {
     nalMaxBoneIndex = -1;
     loadedSkeleton.reset();
     loadedAnimFile.reset();
+    loadedMorphFile = {};
+    morphTargetWeights.clear();
+    loadedVisemeStreams.clear();
+    selectedVisemeIndex = -1;
     loadedSkeletonName.clear();
     loadedAnimName.clear();
     skeletonCandidates.clear();
@@ -3007,6 +3475,8 @@ void SpiderManTool::RestorePreviewTab(int tabIndex) {
     isModelPreview = tab.modelPreview;
     isWorldMode = tab.worldMode;
     previewMeshes = std::move(tab.meshes);
+    proceduralTentacleMesh = std::move(tab.proceduralTentacleMesh);
+    tab.proceduralTentacleMesh = {};
 
     selectedMeshIndex = tab.selectedMeshIndex;
     selectedMeshInstanceIndex = tab.selectedMeshInstanceIndex;
@@ -3030,7 +3500,9 @@ void SpiderManTool::RestorePreviewTab(int tabIndex) {
     nalMaxBoneIndex = tab.nalMaxBoneIndex;
 
     std::copy(tab.modelCenter.begin(), tab.modelCenter.end(), modelCenter);
+    std::copy(tab.modelHeadTarget.begin(), tab.modelHeadTarget.end(), modelHeadTarget);
     modelRadius = tab.modelRadius;
+    orbitDistance = tab.orbitDistance;
     std::copy(tab.camPos.begin(), tab.camPos.end(), camPos);
     std::copy(tab.camFront.begin(), tab.camFront.end(), camFront);
     std::copy(tab.camUp.begin(), tab.camUp.end(), camUp);
@@ -3040,6 +3512,10 @@ void SpiderManTool::RestorePreviewTab(int tabIndex) {
 
     loadedSkeleton = std::move(tab.loadedSkeleton);
     loadedAnimFile = std::move(tab.loadedAnimFile);
+    loadedMorphFile = std::move(tab.loadedMorphFile);
+    morphTargetWeights = std::move(tab.morphTargetWeights);
+    loadedVisemeStreams = std::move(tab.loadedVisemeStreams);
+    selectedVisemeIndex = tab.selectedVisemeIndex;
     selectedAnimIndex = tab.selectedAnimIndex;
     currentAnimFrame = tab.currentAnimFrame;
     animFrameFraction = tab.animFrameFraction;
@@ -3051,6 +3527,7 @@ void SpiderManTool::RestorePreviewTab(int tabIndex) {
     activeSkeletonCandidate = tab.activeSkeletonCandidate;
     activeBoneMapping = std::move(tab.activeBoneMapping);
     activeBoneMappingHash = tab.activeBoneMappingHash;
+    if (loadedMorphFile.valid && morphTargetWeights.size() > 1) focusMorphsTab = true;
     tab.hasCachedState = false;
 }
 
@@ -3062,6 +3539,15 @@ void SpiderManTool::DestroyPreviewTabResources(PreviewTabState& tab) {
         if (mesh.instanceVbo) glDeleteBuffers(1, &mesh.instanceVbo);
     }
     tab.meshes.clear();
+    if (tab.proceduralTentacleMesh.vao)
+        glDeleteVertexArrays(1, &tab.proceduralTentacleMesh.vao);
+    if (tab.proceduralTentacleMesh.vbo)
+        glDeleteBuffers(1, &tab.proceduralTentacleMesh.vbo);
+    if (tab.proceduralTentacleMesh.ebo)
+        glDeleteBuffers(1, &tab.proceduralTentacleMesh.ebo);
+    if (tab.proceduralTentacleMesh.instanceVbo)
+        glDeleteBuffers(1, &tab.proceduralTentacleMesh.instanceVbo);
+    tab.proceduralTentacleMesh = {};
     if (tab.skeletonVao) glDeleteVertexArrays(1, &tab.skeletonVao);
     if (tab.skeletonVbo) glDeleteBuffers(1, &tab.skeletonVbo);
     tab.skeletonVao = 0;
@@ -3119,11 +3605,6 @@ void SpiderManTool::OpenPcmPreviewTab(int entryIndex) {
     const bool replacingActiveTab = activePreviewTab >= 0;
     if (replacingActiveTab) StoreActivePreviewTab();
 
-    // Pack browsing intentionally leaves the active tab's NAL state in
-    // place.  With that state cached (or after the last tab was closed),
-    // resolve the newly requested PCM against the currently browsed pack.
-    // This is an open-time cost only; ActivatePreviewTab never enters either
-    // parser.
     const bool packHasNalResources = !currentDir.skeletons.empty() ||
                                      !currentDir.animFiles.empty();
     if (replacingActiveTab || (packHasNalResources &&
@@ -3145,7 +3626,7 @@ void SpiderManTool::OpenPcmPreviewTab(int entryIndex) {
 
     selectedFileIndex = entryIndex;
     LoadPreview(entryIndex);
-    Log("Opened preview tab: " + entry.name);
+
 }
 
 void SpiderManTool::OpenGlobalSearchPcmTab(int resultIndex) {
@@ -3191,7 +3672,6 @@ void SpiderManTool::LoadPreview(int index) {
             std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
             AddMeshFromDataWithTransform(pcmData, e.name, nullptr, loadedPCPackPath, e.offset, transformMatrix);
 
-            // Load all placed props (entities + orphan PCMs) from this pack
             LoadPackEntities(loadedPCPackPath, transformMatrix);
 
             LoadSkybox();
@@ -3312,14 +3792,10 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
         const auto& m = previewMeshes[i];
 
         if (m.skipPicking) continue;
-        // Skip picking on the ghost overlay meshes so the user can click on
-        // the real geometry behind them.
+
         if (m.isFakeShadow || m.isColorVolume || m.isShadowVolume ||
             m.isDebugTransparent) continue;
 
-        // Instanced meshes retain one local/shared vertex buffer.  Test each
-        // placement's own bounds and transformed triangles so a click selects
-        // exactly one occurrence rather than the entire draw batch.
         if (!m.instances.empty()) {
             for (int instanceIndex = 0; instanceIndex < (int)m.instances.size(); ++instanceIndex) {
                 const auto& instance = m.instances[instanceIndex];
@@ -3454,9 +3930,9 @@ void SpiderManTool::HandleMeshPicking(float viewportX, float viewportY, float vi
                 ? m.instances[pickedInstance].name
                 : m.meshName;
         if (!selectedName.empty()) {
-            Log("Selected mesh: " + selectedName);
+
         } else {
-            Log("Selected mesh index: " + std::to_string(pickedMesh));
+
         }
     }
 }

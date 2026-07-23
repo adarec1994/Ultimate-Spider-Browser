@@ -1,7 +1,4 @@
 #pragma once
-// NalAnimation.h - C++ port of pcanim.py
-// Parses .pcanim container files and decodes animation track data
-// LemonHaze / Claude - 2025
 
 #include "NalAnimCodec.h"
 #include "NalSkeleton.h"
@@ -22,7 +19,6 @@ constexpr uint32_t NAL_FLAG_LOOPING    = 0x00000001;
 constexpr uint32_t NAL_FLAG_SCENE_ANIM = 0x00020000;
 constexpr float    NAL_PREVIEW_FPS     = 30.0f;
 
-// ─── NAL component type → iComponentID mapping ───
 static inline int nal_type_to_comp_id(uint32_t type_hash) {
     switch (type_hash) {
     case NalCompType::ArbitraryPO:               return NalComp::ARBITRARY_PO;
@@ -43,25 +39,18 @@ static inline int nal_type_to_comp_id(uint32_t type_hash) {
     }
 }
 
-// ─── Skeleton entry in animation file ───
 struct NalAnimSkeletonEntry {
     int32_t p[2];
     int32_t hash;
     std::string name;
 };
 
-// ─── A loaded skeleton the anim decoder can bind to ───
-// The engine resolves each anim's skeleton per-anim: nalLoadAnimFileInternal
-// looks up skeletons[anim.skel_index] (a tlFixedString) in the skeleton
-// directory and stores it on the anim (OpenUSM nal_system.cpp:282). The hash is
-// the tlresource string_hash, which matches PackDirectory skeleton_locations.
 struct NalSkeletonRef {
     uint32_t hash = 0;
     std::string name;
     std::shared_ptr<NalSkeletonData> data;
 };
 
-// ─── Decoded component data for one animation ───
 struct NalAnimComponent {
     int comp_ix     = -1;
     int slot_ix     = -1;
@@ -69,14 +58,12 @@ struct NalAnimComponent {
     int name_id     = -1;
     uint32_t type_hash = 0;
     uint32_t mask   = 0;
-    // ArbitraryPO uses a variable-length bitset.  `mask` remains the low word
-    // for fixed-mask components and diagnostics; never use it alone to address
-    // ArbitraryPO channels beyond 31.
+
     std::vector<uint32_t> mask_words;
     int arbitrary_active_quat_count = 0;
     int ntracks     = 0;
     std::vector<uint8_t> codec_ixs;
-    std::vector<uint8_t> encoded_data; // exact component entropy stream
+    std::vector<uint8_t> encoded_data;
     int per_anim_data_offset = -1;
     int track_data_offset = -1;
     NalDecodedFrames decoded;
@@ -92,9 +79,8 @@ struct NalAnimComponent {
     }
 };
 
-// ─── Single animation header + decoded data ───
 struct NalAnimEntry {
-    // Header fields
+
     int32_t  offset        = 0;
     int32_t  vtbl          = 0;
     int32_t  next_anim_rel = 0;
@@ -102,13 +88,11 @@ struct NalAnimEntry {
     std::string name;
     int32_t  skel_index    = -1;
     uint32_t version       = 0;
-    // Preserved retail header float at +0x30.  It is not playback duration;
-    // sub_5F06B0 reads +0x38 (t_scale) for the animation time span.
+
     float    header_float_30 = 0.f;
     uint32_t flags         = 0;
     float    t_scale       = 0.f;
 
-    // CharAnim data
     int32_t  instance_count        = 0;
     int32_t  comp_list_offs        = 0;
     int32_t  anim_user_data_offs   = 0;
@@ -137,18 +121,14 @@ struct NalAnimEntry {
         return (float)playback_frame_count() / NAL_PREVIEW_FPS;
     }
 
-    // Decoded components
     std::vector<NalAnimComponent> components;
     NalGenericDecodedAnimation generic_decoded;
     std::vector<std::string> warnings;
 
-    // Skeleton this anim was decoded against (resolved via skel_index).
-    // Null when no matching skeleton was found and a fallback was used.
     std::shared_ptr<NalSkeletonData> skeleton;
-    std::string skeleton_name;   // name from the anim file's skeleton table
+    std::string skeleton_name;
 };
 
-// ─── Full animation file ───
 struct NalAnimFile {
     uint32_t version          = 0;
     uint32_t flags            = 0;
@@ -165,7 +145,6 @@ struct NalAnimFile {
     std::vector<std::string> warnings;
 };
 
-// ─── Build component slots from skeleton data (matches _build_component_slots) ───
 struct NalAnimComponentSlot {
     int slot_ix = 0;
     int name_id = -1;
@@ -212,7 +191,6 @@ static inline std::vector<NalAnimComponentSlot> nal_build_component_slots(const 
     return slots;
 }
 
-// ─── Decode one animation's components (matches _decode_anim_components) ───
 static inline void nal_decode_anim_components(
     const std::vector<uint8_t>& blob,
     NalAnimEntry& anim,
@@ -236,17 +214,15 @@ static inline void nal_decode_anim_components(
         int table_ix = legacy_layout ? comp_ix : slot.slot_ix;
         if (table_ix < 0) continue;
 
-        // Read flags from comp list
         if (comp_list_abs + table_ix * 4 < 0 ||
             comp_list_abs + table_ix * 4 + 4 > (int)blob.size()) continue;
         int32_t flags;
         memcpy(&flags, blob.data() + comp_list_abs + table_ix * 4, 4);
 
-        if ((flags & 0x1) == 0) continue; // no track data
+        if ((flags & 0x1) == 0) continue;
 
-        // Read per-anim data
         int per_anim_data_offs = anim_list_abs;
-        if (flags & 0x2) { // HAS_PER_ANIM_DATA
+        if (flags & 0x2) {
             int table_entry = anim_list_abs + (anim_user_data_ix + 1) * 4;
             if (table_entry + 4 <= (int)blob.size()) {
                 int32_t elem_offset;
@@ -263,9 +239,6 @@ static inline void nal_decode_anim_components(
             continue;
         }
 
-        // Read the component mask.  sub_5F2270 addresses this as a packed
-        // uint32 bitset and rounds (quatCount + positionCount) up to words.
-        // Venom has 41 ArbitraryPO channels, hence two serialized mask words.
         int mask_word_count = 1;
         int arbitrary_channel_count = 0;
         if (comp_ix == NalComp::ARBITRARY_PO) {
@@ -303,7 +276,6 @@ static inline void nal_decode_anim_components(
         }
         if (ntracks < 0) { track_ix++; continue; }
 
-        // Read codec indices
         if (codec_ixs_abs < 0 || codec_ixs_abs + ntracks > (int)blob.size()) {
             anim.warnings.push_back("Animation codec table out of range");
             track_ix++;
@@ -311,11 +283,6 @@ static inline void nal_decode_anim_components(
         }
         std::vector<uint8_t> codec_ixs(blob.data() + codec_ixs_abs, blob.data() + codec_ixs_abs + ntracks);
 
-        // Read the exact entropy-stream extent from the track-offset table.
-        // nal_get_num_bytes_for_comp describes the engine's runtime state
-        // allocation; it is NOT a serialized stream size.  Using it as one
-        // truncated long clips (then NalBitStream returned zeroes), leaving a
-        // non-zero velocity to accumulate until skin bones stretched away.
         std::vector<uint8_t> encoded_data;
         int track_data_abs = -1;
         int track_data_end = -1;
@@ -343,8 +310,7 @@ static inline void nal_decode_anim_components(
                 track_data_end = track_list_abs + next_offset;
             }
         } else {
-            // The final stream runs to the next linked animation record.  The
-            // last animation owns the remaining container bytes.
+
             track_data_end = anim.next_anim_rel > 0
                 ? anim.offset + anim.next_anim_rel
                 : (int)blob.size();
@@ -358,7 +324,6 @@ static inline void nal_decode_anim_components(
         }
         encoded_data.assign(blob.data() + track_data_abs, blob.data() + track_data_end);
 
-        // Decode frames
         NalAnimComponent comp;
         comp.comp_ix = comp_ix;
         comp.slot_ix = slot.slot_ix;
@@ -375,9 +340,7 @@ static inline void nal_decode_anim_components(
         comp.track_data_offset = track_data_abs;
 
         try {
-            // Source of truth: USM.exe sub_5FF1A0 @ 0x5FF1CD multiplies the
-            // global frame step by CharAnim+84 (current_time). Header+56 is
-            // t_scale, but it is not the entropy-integrator scale argument.
+
             comp.decoded = nal_decode_component_frames(
                 comp_ix, codec_ixs, encoded_data, mask,
                 std::max(1, anim.frame_count), anim.current_time, anim.is_scene_anim(),
@@ -392,11 +355,6 @@ static inline void nal_decode_anim_components(
     }
 }
 
-// ─── Main parser: open and decode a .pcanim file ───
-// `skeletons` lists every skeleton available in the pack; each anim is decoded
-// against the skeleton selected by its own skel_index (matched by hash, then by
-// case-insensitive name), matching the engine's nalLoadAnimFileInternal. `skel`
-// is the fallback when no ref matches (or when `skeletons` is empty).
 inline NalAnimFile ParseNalAnimation(const std::string& filepath,
                                      const std::vector<NalSkeletonRef>& skeletons,
                                      const NalSkeletonData* skel = nullptr,
@@ -421,7 +379,6 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
         return result;
     }
 
-    // Check version
     uint32_t ver_test;
     memcpy(&ver_test, blob.data(), 4);
     if (ver_test != NAL_ANIM_CONTAINER) {
@@ -429,13 +386,11 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
         return result;
     }
 
-    // Read file header (matches pcanim.py)
     memcpy(&result.version, blob.data(), 4);
     memcpy(&result.flags, blob.data() + 4, 4);
     memcpy(&result.size_string_table, blob.data() + 8, 4);
     memcpy(&result.num_skeletons, blob.data() + 12, 4);
 
-    // Name at offset 16
     if (blob.size() >= 48) {
         memcpy(&result.name_hash, blob.data() + 16, 4);
         char name_buf[28] = {};
@@ -446,7 +401,6 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
     memcpy(&result.num_anims, blob.data() + 48, 4);
     memcpy(&result.first_anim, blob.data() + 52, 4);
 
-    // Read skeleton entries
     int skel_base = 64;
     for (int i = 0; i < std::max(0, result.num_skeletons); ++i) {
         int off = skel_base + i * 32;
@@ -462,7 +416,6 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
         result.skeletons.push_back(se);
     }
 
-    // Read animations
     int cur = (int)result.first_anim;
     int limit = std::max(4096, result.num_anims);
     int count = 0;
@@ -471,8 +424,6 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
         NalAnimEntry anim;
         anim.offset = cur;
 
-        // Read the 60-byte header exactly. +0x30 is an unknown/preserved float;
-        // +0x38 is the time span consumed by sub_5F06B0.
         memcpy(&anim.vtbl, blob.data() + cur, 4);
         memcpy(&anim.next_anim_rel, blob.data() + cur + 4, 4);
         memcpy(&anim.name_hash, blob.data() + cur + 8, 4);
@@ -485,7 +436,6 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
         memcpy(&anim.flags, blob.data() + cur + 52, 4);
         memcpy(&anim.t_scale, blob.data() + cur + 56, 4);
 
-        // CharAnim extended data
         if (anim.is_char_anim() && cur + 164 <= (int)blob.size()) {
             memcpy(&anim.instance_count, blob.data() + cur + 60, 4);
             memcpy(&anim.comp_list_offs, blob.data() + cur + 64, 4);
@@ -506,14 +456,10 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
         count++;
 
         if (anim.next_anim_rel == 0) break;
-        // next_anim_rel is relative to end of header read position
-        // In the C++ standalone: ifs.seekg(((int)ifs.tellg()) + anim.data.header.NextAnim - sizeof nalCharAnimData)
-        // Here: the header struct is at cur, and nalCharAnimData is the full header (164 bytes for char anim)
+
         cur = cur + anim.next_anim_rel;
     }
 
-    // Decode track data. Comp-slot tables are built per skeleton and cached;
-    // each anim decodes against its own skeleton (skel_index → skeleton table).
     if (decode) {
         std::map<const NalSkeletonData*, std::vector<NalAnimComponentSlot>> slot_cache;
         auto slots_for = [&](const NalSkeletonData* s) -> const std::vector<NalAnimComponentSlot>& {
@@ -548,9 +494,6 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
                 }
             }
 
-            // Generic animations use an independent active-slot bitset,
-            // component header, and chunked entropy stream.  Decode it only
-            // after resolving the exact skeleton named by this animation.
             if (anim.is_gen_anim()) {
                 if (skelData && skelData->skeleton_kind == "generic") {
                     anim.generic_decoded = nal_decode_generic_animation(
@@ -578,7 +521,6 @@ inline NalAnimFile ParseNalAnimation(const std::string& filepath,
     return result;
 }
 
-// Back-compat wrapper: decode everything against a single skeleton.
 inline NalAnimFile ParseNalAnimation(const std::string& filepath, const NalSkeletonData* skel = nullptr, bool decode = true) {
     return ParseNalAnimation(filepath, {}, skel, decode);
 }

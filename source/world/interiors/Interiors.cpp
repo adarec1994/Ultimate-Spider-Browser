@@ -1,7 +1,5 @@
-﻿// Interior world-loading support lives here.
-// Full-world loading currently does not place interior packs; keep this file
-// as the category boundary so the interior path can be added without touching
-// lego/static prop or zone chunk code again.
+
+
 static bool IsInteriorScenePackName(const std::string& stem) {
     std::string lower = StrToLower(stem);
     return lower.size() >= 6 && lower.substr(2, 4) == "_int";
@@ -63,9 +61,6 @@ static int LoadWorldInteriorMeshes(SpiderManTool& tool, const float* baseTransfo
             if (!file.good()) continue;
             if (pcmData.size() < 4 || ReadU32LE(pcmData, 0) != 0x204D4350) continue;
 
-            RecordWorldMeshPlacementDebug("interiors", entryName,
-                                          path.string(), meshRes.absOffset,
-                                          baseTransform);
             tool.AddMeshFromDataWithTransform(pcmData, entryName, nullptr,
                                               path.string(), meshRes.absOffset,
                                               baseTransform);

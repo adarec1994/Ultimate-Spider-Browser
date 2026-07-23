@@ -20,8 +20,6 @@ static std::string ReadStringTableEntry(const std::vector<uint8_t>& data, uint32
     return std::string((char*)&data[strStart], end - strStart);
 }
 
-// Decode a packed D3DCOLOR uint32 (0xAARRGGBB) into floats. Used for the
-// per-vertex baked color stored at +20 of stride-24/32/60 PCM vertices.
 static inline void DecodeD3DColor(uint32_t v, float& r, float& g, float& b, float& a) {
     constexpr float k = 1.0f / 255.0f;
     b = (float)((v >>  0) & 0xFF) * k;
@@ -30,23 +28,6 @@ static inline void DecodeD3DColor(uint32_t v, float& r, float& g, float& b, floa
     a = (float)((v >> 24) & 0xFF) * k;
 }
 
-// Normalise the bone-palette + per-vertex bone indices for one mesh section.
-//
-// Why this exists: the GL shader uses a fixed `mat4 boneMatrices[64]` and the
-// vertex stores section-LOCAL bone indices that look those slots up. PCM sections
-// either ship an explicit palette (NBones + BonesIdx) -- in which case vertex
-// indices are already section-local -- or ship no palette, in which case the
-// vertex indices are GLOBAL skeleton bone IDs (per Archive/pcmesh-blender-master
-// pcmesh.py:1353-1369). The previous code clamped any local idx >= 64 to zero,
-// which silently destroyed skinning on (a) characters with >64 total bones, and
-// (b) any palette-less section whose global IDs happen to exceed 64 -- both
-// produce the "vertices warp all over" symptom because some weights snap to
-// bone 0 while others move.
-//
-// The fix mirrors the Python reference: promote each raw index to a global ID
-// first, then build a *synthetic* per-section palette from the unique globals
-// actually referenced, and rewrite each vertex to point into that palette.
-// Sections that fit cleanly into the existing palette keep it untouched.
 template <typename VertexT>
 static std::vector<uint16_t> ResolveSectionBonePalette(
     std::vector<VertexT>& vertices,
@@ -60,13 +41,11 @@ static std::vector<uint16_t> ResolveSectionBonePalette(
         if (raw < 0) return -1;
         if (!filePalette.empty()) {
             if (raw < (int)filePalette.size()) return (int)filePalette[raw];
-            return -1;                              // out of palette range -> drop
+            return -1;
         }
-        return raw;                                 // no palette -> raw is global
+        return raw;
     };
 
-    // First check whether the file's palette already maps every vertex without
-    // overflow. If so, leave it alone -- preserves the authored ordering.
     bool needsSynth = false;
     if (filePalette.empty()) {
         needsSynth = true;
@@ -87,7 +66,7 @@ static std::vector<uint16_t> ResolveSectionBonePalette(
     }
 
     if (!needsSynth) {
-        // File palette is fine. Just sanity-check vertex indices.
+
         for (auto& v : vertices) {
             for (int bi = 0; bi < 4; ++bi) {
                 int raw = (int)(v.boneIdx[bi] + 0.5f);
@@ -100,8 +79,7 @@ static std::vector<uint16_t> ResolveSectionBonePalette(
         return filePalette;
     }
 
-    // Build the global-ID set referenced by this section's vertices.
-    std::map<int, int> globalToLocal; // global bone id -> new local slot
+    std::map<int, int> globalToLocal;
     std::vector<uint16_t> synth;
     synth.reserve(std::min((size_t)maxSlots, vertices.size() * 4));
 
@@ -125,8 +103,7 @@ static std::vector<uint16_t> ResolveSectionBonePalette(
                 localSlot = it->second;
             } else {
                 if ((int)synth.size() >= maxSlots) {
-                    // Synthetic palette is full -- drop this weight rather than
-                    // silently mapping it to slot 0 (which would warp the vert).
+
                     v.boneIdx[bi] = 0.f;
                     v.boneWgt[bi] = 0.f;
                     continue;
@@ -137,7 +114,7 @@ static std::vector<uint16_t> ResolveSectionBonePalette(
             }
             v.boneIdx[bi] = (float)localSlot;
         }
-        // Re-normalise weights after any drops.
+
         float wTotal = v.boneWgt[0] + v.boneWgt[1] + v.boneWgt[2] + v.boneWgt[3];
         if (wTotal > 1e-8f) {
             float inv = 1.f / wTotal;
@@ -150,14 +127,6 @@ static std::vector<uint16_t> ResolveSectionBonePalette(
     return synth;
 }
 
-// Classify the shader-name string at material +0x04 (stored as a tlFixedString
-// pointer to the shader's registered name — see OpenUSM ngl.cpp:2709). Empirically
-// THE ONLY reliable signal: the in-memory m_blend_mode at +0x4C is always zero on
-// disk (engine sets it after load via the shader's BindMaterial hook). Shader names
-// observed in real world data: smtranslucent, ustranslucenttrilinear,
-// ustranslucentinterior, smsimple, ussimpletrilinear, usstreet, ussimpleinterior,
-// usshinyinterior, usbuildingsimple, usfloor, usmsimplemorphableinterior,
-// uscolorvol, smshiny.
 static uint32_t ClassifyByShaderName(const std::string& shaderName) {
     std::string n = shaderName;
     for (auto& c : n) c = (char)tolower((unsigned char)c);
@@ -174,11 +143,6 @@ static uint32_t ClassifyByShaderName(const std::string& shaderName) {
     return NGLBM_OPAQUE;
 }
 
-// Color volumes (uscolorvol) feed a separate post-process pass in the engine
-// (USColorVolShaderSpace::gUSColorVolScene -> wds_render_manager::create_colorvol_scene)
-// and are never drawn as visible geometry. They sit in level data as boxy
-// invisible meshes that say "tint everything inside this volume". Without
-// detection, they render as opaque white/black blocks all over the level.
 static bool IsColorVolumeShader(const std::string& shaderName) {
     std::string n = shaderName;
     for (auto& c : n) c = (char)tolower((unsigned char)c);
@@ -187,66 +151,22 @@ static bool IsColorVolumeShader(const std::string& shaderName) {
            n.find("colorvolume") != std::string::npos;
 }
 
-// Stencil shadow volumes are rendered through the engine's stencil pass
-// (wds_render_manager::render_stencil_shadows -> 0x0053D5E0) -- never as
-// visible polygons. They're typically extruded silhouettes of dynamic objects.
-// We detect them by shader name and the renderer skips them by default.
 static bool IsShadowVolumeShader(const std::string& shaderName) {
     std::string n = shaderName;
     for (auto& c : n) c = (char)tolower((unsigned char)c);
-    // Match "shadowvolume", "shadow_volume", "shadowvol", "smshadowvol".
-    // We intentionally do NOT match plain "shadow" -- fake/decal shadows use
-    // names like "us_decal3d" or share a "shadow" substring but ARE meant to
-    // be visible (the blob under a character's feet).
+
     return n.find("shadowvolume") != std::string::npos ||
            n.find("shadow_volume") != std::string::npos ||
            n.find("shadowvol") != std::string::npos;
 }
 
-// Texture-name location depends on the derived material type, which we infer
-// from the entry's size field. The PCM serialised material is one of several
-// shader-specific structs in OpenUSM (Archive/OpenUSM):
-//
-//   28   uscolorvol         color volume, no texture
-//   48   PCUV_ShaderMaterial (us_pcuv_shader.h): vtbl(4) + section*(4) + shader*(4)
-//                            + empty[16] + field_1C(tlFixedString*) + texture*(4)
-//                            + blend_mode(4) + 2 ints = 0x30 bytes
-//                            → texture name at +0x1C. This is the shader used by
-//                            many world props -- prior to this entry being added
-//                            here, alleyway walls / doors / dumpsters all came
-//                            back textureless.
-//   60   us_floor-style small material, same head layout as PCUV
-//                            → texture name at +0x1C (best-effort; some are
-//                            genuinely textureless and the lookup will no-op)
-//   64   USInteriorMaterial (us_interior.h): char[0x1C] + field_1C(tlFixedString*)
-//                            + texture*(4) = 0x24 minimum, padded out by the
-//                            wrapping shader to 0x40
-//                            → texture name at +0x1C
-//   68   ustranslucentinterior / usmsimplemorphableinterior: same as 64 + 4
-//                            → texture name at +0x1C
-//   80   nglMaterialBase (ngl.h:152, VALIDATE_SIZE 0x50): the base material
-//                            class, m_blend_mode at +0x4C. Field at +0x18 is a
-//                            tlFixedString* for the (first) texture name.
-//                            → texture name at +0x18
-//   88   nglMaterialBase + 8 bytes (some derived variant)
-//                            → texture name at +0x18 (same field, struct grew)
-//   116+ USExteriorMaterial (us_exterior.h): nglMaterialBase + 0x10 + field_60
-//                            (tlFixedString*) + texture* + extras. Used by
-//                            smshiny, usbuildingsimple, usstreet, smsimple,
-//                            ustranslucenttrilinear, smtranslucent.
-//                            → texture name at +0x60
-//
-// For interior shaders the +0x18 field of any wrapping nglMaterialBase is NOT
-// dereferenced as a texture pointer; the shader extension at +0x1C is. Falling
-// back to mesh-name lookup catches most interior textures because material
-// name == texture name for those.
 static uint32_t LocateTextureOffset(uint16_t size) {
-    if (size == 48)               return 0x1C;   // PCUV_ShaderMaterial (the alley fix)
-    if (size == 60)               return 0x1C;   // us_floor and similar small shaders
-    if (size == 64 || size == 68) return 0x1C;   // interior material variants
-    if (size == 80 || size == 88) return 0x18;   // nglMaterialBase / character / base
-    if (size >= 116)              return 0x60;   // shiny / street / exterior derivatives
-    return 0;                                    // unknown — caller should skip
+    if (size == 48)               return 0x1C;
+    if (size == 60)               return 0x1C;
+    if (size == 64 || size == 68) return 0x1C;
+    if (size == 80 || size == 84 || size == 88) return 0x18;
+    if (size >= 116)              return 0x60;
+    return 0;
 }
 
 void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
@@ -274,7 +194,6 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         entries.push_back(e);
     }
 
-
     for (auto& e : entries) {
         if (e.tag != 256) continue;
         if (e.dataOffset + e.size > pcmData.size()) continue;
@@ -298,13 +217,47 @@ void SpiderManTool::ParseMaterialEntries(const std::vector<uint8_t>& pcmData) {
         mat.meshName = ReadStringTableEntry(pcmData, meshNameOfs);
         mat.alphaFlag = ReadStringTableEntry(pcmData, alphaFlagOfs);
         mat.textureName = ReadStringTableEntry(pcmData, textureNameOfs);
+        mat.serializedSize = e.size;
         mat.shaderType = shaderType;
 
-        // The on-disk m_blend_mode at +0x4C is always zero in practice — the engine
-        // sets it at load time via the shader's BindMaterial hook. The shader-name
-        // string is what's actually authored. (Confirmed empirically across an
-        // entire world load: every byte at +0x4C reads as 0.)
+        std::string shaderLower = StrToLower(mat.alphaFlag);
+        mat.isPersonMaterial = shaderLower.find("person") != std::string::npos;
+
+        if (e.size == 0x54) mat.isPersonMaterial = true;
+        if (mat.isPersonMaterial) {
+            if (e.dataOffset + 0x24 <= pcmData.size()) {
+                br.Seek(e.dataOffset + 0x20);
+                mat.secondaryTextureName = ReadStringTableEntry(pcmData, br.Read<uint32_t>());
+            }
+            if (e.dataOffset + 0x38 <= pcmData.size()) {
+                br.Seek(e.dataOffset + 0x28);
+                for (float& channel : mat.personBaseColor) channel = br.Read<float>();
+                for (float& channel : mat.personBaseColor) {
+                    if (!std::isfinite(channel) || channel < 0.0f || channel > 8.0f) {
+                        mat.personBaseColor = {1.0f, 1.0f, 1.0f, 1.0f};
+                        break;
+                    }
+                }
+            }
+            if (e.dataOffset + 0x4C <= pcmData.size()) {
+                br.Seek(e.dataOffset + 0x3C);
+                mat.personEnvA = br.Read<uint32_t>();
+                mat.personEnvB = br.Read<uint32_t>();
+                mat.personLighting = br.Read<uint32_t>();
+                mat.personOutline = br.Read<uint32_t>();
+            }
+        }
+
         uint32_t blendMode = ClassifyByShaderName(mat.alphaFlag);
+
+        if (mat.isPersonMaterial && e.size >= 0x50 &&
+            e.dataOffset + 0x50 <= pcmData.size()) {
+            br.Seek(e.dataOffset + 0x4C);
+            const uint32_t serializedBlendMode = br.Read<uint32_t>();
+            if (serializedBlendMode < NGLBM_MAX_BLEND_MODES_GUARD) {
+                blendMode = serializedBlendMode;
+            }
+        }
         mat.blendMode = blendMode;
         mat.isAlphaTest   = (blendMode == NGLBM_PUNCHTHROUGH);
         mat.isTranslucent = (blendMode >= NGLBM_BLEND);
@@ -324,12 +277,10 @@ MaterialDef SpiderManTool::ResolveMaterialByMeshOffset(uint32_t meshNameOffset) 
     return MaterialDef();
 }
 
-
 static bool IsColorVolumeMesh(const std::string& meshName) {
     (void)meshName;
     return false;
 }
-
 
 static bool ShouldHideMesh(const std::string& meshName) {
     (void)meshName;
@@ -394,7 +345,7 @@ static bool GlbDecodeDDSToRGBA(const std::vector<uint8_t>& dds, std::vector<uint
 
     if (hdr->pf.fl & 0x4) {
         uint32_t fourCC = hdr->pf.fourcc;
-        int blockSize = (fourCC == 0x31545844) ? 8 : 16; // DXT1 else DXT3/DXT5
+        int blockSize = (fourCC == 0x31545844) ? 8 : 16;
         int bw = (width + 3) / 4;
         int bh = (height + 3) / 4;
         if ((size_t)bw * (size_t)bh * (size_t)blockSize > pxSize) return false;
@@ -404,9 +355,9 @@ static bool GlbDecodeDDSToRGBA(const std::vector<uint8_t>& dds, std::vector<uint
                 const uint8_t* block = px + ((size_t)by * (size_t)bw + (size_t)bx) * (size_t)blockSize;
                 uint8_t decoded[4][4][4];
 
-                if (fourCC == 0x31545844) { // DXT1
+                if (fourCC == 0x31545844) {
                     GlbDecodeDXT1Block(block, decoded);
-                } else if (fourCC == 0x33545844) { // DXT3
+                } else if (fourCC == 0x33545844) {
                     uint64_t alpha = 0;
                     memcpy(&alpha, block, 8);
                     GlbDecodeDXT1Block(block + 8, decoded);
@@ -415,7 +366,7 @@ static bool GlbDecodeDDSToRGBA(const std::vector<uint8_t>& dds, std::vector<uint
                             decoded[y][x][3] = (uint8_t)(((alpha >> ((y * 4 + x) * 4)) & 0xF) * 17);
                         }
                     }
-                } else if (fourCC == 0x35545844) { // DXT5
+                } else if (fourCC == 0x35545844) {
                     uint8_t a0 = block[0], a1 = block[1];
                     uint8_t aPal[8];
                     aPal[0] = a0;
@@ -730,8 +681,7 @@ static void GlbMat4BuildTwistLineXform(const std::array<float, 3>& pos, float an
     float s = sinf(angle);
     float c = cosf(angle);
     GlbMat4Identity(m);
-    // USM.exe sub_5F2FD0: ordinary local-X rotation, stored here using the
-    // viewer/exporter's transposed (column-major) engine-matrix convention.
+
     m[5] = c;
     m[6] = -s;
     m[9] = s;
@@ -750,8 +700,7 @@ static float GlbWrapPi(float angle) {
 }
 
 static float GlbExtractForearmTwist(GlbExportQuat handQuat, bool left) {
-    // sub_5F4960 extracts hand twist around local X relative to a side-specific
-    // +/-90-degree reference. sub_5F7160/sub_5F7760 apply 0.33 to each twist.
+
     handQuat = GlbQuatNormalize(handQuat);
     float axial = 2.0f * atan2f(handQuat.x, handQuat.w);
     float reference = left ? -1.57079632679f : 1.57079632679f;
@@ -841,10 +790,7 @@ static void GlbSolveNalIk(const float* baseModelMatrix,
         GlbMat4AxisVec(targetModelMatrix, 1, targetY);
         GlbVec3Cross(targetDir, targetY, midDir);
     } else {
-        // Byte-exact algebra and ABI from USM.exe sub_5EEEE0/sub_5EF100,
-        // selected by sub_5F7760. sub_5F16E0 passes the clavicle matrix as
-        // callback parameter 2 and the hand target as parameter 3; the
-        // callbacks read parameter 2.
+
         float row0[3], row1[3], row2[3];
         GlbMat4AxisVec(baseModelMatrix, 0, row0);
         GlbMat4AxisVec(baseModelMatrix, 1, row1);
@@ -1182,7 +1128,7 @@ static void GlbBuildAnimationLocalMatricesForFrame(
                 float xyz[3];
                 if (!consumeXYZ(fv, cursor, xyz)) break;
                 setTrackXYZ(sc->bone_indices[bit], xyz[0], xyz[1], xyz[2], sc, bit);
-                cursor += 4; // foot position xyz + knee spin are IK solver inputs.
+                cursor += 4;
             }
         }
         else if (comp.comp_ix == NalComp::ARMS_IK) {
@@ -1202,7 +1148,7 @@ static void GlbBuildAnimationLocalMatricesForFrame(
                     ? GlbQuatFromNal(sc->default_pose.hand_quats[side])
                     : GlbExportQuat{};
                 setAbsoluteTrackQuat(sc->bone_indices[bit], GlbQuatFromXYZ(xyz[0], xyz[1], xyz[2]), true, defaultQ);
-                cursor += 4; // hand position xyz + elbow spin are IK solver inputs.
+                cursor += 4;
             }
         }
         else if (comp.comp_ix == NalComp::FAKEROOT_STD) {
@@ -1689,8 +1635,7 @@ static void GlbBuildAnimationWorldMatricesForFrame(
                         int parent = sc->bone_indices[twistParents[i]];
                         float local[16];
                         float world[16];
-                        // Normal sub_5F7160 evaluation has byte_959561 clear
-                        // and constructs both forearm-twist nodes at angle 0.
+
                         GlbMat4BuildTwistLineXform(sc->fore_twist_locs[i], 0.0f, local);
                         localToRuntimeParent(local, parent, world);
                         storeRuntimeWorld(bone, world);
@@ -1827,10 +1772,6 @@ static void GlbBuildAnimationWorldMatricesForFrame(
                     }
                 }
 
-                // sub_5F7760 still evaluates and parents all four twist nodes
-                // when its special twist flag is clear; only their angle is
-                // zero.  Leaving these at a static world-space bind matrix
-                // stretches the sleeve as the solved forearm moves.
                 if (sc->fore_twist_locs.size() >= 4 &&
                     sc->bone_indices.size() > ArmIKBone::R_TWIST1) {
                     int twistBones[4] = {ArmIKBone::L_TWIST0, ArmIKBone::L_TWIST1,
@@ -2247,9 +2188,7 @@ static void GlbBuildGenericAnimationWorldMatricesForFrame(
     const auto& genericWorld = anim.generic_decoded.world_frames[frame];
     const size_t count = std::min(outWorld.size(), genericWorld.size());
     for (size_t logical = 0; logical < count; ++logical) {
-        // These are already absolute PCM/game-space matrices, including the
-        // root basis adapter.  Preserve them verbatim so assets whose generic
-        // and PCM rest poses differ do not receive a second rest correction.
+
         memcpy(outWorld[logical].data(), genericWorld[logical].data(),
                sizeof(float) * 16);
     }
@@ -2280,10 +2219,6 @@ static int GlbAddAnimationToWriter(
             ? boneNodeIndices[mesh] : -1;
     };
 
-    // A looping N-frame NAL clip has N intervals: the final interval runs
-    // from stored frame N-1 back to frame 0.  glTF players only interpolate
-    // between authored keys, so append frame 0 at t=N/fps to preserve that
-    // closing interval instead of snapping at t=(N-1)/fps.
     const int sampleCount = frameCount + (anim.is_looping() ? 1 : 0);
 
     std::vector<float> times(sampleCount);
@@ -2400,11 +2335,6 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
         Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
 
-    // Vertex layout matches OpenUSM's PCUV vertex declaration once unpacked.
-    // The trailing `cr/cg/cb/ca` quartet is per-vertex baked color (D3DCOLOR
-    // uint32 at +20 of the stride-24/32/60 disk format, or white for stride 64).
-    // It feeds the GL color attribute that the fragment shader multiplies the
-    // texture by -- direct port of us_pcuv_PS.txt's `mul r0, t0, v0`.
     struct Vertex { float x,y,z; float nx,ny,nz; float u,v; float boneIdx[4]; float boneWgt[4]; float cr,cg,cb,ca; };
 
     bool loadedFirstLod = false;
@@ -2427,7 +2357,8 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             smRefs.push_back({matRef, smOfs});
         }
 
-        for(auto& [matRef, smOfs] : smRefs) {
+        for(size_t sectionIndex = 0; sectionIndex < smRefs.size(); ++sectionIndex) {
+            const auto [matRef, smOfs] = smRefs[sectionIndex];
             if (smOfs + 96 > pcmData.size()) continue;
 
             br.Seek(smOfs);
@@ -2491,15 +2422,12 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
 
             if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
 
-            // Read per-section bone palette (maps local bone indices to global)
-            // nglMeshSection: NBones at offset +8, BonesIdx at offset +12
             PCMSectionBonePalette bonePalette;
             bonePalette.load(pcmData, smOfs);
 
             br.Seek(vofs);
             std::vector<Vertex> vertices;
             bool valid = true;
-
 
             float bboxMin[3] = {1e30f, 1e30f, 1e30f};
             float bboxMax[3] = {-1e30f, -1e30f, -1e30f};
@@ -2511,7 +2439,6 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 memset(&vert, 0, sizeof(vert));
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
 
-
                 if (vert.x < bboxMin[0]) bboxMin[0] = vert.x;
                 if (vert.y < bboxMin[1]) bboxMin[1] = vert.y;
                 if (vert.z < bboxMin[2]) bboxMin[2] = vert.z;
@@ -2519,8 +2446,6 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 if (vert.y > bboxMax[1]) bboxMax[1] = vert.y;
                 if (vert.z > bboxMax[2]) bboxMax[2] = vert.z;
 
-                // Default to white -- correct for stride-64 (skinned) which has no
-                // color slot, and a safe fallback if the color read fails.
                 vert.cr = vert.cg = vert.cb = vert.ca = 1.0f;
 
                 if (stride == 64) {
@@ -2532,15 +2457,12 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                         br.Seek(startV + 24);
                         vert.u = br.Read<float>(); vert.v = br.Read<float>();
                     }
-                    // Read bone indices and weights (4 floats each, at offset 32 and 48).
-                    // STORE THEM RAW for now -- they may be section-local (per
-                    // palette) or already global (when NBones==0). The
-                    // synthetic-palette pass below normalises both cases.
+
                     if (startV + 64 <= pcmData.size()) {
                         br.Seek(startV + 32);
                         for (int bi = 0; bi < 4; bi++) vert.boneIdx[bi] = br.Read<float>();
                         for (int bi = 0; bi < 4; bi++) vert.boneWgt[bi] = br.Read<float>();
-                        // Normalise weights only -- defer index validation.
+
                         float wTotal = vert.boneWgt[0] + vert.boneWgt[1] + vert.boneWgt[2] + vert.boneWgt[3];
                         if (wTotal > 1e-8f) {
                             float inv = 1.f / wTotal;
@@ -2554,15 +2476,14 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                         br.Seek(startV + 12);
                         vert.u = br.Read<float>(); vert.v = br.Read<float>();
                     }
-                    // D3DCOLOR baked vertex color at +20 (per pcmesh.py stride-24 layout).
+
                     if (startV + 24 <= pcmData.size()) {
                         br.Seek(startV + 20);
                         uint32_t packed = br.Read<uint32_t>();
                         DecodeD3DColor(packed, vert.cr, vert.cg, vert.cb, vert.ca);
                     }
                 } else if (stride == 32 || stride == 60) {
-                    // Same head layout as stride 24; trailing bytes are padding or
-                    // shader-specific data we don't read.
+
                     if (startV + 20 <= pcmData.size()) {
                         br.Seek(startV + 12);
                         vert.u = br.Read<float>(); vert.v = br.Read<float>();
@@ -2584,13 +2505,11 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             for(uint32_t i=0; i<inum; i++) indices.push_back(br.Read<uint16_t>());
             if (vertices.empty() || indices.empty()) continue;
 
-
             if (stride != 64 && !vertices.empty() && !indices.empty()) {
 
                 for (auto& v : vertices) {
                     v.nx = 0; v.ny = 0; v.nz = 0;
                 }
-
 
                 if (itype == 4) {
 
@@ -2619,7 +2538,6 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                         float n[3];
                         Cross(e1, e2, n);
 
-
                         if (i % 2 == 1) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
 
                         vertices[i0].nx += n[0]; vertices[i0].ny += n[1]; vertices[i0].nz += n[2];
@@ -2627,7 +2545,6 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                         vertices[i2].nx += n[0]; vertices[i2].ny += n[1]; vertices[i2].nz += n[2];
                     }
                 }
-
 
                 for (auto& v : vertices) {
                     float len = sqrt(v.nx*v.nx + v.ny*v.ny + v.nz*v.nz);
@@ -2640,6 +2557,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             }
 
             RenderMesh mesh;
+            mesh.sourceSectionIndex = static_cast<uint32_t>(sectionIndex);
             mesh.indexCount = (int)indices.size();
             mesh.mode = (itype == 4) ? GL_TRIANGLES : GL_TRIANGLE_STRIP;
             mesh.textureId = tex;
@@ -2647,9 +2565,18 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             mesh.isTranslucent = mat.isTranslucent;
             mesh.isAlphaTest = mat.isAlphaTest;
             mesh.shaderType = mat.shaderType;
-            // Resolve indices and palette together (handles the no-palette and
-            // overflow cases that cause skinning to warp). Only meaningful for
-            // stride-64 skinned sections.
+            mesh.isPersonMaterial = mat.isPersonMaterial;
+            mesh.personBaseColor = mat.personBaseColor;
+            mesh.personLighting = mat.personLighting;
+            mesh.personEnvA = mat.personEnvA;
+            mesh.personEnvB = mat.personEnvB;
+            mesh.personOutline = mat.personOutline;
+            mesh.secondaryTextureName = mat.secondaryTextureName;
+            mesh.materialShaderName = mat.alphaFlag;
+            if (!mat.secondaryTextureName.empty()) {
+                mesh.secondaryTextureId = LoadTextureByName(mat.secondaryTextureName);
+            }
+
             if (stride == 64) {
                 mesh.bonePalette = ResolveSectionBonePalette(
                     vertices,
@@ -2660,35 +2587,25 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 mesh.bonePalette = bonePalette.palette;
             }
 
-
             mesh.isFakeShadow = false;
-
 
             std::string meshNameLower = StrToLower(meshName.empty() ? modelName : meshName);
             std::string modelNameLower = StrToLower(modelName);
-            // Prefer shader-name detection (set by ParseMaterialEntries from
-            // mat.alphaFlag); fall back to mesh-name heuristic.
+
             mesh.isColorVolume  = mat.isColorVolume  || IsColorVolumeMesh(meshNameLower);
             mesh.isShadowVolume = mat.isShadowVolume;
-            // Mark non-renderable engine data (collision proxies, triggers,
-            // placeholder meshes, color/shadow volumes) so the renderer draws
-            // them as a translucent ghost overlay. Either the file name OR
-            // the mesh section name can trigger this.
+
             mesh.isDebugTransparent = mesh.isColorVolume || mesh.isShadowVolume ||
                                       IsNonRenderableMeshName(modelNameLower) ||
                                       IsNonRenderableMeshName(meshNameLower);
-            // Lens flares / light cones / glow sprites need additive blending.
-            // The author shader for these (still in the binary) isn't covered
-            // by our shader-name classifier; force the right blend mode here
-            // so they read as glowing bloom instead of flat white quads.
+
             if (IsAdditiveGlowMeshName(modelNameLower) ||
                 IsAdditiveGlowMeshName(meshNameLower)) {
                 mesh.blendMode     = NGLBM_ADDITIVE;
                 mesh.isTranslucent = true;
                 mesh.isAlphaTest   = false;
             }
-            // Water: route into the dedicated water shader path. Always
-            // translucent so we see through to whatever's below the surface.
+
             if (IsWaterMeshName(modelNameLower) ||
                 IsWaterMeshName(meshNameLower)) {
                 mesh.isWater       = true;
@@ -2697,24 +2614,19 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
                 mesh.blendMode     = NGLBM_BLEND;
             }
 
-
             mesh.isHidden = ShouldHideMesh(meshNameLower);
-
 
             for (int i = 0; i < 3; i++) {
                 mesh.bboxMin[i] = bboxMin[i];
                 mesh.bboxMax[i] = bboxMax[i];
             }
 
-
             mesh.sourcePack = sourcePack;
             mesh.sourceOffset = sourceOffset;
             mesh.sourceSize = (uint32_t)pcmData.size();
             mesh.meshName = meshName.empty() ? modelName : meshName;
 
-
             mesh.skipPicking = false;
-
 
             mesh.positions.reserve(vertices.size() * 3);
             mesh.normals.reserve(vertices.size() * 3);
@@ -2736,8 +2648,40 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             }
             mesh.indices = indices;
 
+            if (!isWorldMode && loadedMorphFile.valid) {
+                bool hasMorphPosition = false;
+                mesh.morphPositionDeltas.resize(loadedMorphFile.sets.size());
+                mesh.morphPositionChanged.resize(loadedMorphFile.sets.size());
+                for (size_t targetIndex = 0;
+                     targetIndex < loadedMorphFile.sets.size(); ++targetIndex) {
+                    const auto& set = loadedMorphFile.sets[targetIndex];
+                    if (sectionIndex >= set.sections.size()) continue;
+                    const auto& target = set.sections[sectionIndex];
+                    if (target.vertex_count != vertices.size() || target.position.values.empty())
+                        continue;
+                    mesh.morphPositionDeltas[targetIndex] = target.position.values;
+                    mesh.morphPositionChanged[targetIndex] = target.position.changed;
+                    hasMorphPosition = true;
+                }
+                if (hasMorphPosition) {
+                    static_assert(sizeof(Vertex) == sizeof(float) * 20,
+                                  "Morph upload assumes the preview Vertex layout");
+                    mesh.morphVertexData.resize(vertices.size() * 20);
+                    std::memcpy(mesh.morphVertexData.data(), vertices.data(),
+                                vertices.size() * sizeof(Vertex));
+                } else {
+                    mesh.morphPositionDeltas.clear();
+                    mesh.morphPositionChanged.clear();
+                }
+            }
 
             mesh.textureName = mat.textureName;
+            if (!mat.textureName.empty()) {
+                auto animationIt = textureAnimationCache.find(StrToLower(mat.textureName));
+                if (animationIt != textureAnimationCache.end()) {
+                    mesh.textureFrames = animationIt->second;
+                }
+            }
             if (!mat.textureName.empty()) {
                 mesh.textureHash = CalculateCRC32(StrToLower(mat.textureName) + ".dds");
             }
@@ -2749,15 +2693,14 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0); glEnableVertexAttribArray(0);
             glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
             glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6*sizeof(float))); glEnableVertexAttribArray(2);
-            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(8*sizeof(float))); glEnableVertexAttribArray(3);  // boneIdx
-            glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(12*sizeof(float))); glEnableVertexAttribArray(4); // boneWgt
-            glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(16*sizeof(float))); glEnableVertexAttribArray(5); // baked vertex color (RGBA)
+            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(8*sizeof(float))); glEnableVertexAttribArray(3);
+            glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(12*sizeof(float))); glEnableVertexAttribArray(4);
+            glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(16*sizeof(float))); glEnableVertexAttribArray(5);
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
         }
     }
 }
-
 
 static void TransformVertex(float& x, float& y, float& z, const float* m) {
     float ox = x, oy = y, oz = z;
@@ -2765,7 +2708,6 @@ static void TransformVertex(float& x, float& y, float& z, const float* m) {
     y = m[1]*ox + m[5]*oy + m[9]*oz + m[13];
     z = m[2]*ox + m[6]*oy + m[10]*oz + m[14];
 }
-
 
 static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
     float ox = nx, oy = ny, oz = nz;
@@ -2775,6 +2717,58 @@ static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
 
     float len = sqrt(nx*nx + ny*ny + nz*nz);
     if (len > 0.0001f) { nx /= len; ny /= len; nz /= len; }
+}
+
+void SpiderManTool::LoadMorphForCurrentModel(uint32_t meshHash) {
+    loadedMorphFile = {};
+    morphTargetWeights.clear();
+    focusMorphsTab = false;
+    if (isWorldMode) return;
+
+    std::vector<uint8_t> bytes;
+
+    // 1) Prefer a morph co-located in the currently open pack.
+    if (!pcPackData.empty()) {
+        for (const auto& resource : currentDir.resources) {
+            if (resource.type == RES_KEY_MORPH && resource.hash == meshHash &&
+                resource.size != 0 && resource.offset <= pcPackData.size() &&
+                resource.size <= pcPackData.size() - resource.offset) {
+                bytes.assign(pcPackData.begin() + resource.offset,
+                             pcPackData.begin() + resource.offset + resource.size);
+                break;
+            }
+        }
+    }
+
+    // 2) Otherwise resolve the same mesh's morph from any other pack. Character-viewer
+    //    packs (CH_VWR_*) ship the head mesh but not the morph, which only lives in the
+    //    cutscene/IGC packs; the mesh hash is identical there, so the morph still matches.
+    if (bytes.empty()) {
+        BuildGlobalMorphIndex();
+        auto it = globalMorphIndex.find(meshHash);
+        if (it != globalMorphIndex.end() && it->second.size != 0) {
+            std::ifstream f(it->second.packPath, std::ios::binary);
+            if (f.is_open()) {
+                std::vector<uint8_t> buf(it->second.size);
+                f.seekg(it->second.offset);
+                f.read(reinterpret_cast<char*>(buf.data()), it->second.size);
+                if (f.good()) bytes = std::move(buf);
+            }
+        }
+    }
+
+    if (bytes.empty()) return;
+
+    loadedMorphFile = UsmMorph::Parse(bytes);
+    if (!loadedMorphFile.valid) {
+        loadedMorphFile = {};
+        return;
+    }
+
+    morphTargetWeights.assign(loadedMorphFile.sets.size(), 0.0f);
+
+    // A model that actually has adjustable morph targets should surface its Morphs tab.
+    if (morphTargetWeights.size() > 1) focusMorphsTab = true;
 }
 
 static void MultiplyColumnMajor4x4(const float* a, const float* b, float* out) {
@@ -2880,10 +2874,7 @@ void SpiderManTool::FlushPendingWholeWorldInstances() {
     }
 
     if (placementCount > 0) {
-        Log("Whole-world instancing: " + std::to_string(placementCount) +
-            " placements, " + std::to_string(pending.size()) +
-            " shared PCM batches, " + std::to_string(drawMeshCount) +
-            " draw meshes");
+
     }
 }
 
@@ -2949,8 +2940,7 @@ void SpiderManTool::InstanceWholeWorldMeshes() {
         }
 
         RenderMesh batch = std::move(previewMeshes[group.front()]);
-        // Scalar GL handles are copied by the implicit move, so detach them
-        // from the moved-from record before the cleanup pass below.
+
         previewMeshes[group.front()].vao = 0;
         previewMeshes[group.front()].vbo = 0;
         previewMeshes[group.front()].ebo = 0;
@@ -2997,7 +2987,7 @@ void SpiderManTool::BatchWorldMeshesByType() {
         float u, v;
         float boneIdx[4];
         float boneWgt[4];
-        // Per-vertex baked color (RGBA in [0,1]); see comment on `struct Vertex`.
+
         float cr, cg, cb, ca;
     };
 
@@ -3193,8 +3183,7 @@ void SpiderManTool::BatchWorldMeshesByType() {
                     bv.u = m.uvs[v * 2 + 0];
                     bv.v = m.uvs[v * 2 + 1];
                 }
-                // Carry per-vertex baked color through the batch; default to white
-                // if the source mesh predates colors.
+
                 if (v * 4 + 3 < m.colors.size()) {
                     bv.cr = m.colors[v * 4 + 0];
                     bv.cg = m.colors[v * 4 + 1];
@@ -3286,11 +3275,6 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
         Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
 
-    // Vertex layout matches OpenUSM's PCUV vertex declaration once unpacked.
-    // The trailing `cr/cg/cb/ca` quartet is per-vertex baked color (D3DCOLOR
-    // uint32 at +20 of the stride-24/32/60 disk format, or white for stride 64).
-    // It feeds the GL color attribute that the fragment shader multiplies the
-    // texture by -- direct port of us_pcuv_PS.txt's `mul r0, t0, v0`.
     struct Vertex { float x,y,z; float nx,ny,nz; float u,v; float boneIdx[4]; float boneWgt[4]; float cr,cg,cb,ca; };
 
     bool loadedFirstLod = false;
@@ -3378,7 +3362,6 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
 
             if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
 
-            // Read per-section bone palette
             PCMSectionBonePalette bonePalette;
             bonePalette.load(pcmData, smOfs);
 
@@ -3396,7 +3379,6 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                 memset(&vert, 0, sizeof(vert));
                 vert.x = br.Read<float>(); vert.y = br.Read<float>(); vert.z = br.Read<float>();
 
-                // Default to white -- see comment in the matching block of AddMeshFromData.
                 vert.cr = vert.cg = vert.cb = vert.ca = 1.0f;
 
                 if (stride == 64) {
@@ -3408,9 +3390,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                         br.Seek(startV + 24);
                         vert.u = br.Read<float>(); vert.v = br.Read<float>();
                     }
-                    // Read raw bone indices/weights; ResolveSectionBonePalette
-                    // below normalises them against the section/global palette
-                    // (see comment on the helper in this file).
+
                     if (startV + 64 <= pcmData.size()) {
                         br.Seek(startV + 32);
                         for (int bi = 0; bi < 4; bi++) vert.boneIdx[bi] = br.Read<float>();
@@ -3445,14 +3425,12 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
                     }
                 }
 
-
                 if (transform) {
                     TransformVertex(vert.x, vert.y, vert.z, transform);
                     if (stride == 64) {
                         TransformNormal(vert.nx, vert.ny, vert.nz, transform);
                     }
                 }
-
 
                 if (vert.x < bboxMin[0]) bboxMin[0] = vert.x;
                 if (vert.y < bboxMin[1]) bboxMin[1] = vert.y;
@@ -3471,7 +3449,6 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             if (iofs + inum * 2 > pcmData.size()) continue;
             for(uint32_t i=0; i<inum; i++) indices.push_back(br.Read<uint16_t>());
             if (vertices.empty() || indices.empty()) continue;
-
 
             if (stride != 64 && !vertices.empty() && !indices.empty()) {
                 for (auto& v : vertices) { v.nx = 0; v.ny = 0; v.nz = 0; }
@@ -3517,6 +3494,17 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             mesh.isTranslucent = mat.isTranslucent;
             mesh.isAlphaTest = mat.isAlphaTest;
             mesh.shaderType = mat.shaderType;
+            mesh.isPersonMaterial = mat.isPersonMaterial;
+            mesh.personBaseColor = mat.personBaseColor;
+            mesh.personLighting = mat.personLighting;
+            mesh.personEnvA = mat.personEnvA;
+            mesh.personEnvB = mat.personEnvB;
+            mesh.personOutline = mat.personOutline;
+            mesh.secondaryTextureName = mat.secondaryTextureName;
+            mesh.materialShaderName = mat.alphaFlag;
+            if (!mat.secondaryTextureName.empty()) {
+                mesh.secondaryTextureId = LoadTextureByName(mat.secondaryTextureName);
+            }
             if (stride == 64) {
                 mesh.bonePalette = ResolveSectionBonePalette(
                     vertices,
@@ -3533,7 +3521,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             std::string modelNameLower = StrToLower(modelName);
             mesh.isColorVolume  = mat.isColorVolume  || IsColorVolumeMesh(meshNameLower);
             mesh.isShadowVolume = mat.isShadowVolume;
-            // See matching block in AddMeshFromData for the rationale.
+
             mesh.isDebugTransparent = mesh.isColorVolume || mesh.isShadowVolume ||
                                       IsNonRenderableMeshName(modelNameLower) ||
                                       IsNonRenderableMeshName(meshNameLower);
@@ -3592,6 +3580,12 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
 
             mesh.textureName = mat.textureName;
             if (!mat.textureName.empty()) {
+                auto animationIt = textureAnimationCache.find(StrToLower(mat.textureName));
+                if (animationIt != textureAnimationCache.end()) {
+                    mesh.textureFrames = animationIt->second;
+                }
+            }
+            if (!mat.textureName.empty()) {
                 mesh.textureHash = CalculateCRC32(StrToLower(mat.textureName) + ".dds");
             }
 
@@ -3604,7 +3598,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6*sizeof(float))); glEnableVertexAttribArray(2);
             glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(8*sizeof(float))); glEnableVertexAttribArray(3);
             glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(12*sizeof(float))); glEnableVertexAttribArray(4);
-            glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(16*sizeof(float))); glEnableVertexAttribArray(5); // baked vertex color (RGBA)
+            glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(16*sizeof(float))); glEnableVertexAttribArray(5);
             glBindVertexArray(0);
             previewMeshes.push_back(mesh);
         }
@@ -3621,10 +3615,6 @@ void SpiderManTool::AddMeshInstancesFromDataBatched(
     uint32_t onlyMeshOffset) {
     if (transforms.empty()) return;
 
-    // Parse and upload the PCM geometry exactly once, then supply one compact
-    // matrix per placement.  The previous implementation copied and transformed
-    // every vertex for every occurrence, which reduced draw calls but made
-    // whole-world loading and memory usage scale with vertices * instances.
     {
         const size_t firstMesh = previewMeshes.size();
         AddMeshFromDataWithTransform(pcmData, modelName, textureResolver,
@@ -3793,6 +3783,17 @@ void SpiderManTool::AddMeshInstancesFromDataBatched(
         mesh.isTranslucent = mat.isTranslucent;
         mesh.isAlphaTest = mat.isAlphaTest;
         mesh.shaderType = mat.shaderType;
+        mesh.isPersonMaterial = mat.isPersonMaterial;
+        mesh.personBaseColor = mat.personBaseColor;
+        mesh.personLighting = mat.personLighting;
+        mesh.personEnvA = mat.personEnvA;
+        mesh.personEnvB = mat.personEnvB;
+        mesh.personOutline = mat.personOutline;
+        mesh.secondaryTextureName = mat.secondaryTextureName;
+        mesh.materialShaderName = mat.alphaFlag;
+        if (!mat.secondaryTextureName.empty()) {
+            mesh.secondaryTextureId = LoadTextureByName(mat.secondaryTextureName);
+        }
         mesh.bonePalette = bonePalette;
         mesh.isFakeShadow = false;
 
@@ -3841,6 +3842,12 @@ void SpiderManTool::AddMeshInstancesFromDataBatched(
         mesh.indices = indices;
 
         mesh.textureName = mat.textureName;
+        if (!mat.textureName.empty()) {
+            auto animationIt = textureAnimationCache.find(StrToLower(mat.textureName));
+            if (animationIt != textureAnimationCache.end()) {
+                mesh.textureFrames = animationIt->second;
+            }
+        }
         if (!mat.textureName.empty()) {
             mesh.textureHash = CalculateCRC32(StrToLower(mat.textureName) + ".dds");
         }
@@ -3901,7 +3908,7 @@ void SpiderManTool::AddMeshInstancesFromDataBatched(
 
             br.Seek(smOfs);
             uint32_t meshNameRef = br.Read<uint32_t>();
-            br.Read<uint32_t>(); // ptrShaderRef
+            br.Read<uint32_t>();
 
             std::string meshName;
             if (meshNameRef != 0 && meshNameRef + 32 <= pcmData.size()) {
@@ -4124,10 +4131,7 @@ void SpiderManTool::AddMeshInstancesFromDataBatched(
     }
 }
 
-
 void SpiderManTool::LoadBackgroundMeshes() {
-
-
 
     std::vector<std::pair<std::string, std::string>> backgroundModels = {
         {"oceanmesh", "city_arena"},
@@ -4146,7 +4150,6 @@ void SpiderManTool::LoadBackgroundMeshes() {
         }
 
         if (packPath.empty()) continue;
-
 
         std::ifstream file(packPath, std::ios::binary | std::ios::ate);
         if (!file.is_open()) continue;
@@ -4213,28 +4216,29 @@ void SpiderManTool::LoadModelToGL(int index) {
         if (m.instanceVbo) glDeleteBuffers(1, &m.instanceVbo);
     }
     previewMeshes.clear();
+    if (proceduralTentacleMesh.vao) glDeleteVertexArrays(1, &proceduralTentacleMesh.vao);
+    if (proceduralTentacleMesh.vbo) glDeleteBuffers(1, &proceduralTentacleMesh.vbo);
+    if (proceduralTentacleMesh.ebo) glDeleteBuffers(1, &proceduralTentacleMesh.ebo);
+    if (proceduralTentacleMesh.instanceVbo)
+        glDeleteBuffers(1, &proceduralTentacleMesh.instanceVbo);
+    proceduralTentacleMesh = {};
 
     if (e.offset + e.size > pcPackData.size()) return;
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
 
-    // Pick the best-matching skeleton for this mesh BEFORE parsing vertices --
-    // the bone-palette path below needs `loadedSkeleton` to be the right one.
-    // LoadSkeletonForCurrentPack populates skeletonCandidates with every
-    // .pcskel-shaped entry; we just promote the one whose name matches.
     SelectSkeletonForMesh(e.name, e.hash);
 
-    // Load the current PCM's bind matrices before resolving any section bone
-    // palettes.  Palette-less sections store global skeleton indices, and
-    // ResolveSectionBonePalette validates those indices against
-    // skeletonBones.size(); doing this after AddMeshFromData made that check use
-    // the previously-previewed model's skeleton (or an empty one).
     BuildSkeletonVisual(pcmData);
+
+    LoadMorphForCurrentModel(e.hash);
 
     AddMeshFromData(pcmData, e.name, nullptr);
 
     modelCenter[0] = 0; modelCenter[1] = 0; modelCenter[2] = 0;
     modelRadius = 10.0f;
+    modelHeadTarget[0] = 0; modelHeadTarget[1] = 0; modelHeadTarget[2] = 0;
+    orbitDistance = 0.0f;
 
     if(!previewMeshes.empty()) {
         float minP[3] = {1e9, 1e9, 1e9};
@@ -4309,12 +4313,26 @@ void SpiderManTool::LoadModelToGL(int index) {
             modelCenter[2] = cz;
             modelRadius = std::max(0.5f, diagonal * 0.5f);
 
-            // Orbit coordinates are camera offset angles around modelCenter.
-            // Start slightly above and in front of the model, matching the
-            // previous framing while making subsequent drag/zoom stable.
+            // Focal point the orbit/zoom camera targets. A tall silhouette is a full-body
+            // character whose head sits near the top; a compact mesh (bust/head/prop) is
+            // already centred on its head. This is what "zoom towards the head" homes in on.
+            const float width     = maxP[0] - minP[0];
+            const float depth     = maxP[2] - minP[2];
+            const float height    = maxP[1] - minP[1];
+            // Use the THINNEST horizontal axis (front-to-back depth for a character), not the
+            // widest: bind poses are usually T/A-posed, so arms make width ~= height and a
+            // width-based test wrongly reads a standing figure as "compact". A standing body
+            // is much taller than deep; a bust/head/prop is roughly as tall as it is thick.
+            const float thickness = std::min(width, depth);
+            const float headY     = (height > thickness * 1.8f) ? (minP[1] + 0.90f * height) : cy;
+            modelHeadTarget[0] = cx;
+            modelHeadTarget[1] = headY;
+            modelHeadTarget[2] = cz;
+
             camYaw = 90.0f;
             camPitch = 18.0f;
             const float distance = modelRadius * 3.2f;
+            orbitDistance = distance;   // start zoomed out, framed on the body centre
             const float yaw = camYaw * 3.14159265358979323846f / 180.0f;
             const float pitch = camPitch * 3.14159265358979323846f / 180.0f;
             const float horizontal = cosf(pitch) * distance;
@@ -4347,7 +4365,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     for(uint32_t i=0; i<num; i++) {
         Info inf; inf.u1 = br.Read<uint16_t>(); inf.type = br.Read<uint16_t>(); inf.offset = br.Read<uint32_t>(); inf.u2 = br.Read<uint32_t>(); infos.push_back(inf);
     }
-
 
     struct SubmeshData {
         std::string name;
@@ -4412,7 +4429,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
 
             if (vnum > 100000 || inum > 300000 || vofs >= pcmData.size() || iofs >= pcmData.size() || stride == 0) continue;
 
-            // Read bone palette for this section
             PCMSectionBonePalette bonePalette;
             bonePalette.load(pcmData, smOfs);
 
@@ -4476,14 +4492,12 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                     nx = br.Read<float>(); ny = br.Read<float>(); nz = br.Read<float>();
                     u = br.Read<float>(); v2 = br.Read<float>();
 
-                    // Read bone indices + weights (4 floats each at offsets 32, 48)
                     if (startV + 64 <= pcmData.size()) {
                         br.Seek(startV + 32);
                         float bIdx[4], bWgt[4];
                         for (int bi = 0; bi < 4; bi++) bIdx[bi] = br.Read<float>();
                         for (int bi = 0; bi < 4; bi++) bWgt[bi] = br.Read<float>();
 
-                        // Map through palette
                         for (int bi = 0; bi < 4; bi++) {
                             int localIdx = (int)bIdx[bi];
                             if (localIdx >= 0 && bWgt[bi] > 0.f && !bonePalette.palette.empty())
@@ -4491,7 +4505,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                             else if (bWgt[bi] <= 0.f)
                                 bIdx[bi] = 0.f;
                         }
-                        // Normalize weights
+
                         float wTotal = bWgt[0] + bWgt[1] + bWgt[2] + bWgt[3];
                         if (wTotal > 1e-8f) {
                             float inv = 1.f / wTotal;
@@ -4541,7 +4555,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
 
     if (submeshes.empty()) return;
 
-    // Check if any submesh has bone data
     bool hasSkinning = false;
     for (auto& sm : submeshes) {
         if (!sm.joints.empty() && !sm.weights.empty()) {
@@ -4550,8 +4563,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         }
     }
 
-    // Read bone matrices from PCM for inverse bind matrices
-    // Look for mesh entry to get bone matrices offset
     PCMBoneMatrices boneMats;
     for (auto& inf : infos) {
         if (inf.type != 512) continue;
@@ -4708,7 +4719,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         return -1;
     };
 
-    // If we have skinning data and bone matrices, set up skin nodes
     int ibmAccessor = -1;
     if (hasSkinning && !boneMats.matrices.empty()) {
         totalBones = (uint32_t)boneMats.matrices.size();
@@ -4746,7 +4756,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
 
         std::vector<int> rootBoneNodes;
         for (uint32_t bi = 0; bi < totalBones; bi++) {
-            int nodeIndex = 1 + (int)bi; // skeleton root is added before all bones
+            int nodeIndex = 1 + (int)bi;
             rootBoneNodes.push_back(nodeIndex);
         }
 
@@ -4754,9 +4764,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         writer.SetSkinRoot(skeletonRootNode);
         writer.AddToScene(skeletonRootNode);
 
-        // Keep exported joints flat under the skeleton root. Blender then uses
-        // the exact sampled joint matrices instead of rebuilding NAL's runtime
-        // hierarchy from local TRS.
         for (uint32_t bi = 0; bi < totalBones; bi++) {
             std::string boneName = "bone_" + std::to_string(bi);
             if (exportSkeleton) {
@@ -4775,8 +4782,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             writer.AddJoint(boneNode);
         }
 
-        // glTF expects actual inverse bind matrices in the same joint order as
-        // the skin's joint list.
         std::vector<float> ibmData;
         ibmData.reserve((size_t)totalBones * 16);
         for (auto& mat : boneMats.matrices) {
@@ -4830,9 +4835,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     if (hasSkinning && loadedAnimFile && loadedSkeleton && !restLocalMatrices.empty() && !boneNodeIndices.empty()) {
         for (int ai = 0; ai < (int)loadedAnimFile->animations.size(); ++ai) {
             const auto& anim = loadedAnimFile->animations[ai];
-            // Anims decoded against a different skeleton use that skeleton's
-            // bone indices -- applying them to this mesh's rig produces
-            // garbage, so only export anims bound to the mesh's skeleton.
+
             if (anim.skeleton &&
                 !nal_skeleton_pose_compatible(anim.skeleton.get(), loadedSkeleton.get()))
                 continue;
@@ -4853,9 +4856,9 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     }
 
     writer.WriteToFile(outPath, ibmAccessor);
-    Log("Converted to: " + outPath);
+
     if (exportedAnimations > 0) {
-        Log("Included " + std::to_string(exportedAnimations) + " animation(s) in GLB");
+
     }
 }
 
@@ -4870,9 +4873,7 @@ void SpiderManTool::AnalyzePCM(int index) {
 
     std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
 
-
     AnalyzePCMDetailed(pcmData);
-
 
     BinaryReader br(pcmData);
 
@@ -4962,7 +4963,6 @@ void SpiderManTool::AnalyzePCM(int index) {
     }
 }
 
-
 void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
     currentPcmDetails = PCMFileInfo();
 
@@ -4970,28 +4970,12 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
 
     BinaryReader br(pcmData);
 
-
-
-
-
-
-
-
-
-
     br.Seek(8);
     currentPcmDetails.numEntries = br.Read<uint32_t>();
     currentPcmDetails.entryTableOffset = br.Read<uint32_t>();
     currentPcmDetails.fileSize = (uint32_t)pcmData.size();
 
     if (currentPcmDetails.numEntries > 1000 || currentPcmDetails.entryTableOffset >= pcmData.size()) return;
-
-
-
-
-
-
-
 
     struct AssetEntry {
         uint16_t size;
@@ -5020,7 +5004,6 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
         return std::string((char*)&pcmData[strStart], end - strStart);
     };
 
-
     for (const auto& e : entries) {
         if (e.tag != 256) continue;
         if (e.dataOffset + 0x64 > pcmData.size()) continue;
@@ -5045,17 +5028,12 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
         mat.alphaFlag = readString(alphaFlagOfs);
         mat.textureName = readString(textureNameOfs);
 
-        // Shader-name is the only reliable blend-mode source; see ParseMaterialEntries.
-        // PCMMaterialInfo (analyze panel) doesn't carry color/shadow-volume flags --
-        // the renderer reads those from MaterialDef. Keep this branch limited to the
-        // info this struct exposes.
         uint32_t blendMode = ClassifyByShaderName(mat.alphaFlag);
         mat.isTranslucent  = (blendMode >= NGLBM_BLEND);
 
         currentPcmDetails.materials.push_back(mat);
     }
     currentPcmDetails.materialCount = (uint32_t)currentPcmDetails.materials.size();
-
 
     for (const auto& e : entries) {
         if (e.tag != 512) continue;
@@ -5064,18 +5042,6 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
         PCMLodInfo lod;
         lod.nameOffset = e.nameOffset;
         lod.name = readString(e.nameOffset);
-
-
-
-
-
-
-
-
-
-
-
-
 
         br.Seek(e.dataOffset);
         br.Skip(8);
@@ -5086,14 +5052,11 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
         br.Skip(4);
         lod.nextLodOffset = br.Read<uint32_t>();
 
-
-
         br.Seek(e.dataOffset + 0x20);
         lod.boundsMin[0] = br.Read<float>();
         lod.boundsMin[1] = br.Read<float>();
         lod.boundsMin[2] = br.Read<float>();
         br.Skip(4);
-
 
         lod.lodDistance = 0.0f;
         if (lod.nextLodOffset > 0 && lod.nextLodOffset + 8 <= pcmData.size()) {
@@ -5105,12 +5068,7 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
         currentPcmDetails.boneCount = lod.boneCount;
         currentPcmDetails.bonesOffset = lod.bonesOffset;
 
-
         if (lod.submeshCount > 256 || submeshRefsOfs >= pcmData.size()) continue;
-
-
-
-
 
         br.Seek(submeshRefsOfs);
         std::vector<std::pair<uint32_t, uint32_t>> submeshRefs;
@@ -5124,26 +5082,6 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
             if (smInfoOfs + 96 > pcmData.size()) continue;
 
             PCMSubmeshInfo sm;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
             br.Seek(smInfoOfs);
             sm.nameOffset = br.Read<uint32_t>();
@@ -5169,11 +5107,9 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
             br.Skip(4);
             sm.stride = br.Read<uint32_t>();
 
-
             sm.hasNormals = (sm.stride >= 24);
             sm.hasUV = (sm.stride >= 32);
             sm.hasBones = (sm.stride >= 44);
-
 
             for (const auto& mat : currentPcmDetails.materials) {
                 uint32_t matMeshOfs = 0;
@@ -5191,7 +5127,6 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
                     sm.materialTexture = mat.textureName;
                     sm.isTranslucent = mat.isTranslucent;
                     sm.shaderSize = mat.shaderSize;
-
 
                     switch (mat.shaderSize) {
                         case 80: sm.shaderType = "CHARACTER"; break;
@@ -5214,7 +5149,6 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
     currentPcmDetails.lodCount = (uint32_t)currentPcmDetails.lods.size();
     currentPcmDetails.totalSubmeshes = (uint32_t)currentPcmDetails.submeshes.size();
 
-
     if (currentPcmDetails.boneCount > 0 && currentPcmDetails.bonesOffset > 0 &&
         currentPcmDetails.bonesOffset + currentPcmDetails.boneCount * 64 <= pcmData.size()) {
 
@@ -5222,16 +5156,12 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
             PCMBoneInfo bone;
             bone.index = (int)i;
 
-
-
             uint32_t boneOfs = currentPcmDetails.bonesOffset + i * 64;
             br.Seek(boneOfs + 48);
             bone.posX = br.Read<float>();
             bone.posY = br.Read<float>();
             bone.posZ = br.Read<float>();
 
-
-            // Parent hierarchy is in nalCompSkeleton (not in PCM bone data)
             bone.parentIndex = -1;
             bone.inferredRole = "";
 
@@ -5239,22 +5169,19 @@ void SpiderManTool::AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData) {
         }
     }
 
-
     showPcmDetailsPanel = true;
 }
 
 void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
     if (selectedMeshIndex < 0 || selectedMeshIndex >= (int)previewMeshes.size()) {
-        Log("No mesh selected");
+
         return;
     }
 
     const auto& mesh = previewMeshes[selectedMeshIndex];
 
-
     fs::path outDir = fs::current_path() / "extracted" / "world_meshes";
     fs::create_directories(outDir);
-
 
     std::string baseName = mesh.meshName;
     if (baseName.empty()) {
@@ -5270,10 +5197,9 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
     if (asGlb) {
 
         if (mesh.positions.empty() || mesh.indices.empty()) {
-            Log("Selected mesh has no geometry data for export");
+
             return;
         }
-
 
         std::vector<uint16_t> triangleIndices;
         if (mesh.mode == GL_TRIANGLE_STRIP) {
@@ -5297,10 +5223,9 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         }
 
         if (triangleIndices.empty()) {
-            Log("No valid triangles in mesh");
+
             return;
         }
-
 
         float minP[3] = {1e30f, 1e30f, 1e30f};
         float maxP[3] = {-1e30f, -1e30f, -1e30f};
@@ -5316,7 +5241,6 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             if (y > maxP[1]) maxP[1] = y;
             if (z > maxP[2]) maxP[2] = z;
         }
-
 
         std::vector<uint8_t> textureData;
         bool hasTexture = false;
@@ -5349,7 +5273,6 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             }
         }
 
-
         std::vector<uint8_t> binBuffer;
         auto alignBuffer = [&binBuffer]() {
             while (binBuffer.size() % 4 != 0) binBuffer.push_back(0);
@@ -5361,26 +5284,21 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             return offset;
         };
 
-
         alignBuffer();
         int posOffset = addToBuffer(mesh.positions.data(), mesh.positions.size() * sizeof(float));
         int posLength = (int)(mesh.positions.size() * sizeof(float));
-
 
         alignBuffer();
         int normOffset = addToBuffer(mesh.normals.data(), mesh.normals.size() * sizeof(float));
         int normLength = (int)(mesh.normals.size() * sizeof(float));
 
-
         alignBuffer();
         int uvOffset = addToBuffer(mesh.uvs.data(), mesh.uvs.size() * sizeof(float));
         int uvLength = (int)(mesh.uvs.size() * sizeof(float));
 
-
         alignBuffer();
         int indOffset = addToBuffer(triangleIndices.data(), triangleIndices.size() * sizeof(uint16_t));
         int indLength = (int)(triangleIndices.size() * sizeof(uint16_t));
-
 
         int texOffset = 0, texLength = 0;
         if (hasTexture && !textureData.empty()) {
@@ -5391,10 +5309,8 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
 
         alignBuffer();
 
-
         std::stringstream json;
         json << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"USM\"},";
-
 
         json << "\"bufferViews\":[";
         json << "{\"buffer\":0,\"byteOffset\":" << posOffset << ",\"byteLength\":" << posLength << ",\"target\":34962},";
@@ -5406,7 +5322,6 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         }
         json << "],";
 
-
         json << "\"accessors\":[";
         json << "{\"bufferView\":0,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC3\","
              << "\"min\":[" << minP[0] << "," << minP[1] << "," << minP[2] << "],"
@@ -5416,13 +5331,11 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         json << "{\"bufferView\":3,\"componentType\":5123,\"count\":" << triangleIndices.size() << ",\"type\":\"SCALAR\"}";
         json << "],";
 
-
         if (hasTexture) {
             json << "\"images\":[{\"bufferView\":4,\"mimeType\":\"image/vnd-ms.dds\"}],";
             json << "\"samplers\":[{\"magFilter\":9729,\"minFilter\":9729,\"wrapS\":10497,\"wrapT\":10497}],";
             json << "\"textures\":[{\"sampler\":0,\"source\":0}],";
         }
-
 
         json << "\"materials\":[{\"name\":\"" << baseName << "\",\"doubleSided\":true,";
         if (hasTexture) {
@@ -5435,23 +5348,18 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         if (mesh.isAlphaTest) json << ",\"alphaCutoff\":0.5";
         json << "}],";
 
-
         json << "\"meshes\":[{\"name\":\"" << baseName << "\",\"primitives\":[{"
              << "\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},"
              << "\"indices\":3,\"material\":0}]}],";
 
-
         json << "\"nodes\":[{\"name\":\"" << baseName << "\",\"mesh\":0}],";
 
-
         json << "\"scenes\":[{\"nodes\":[0]}],\"scene\":0,";
-
 
         json << "\"buffers\":[{\"byteLength\":" << binBuffer.size() << "}]}";
 
         std::string jsonStr = json.str();
         while (jsonStr.size() % 4 != 0) jsonStr += " ";
-
 
         fs::path glbPath = outDir / (baseName + ".glb");
         std::ofstream out(glbPath, std::ios::binary);
@@ -5464,13 +5372,11 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
         out.write((char*)&version, 4);
         out.write((char*)&totalLen, 4);
 
-
         uint32_t jsonLen = (uint32_t)jsonStr.size();
         uint32_t jsonType = 0x4E4F534A;
         out.write((char*)&jsonLen, 4);
         out.write((char*)&jsonType, 4);
         out.write(jsonStr.c_str(), jsonLen);
-
 
         uint32_t binLen = (uint32_t)binBuffer.size();
         uint32_t binType = 0x004E4942;
@@ -5493,13 +5399,13 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
     } else {
 
         if (mesh.sourcePack.empty() || mesh.sourceSize == 0) {
-            Log("No source PCM data for selected mesh");
+
             return;
         }
 
         std::ifstream file(mesh.sourcePack, std::ios::binary);
         if (!file.is_open()) {
-            Log("Failed to open source pack");
+
             return;
         }
 

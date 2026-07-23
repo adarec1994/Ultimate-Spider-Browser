@@ -1,4 +1,4 @@
-﻿static bool IsShortWorldBaseName(const std::string& nameLower) {
+static bool IsShortWorldBaseName(const std::string& nameLower) {
     if (nameLower.empty() || nameLower.size() > 3) return false;
     for (char c : nameLower) {
         if (!std::isalpha((unsigned char)c)) return false;
@@ -55,9 +55,6 @@ static int LoadWorldZoneChunks(SpiderManTool& tool, const float* baseTransform) 
             if (!file.good()) continue;
             if (pcmData.size() < 4 || ReadU32LE(pcmData, 0) != 0x204D4350) continue;
 
-            RecordWorldMeshPlacementDebug("zone chunks", entryName,
-                                          path.string(), meshRes.absOffset,
-                                          baseTransform);
             tool.AddMeshFromDataWithTransform(pcmData, entryName, nullptr,
                                               path.string(), meshRes.absOffset, baseTransform);
         }

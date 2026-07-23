@@ -3,6 +3,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -15,6 +16,7 @@
 #include "SpiderManTool.h"
 #include "Interface.h"
 #include "NalIntegration.h"
+#include "stb_image_write.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -75,10 +77,674 @@ static int ExportPackGlbHeadless(const std::string& packArg) {
     return 0;
 }
 
-// Exercises the same directory, skeleton, animation, entropy-codec, PCM, and
-// GLB construction paths used by the application without retaining extracted
-// assets. The single scratch GLB is deleted after every PCM so a corpus run has
-// bounded disk usage.
+static int InspectMorphPackHeadless(const std::string& packArg) {
+    const fs::path packPath = fs::absolute(packArg);
+    std::ifstream file(packPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "Pack does not exist: " << packPath.string() << std::endl;
+        return 2;
+    }
+
+    const size_t fileSize = static_cast<size_t>(file.tellg());
+    file.seekg(0);
+    std::vector<uint8_t> blob(fileSize);
+    file.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+    if (!file.good()) {
+        std::cerr << "Failed to read pack: " << packPath.string() << std::endl;
+        return 3;
+    }
+
+    const PackDirectory dir = PackDirectory::Parse(blob);
+    if (!dir.valid) {
+        std::cerr << "Invalid directory: " << dir.error << std::endl;
+        return 4;
+    }
+
+    auto printTl = [](const char* label, const std::vector<PackTlResource>& entries) {
+        std::cout << label << " count=" << entries.size() << std::endl;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const auto& entry = entries[i];
+            std::cout << "  [" << i << "] hash=0x" << std::hex << entry.nameHash
+                      << " type=" << std::dec << static_cast<unsigned>(entry.type)
+                      << " offset=0x" << std::hex << entry.offset
+                      << " size=0x" << entry.size << std::dec << std::endl;
+        }
+    };
+    printTl("MORPH_FILES", dir.morphFiles);
+    printTl("MORPHS", dir.morphs);
+    printTl("SCENE_ANIMS", dir.sceneAnims);
+    std::map<uint32_t, size_t> resourceTypeCounts;
+    for (const auto& resource : dir.resources) ++resourceTypeCounts[resource.type];
+    std::cout << "RESOURCE_TYPES";
+    for (const auto& [type, count] : resourceTypeCounts)
+        std::cout << " " << ResourceKeyTypeName(type) << "(" << type << ")=" << count;
+    std::cout << std::endl;
+
+    auto readU32 = [&](size_t offset, uint32_t& value) {
+        if (offset + sizeof(value) > blob.size()) return false;
+        std::memcpy(&value, blob.data() + offset, sizeof(value));
+        return true;
+    };
+
+    for (size_t resourceIndex = 0; resourceIndex < dir.resources.size(); ++resourceIndex) {
+        const auto& resource = dir.resources[resourceIndex];
+        uint32_t magic = 0;
+        const bool haveMagic = readU32(resource.offset, magic);
+        if (resource.type != RES_KEY_MORPH && resource.type != RES_KEY_MORPH_FILE_STRUCT &&
+            resource.type != RES_KEY_ANIMATION && resource.type != RES_KEY_SCENE_ANIM &&
+            resource.type != RES_KEY_CUT_SCENE && resource.type != RES_KEY_VISEME_STREAM &&
+            resource.type != RES_KEY_ENTITY &&
+            (!haveMagic || magic != 0x204D4350u)) {
+            continue;
+        }
+
+        std::cout << "RESOURCE[" << resourceIndex << "] hash=0x" << std::hex
+                  << resource.hash << " type=" << std::dec << resource.type
+                  << " offset=0x" << std::hex << resource.offset
+                  << " size=0x" << resource.size << std::dec;
+        if (haveMagic && magic == 0x204D4350u) std::cout << " magic=PCM";
+        std::cout << std::endl;
+
+        if (resource.type == RES_KEY_CUT_SCENE || resource.type == RES_KEY_VISEME_STREAM) {
+            std::cout << "  resource_words";
+            for (size_t wordIndex = 0; wordIndex < 16; ++wordIndex) {
+                uint32_t word = 0;
+                if (!readU32(resource.offset + wordIndex * 4, word)) break;
+                std::cout << " 0x" << std::hex << word;
+            }
+            std::cout << std::dec << std::endl;
+        }
+
+        if (resource.type == RES_KEY_ENTITY &&
+            resource.offset <= blob.size() &&
+            resource.size <= blob.size() - resource.offset) {
+            std::vector<uint8_t> entityBytes(
+                blob.begin() + resource.offset,
+                blob.begin() + resource.offset + resource.size);
+            const EntityBoneMapping mapping = ParseEntityBoneMapping(entityBytes);
+            std::cout << "  entity_bone_mapping valid=" << (mapping.valid ? 1 : 0);
+            if (!mapping.valid) {
+                std::cout << " error=" << mapping.error << std::endl;
+            } else {
+                std::cout << " mesh_poses=" << mapping.meshPoseCount
+                          << " logical_poses=" << mapping.logicalToMesh.size()
+                          << " mesh_to_logical=";
+                for (size_t mesh = 0; mesh < mapping.meshToLogical.size(); ++mesh) {
+                    if (mesh) std::cout << ',';
+                    std::cout << mapping.meshToLogical[mesh];
+                }
+                std::cout << std::endl;
+            }
+        }
+
+        uint32_t version = 0, itemCount = 0, itemTableRel = 0, imageBaseRel = 0;
+        if (!haveMagic || magic != 0x204D4350u ||
+            !readU32(resource.offset + 4, version) ||
+            !readU32(resource.offset + 8, itemCount) ||
+            !readU32(resource.offset + 12, itemTableRel) ||
+            !readU32(resource.offset + 16, imageBaseRel)) {
+            continue;
+        }
+        const int64_t relocation = static_cast<int64_t>(resource.offset) - imageBaseRel;
+        const int64_t itemTable = relocation + itemTableRel;
+        std::cout << "  header version=0x" << std::hex << version << " items=" << std::dec
+                  << itemCount << " table=0x" << std::hex << itemTable
+                  << " image_base=0x" << imageBaseRel << " relocation=" << std::showbase
+                  << relocation << std::noshowbase << std::dec << std::endl;
+        if (itemTable < 0 || static_cast<uint64_t>(itemTable) + 12ull * itemCount > blob.size())
+            continue;
+
+        for (uint32_t itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+            const size_t itemOffset = static_cast<size_t>(itemTable) + 12u * itemIndex;
+            const uint8_t itemType = blob[itemOffset + 3];
+            uint32_t payloadRel = 0, auxRel = 0;
+            readU32(itemOffset + 4, payloadRel);
+            readU32(itemOffset + 8, auxRel);
+            const int64_t payload = payloadRel ? relocation + payloadRel : 0;
+            const int64_t aux = auxRel ? relocation + auxRel : 0;
+            std::cout << "  item[" << itemIndex << "] type=" << unsigned(itemType)
+                      << " payload=0x" << std::hex << payload << " aux=0x" << aux
+                      << std::dec << std::endl;
+            if (resource.type == RES_KEY_MESH && itemType == 2 && payload > 0 &&
+                static_cast<uint64_t>(payload) + 16 <= blob.size()) {
+                uint32_t sectionCount = 0, sectionTableRel = 0;
+                readU32(static_cast<size_t>(payload) + 8, sectionCount);
+                readU32(static_cast<size_t>(payload) + 12, sectionTableRel);
+                const int64_t sectionTable = sectionTableRel ? relocation + sectionTableRel : 0;
+                std::cout << "    mesh sections=" << sectionCount << " table=0x" << std::hex
+                          << sectionTable << std::dec << std::endl;
+                if (sectionCount <= 1024 && sectionTable > 0 &&
+                    static_cast<uint64_t>(sectionTable) + 8ull * sectionCount <= blob.size()) {
+                    for (uint32_t sectionIndex = 0; sectionIndex < sectionCount; ++sectionIndex) {
+                        uint32_t sectionRel = 0;
+                        readU32(static_cast<size_t>(sectionTable) + 8u * sectionIndex + 4, sectionRel);
+                        const int64_t section = sectionRel ? relocation + sectionRel : 0;
+                        if (section <= 0 || static_cast<uint64_t>(section) + 88 > blob.size()) continue;
+                        uint32_t vertexCount = 0, vertexDataRel = 0, stride = 0, extensionRel = 0;
+                        readU32(static_cast<size_t>(section) + 56, vertexCount);
+                        readU32(static_cast<size_t>(section) + 60, vertexDataRel);
+                        readU32(static_cast<size_t>(section) + 72, stride);
+                        readU32(static_cast<size_t>(section) + 84, extensionRel);
+                        std::cout << "      section[" << sectionIndex << "] at=0x" << std::hex
+                                  << section << " vertices=" << std::dec << vertexCount
+                                  << " stride=" << stride << " vertex_data=0x" << std::hex
+                                  << (vertexDataRel ? relocation + vertexDataRel : 0)
+                                  << " extension=0x" << (extensionRel ? relocation + extensionRel : 0);
+                        const int64_t extension = extensionRel ? relocation + extensionRel : 0;
+                        if (extension > 0 && static_cast<uint64_t>(extension) + 32 <= blob.size()) {
+                            std::cout << " key=";
+                            for (unsigned keyIndex = 0; keyIndex < 8; ++keyIndex) {
+                                uint32_t word = 0;
+                                readU32(static_cast<size_t>(extension) + 4u * keyIndex, word);
+                                if (keyIndex) std::cout << ',';
+                                std::cout << "0x" << word;
+                            }
+                        }
+                        if (stride == 64) {
+                            uint32_t paletteCount = 0, paletteRel = 0;
+                            readU32(static_cast<size_t>(section) + 8, paletteCount);
+                            readU32(static_cast<size_t>(section) + 12, paletteRel);
+                            const int64_t paletteOffset = paletteRel ? relocation + paletteRel : 0;
+                            std::cout << " bones=" << std::dec << paletteCount << " palette=";
+                            if (paletteCount <= 256 && paletteOffset > 0 &&
+                                static_cast<uint64_t>(paletteOffset) + 2ull * paletteCount <= blob.size()) {
+                                for (uint32_t bone = 0; bone < paletteCount; ++bone) {
+                                    uint16_t global = 0;
+                                    std::memcpy(&global, blob.data() + paletteOffset + 2u * bone, 2);
+                                    if (bone) std::cout << ',';
+                                    std::cout << global;
+                                }
+                            }
+                            int rawMin = 256, rawMax = -1;
+                            uint64_t weightedInfluences = 0, invalidInfluences = 0;
+                            const int64_t vertexData = vertexDataRel ? relocation + vertexDataRel : 0;
+                            if (vertexData > 0 && vertexCount <= 100000 &&
+                                static_cast<uint64_t>(vertexData) + 64ull * vertexCount <= blob.size()) {
+                                for (uint32_t vertex = 0; vertex < vertexCount; ++vertex) {
+                                    const size_t base = static_cast<size_t>(vertexData) + 64u * vertex;
+                                    for (unsigned influence = 0; influence < 4; ++influence) {
+                                        float rawFloat = 0.0f, weight = 0.0f;
+                                        std::memcpy(&rawFloat, blob.data() + base + 32 + 4u * influence, 4);
+                                        std::memcpy(&weight, blob.data() + base + 48 + 4u * influence, 4);
+                                        if (weight <= 0.0f) continue;
+                                        const int raw = static_cast<int>(rawFloat + 0.5f);
+                                        rawMin = std::min(rawMin, raw);
+                                        rawMax = std::max(rawMax, raw);
+                                        ++weightedInfluences;
+                                        if (paletteCount && (raw < 0 || static_cast<uint32_t>(raw) >= paletteCount))
+                                            ++invalidInfluences;
+                                    }
+                                }
+                            }
+                            std::cout << " raw=" << rawMin << ".." << rawMax
+                                      << " influences=" << weightedInfluences
+                                      << " invalid=" << invalidInfluences;
+                        }
+                        std::cout << std::dec << std::endl;
+                    }
+                }
+            }
+            if (itemType != 3 || payload <= 0 || static_cast<uint64_t>(payload) + 20 > blob.size())
+                continue;
+
+            uint32_t nameRel = 0, setCount = 0, setsRel = 0, ownerRel = 0, extraRel = 0;
+            readU32(static_cast<size_t>(payload) + 0, nameRel);
+            readU32(static_cast<size_t>(payload) + 4, setCount);
+            readU32(static_cast<size_t>(payload) + 8, setsRel);
+            readU32(static_cast<size_t>(payload) + 12, ownerRel);
+            readU32(static_cast<size_t>(payload) + 16, extraRel);
+            std::cout << "    morph name_rel=0x" << std::hex << nameRel
+                      << " set_count=" << std::dec << setCount
+                      << " sets=0x" << std::hex << (setsRel ? relocation + setsRel : 0)
+                      << " owner=0x" << (ownerRel ? relocation + ownerRel : 0)
+                      << " extra=0x" << (extraRel ? relocation + extraRel : 0)
+                      << std::dec << std::endl;
+
+            const int64_t sets = setsRel ? relocation + setsRel : 0;
+            if (sets <= 0 || static_cast<uint64_t>(sets) + 12ull * setCount > blob.size()) continue;
+            for (uint32_t setIndex = 0; setIndex < setCount; ++setIndex) {
+                uint32_t key = 0, targetCount = 0, targetsRel = 0;
+                const size_t setOffset = static_cast<size_t>(sets) + 12u * setIndex;
+                readU32(setOffset + 0, key);
+                readU32(setOffset + 4, targetCount);
+                readU32(setOffset + 8, targetsRel);
+                std::cout << "      set[" << setIndex << "] key=0x" << std::hex << key
+                          << " target_count=" << std::dec << targetCount
+                          << " targets=0x" << std::hex
+                          << (targetsRel ? relocation + targetsRel : 0) << std::dec << std::endl;
+            }
+        }
+    }
+    return 0;
+}
+
+struct HeadlessPcmSection {
+    uint32_t vertexCount = 0;
+    uint32_t vertexOffset = 0;
+    uint32_t stride = 0;
+};
+
+static bool ReadHeadlessPcmSections(const std::vector<uint8_t>& pcm,
+                                    std::vector<HeadlessPcmSection>& sections,
+                                    std::string& error) {
+    auto u32 = [&](size_t offset, uint32_t& value) {
+        if (offset > pcm.size() || 4 > pcm.size() - offset) return false;
+        std::memcpy(&value, pcm.data() + offset, 4);
+        return true;
+    };
+    uint32_t magic = 0, itemCount = 0, table = 0, imageBase = 0;
+    if (!u32(0, magic) || magic != UsmMorph::PCM_MAGIC || !u32(8, itemCount) ||
+        !u32(12, table) || !u32(16, imageBase) || table < imageBase) {
+        error = "invalid PCM header";
+        return false;
+    }
+    table -= imageBase;
+    if (itemCount > 4096 || table > pcm.size() ||
+        12ull * itemCount > pcm.size() - table) {
+        error = "PCM item table is out of range";
+        return false;
+    }
+    size_t lod = 0;
+    for (uint32_t item = 0; item < itemCount; ++item) {
+        const size_t record = table + 12u * item;
+        if (pcm[record + 3] != 2) continue;
+        uint32_t relative = 0;
+        u32(record + 4, relative);
+        if (relative >= imageBase && relative - imageBase < pcm.size()) {
+            lod = relative - imageBase;
+            break;
+        }
+    }
+    uint32_t sectionCount = 0, sectionTable = 0;
+    if (!lod || !u32(lod + 8, sectionCount) || !u32(lod + 12, sectionTable) ||
+        sectionTable < imageBase) {
+        error = "PCM has no valid LOD section table";
+        return false;
+    }
+    sectionTable -= imageBase;
+    if (sectionCount > 4096 || sectionTable > pcm.size() ||
+        8ull * sectionCount > pcm.size() - sectionTable) {
+        error = "PCM LOD section table is out of range";
+        return false;
+    }
+    sections.resize(sectionCount);
+    for (uint32_t sectionIndex = 0; sectionIndex < sectionCount; ++sectionIndex) {
+        uint32_t sectionOffset = 0;
+        u32(sectionTable + 8u * sectionIndex + 4, sectionOffset);
+        if (sectionOffset < imageBase || sectionOffset - imageBase > pcm.size() ||
+            76 > pcm.size() - (sectionOffset - imageBase)) {
+            error = "PCM mesh section is out of range";
+            return false;
+        }
+        sectionOffset -= imageBase;
+        auto& section = sections[sectionIndex];
+        u32(sectionOffset + 56, section.vertexCount);
+        u32(sectionOffset + 60, section.vertexOffset);
+        u32(sectionOffset + 72, section.stride);
+        if (section.vertexOffset < imageBase) {
+            error = "PCM vertex pointer precedes its image base";
+            return false;
+        }
+        section.vertexOffset -= imageBase;
+        const uint64_t byteCount = static_cast<uint64_t>(section.vertexCount) * section.stride;
+        if (section.stride < 12 || section.vertexOffset > pcm.size() ||
+            byteCount > pcm.size() - section.vertexOffset) {
+            error = "PCM vertex payload is out of range";
+            return false;
+        }
+    }
+    return true;
+}
+
+static int ValidateMorphPacksHeadless(const std::string& packDirArg) {
+    const fs::path packDir = fs::absolute(packDirArg);
+    if (!fs::is_directory(packDir)) {
+        std::cerr << "Pack directory does not exist: " << packDir.string() << std::endl;
+        return 2;
+    }
+
+    SpiderManTool names;
+    LoadBestDictionaryForPack(names, packDir);
+
+    uint64_t packCount = 0, morphFileCount = 0, setCount = 0;
+    uint64_t sectionRecordCount = 0, positionStreamCount = 0, changedVertexCount = 0;
+    uint64_t neutralVertexCount = 0, externalMeshCount = 0, failureCount = 0;
+    uint64_t visemeStreamCount = 0, visemeFrameCount = 0, visemeWeightCount = 0;
+    for (const auto& directoryEntry : fs::directory_iterator(packDir)) {
+        if (!directoryEntry.is_regular_file()) continue;
+        std::string extension = directoryEntry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (extension != ".pcpack") continue;
+        ++packCount;
+
+        std::ifstream input(directoryEntry.path(), std::ios::binary | std::ios::ate);
+        if (!input) { ++failureCount; continue; }
+        const size_t fileSize = static_cast<size_t>(input.tellg());
+        input.seekg(0);
+        std::vector<uint8_t> blob(fileSize);
+        input.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+        const PackDirectory directory = PackDirectory::Parse(blob);
+        if (!directory.valid) { ++failureCount; continue; }
+
+        const bool packHasMorph = std::any_of(directory.resources.begin(), directory.resources.end(),
+            [](const PackResourceEntry& resource) { return resource.type == RES_KEY_MORPH; });
+        for (const auto& animationResource : directory.resources) {
+            if (animationResource.type != RES_KEY_VISEME_STREAM) continue;
+            ++visemeStreamCount;
+            if (animationResource.offset > blob.size() ||
+                animationResource.size > blob.size() - animationResource.offset) {
+                ++failureCount;
+                std::cerr << "[VISEME FAIL] " << directoryEntry.path().filename().string()
+                          << " resource extent is out of range" << std::endl;
+                continue;
+            }
+            std::vector<uint8_t> streamBytes(
+                blob.begin() + animationResource.offset,
+                blob.begin() + animationResource.offset + animationResource.size);
+            const UsmViseme::Stream stream = UsmViseme::Parse(streamBytes);
+            if (!stream.valid) {
+                ++failureCount;
+                std::cerr << "[VISEME FAIL] " << directoryEntry.path().filename().string()
+                          << " hash=0x" << std::hex << animationResource.hash << std::dec
+                          << ": " << (stream.warnings.empty() ? "parser rejected resource" :
+                                      stream.warnings.front()) << std::endl;
+                continue;
+            }
+            visemeFrameCount += stream.frame_count;
+            visemeWeightCount += stream.weights.size();
+            if (packHasMorph) {
+                const auto nameIt = names.dictionary.find(animationResource.hash);
+                std::cout << "[MORPH TIMELINE] " << directoryEntry.path().filename().string()
+                          << " hash=0x" << std::hex << animationResource.hash << std::dec;
+                if (nameIt != names.dictionary.end()) std::cout << " name=" << nameIt->second;
+                std::cout << " channels=" << stream.channel_count
+                          << " format=" << stream.format
+                          << " frames=" << stream.frame_count
+                          << " fps=" << stream.sample_rate
+                          << " field_10=" << stream.field_10 << std::endl;
+            }
+        }
+
+        for (const auto& morphResource : directory.resources) {
+            if (morphResource.type != RES_KEY_MORPH) continue;
+            ++morphFileCount;
+            const auto nameIt = names.dictionary.find(morphResource.hash);
+            std::cout << "[MORPH RESOURCE] " << directoryEntry.path().filename().string()
+                      << " hash=0x" << std::hex << morphResource.hash << std::dec;
+            if (nameIt != names.dictionary.end()) std::cout << " name=" << nameIt->second;
+            std::cout << std::endl;
+            auto fail = [&](const std::string& message) {
+                ++failureCount;
+                std::cerr << "[MORPH FAIL] " << directoryEntry.path().filename().string()
+                          << " hash=0x" << std::hex << morphResource.hash << std::dec
+                          << ": " << message << std::endl;
+            };
+            if (morphResource.offset > blob.size() ||
+                morphResource.size > blob.size() - morphResource.offset) {
+                fail("resource extent is out of range");
+                continue;
+            }
+            std::vector<uint8_t> morphBytes(
+                blob.begin() + morphResource.offset,
+                blob.begin() + morphResource.offset + morphResource.size);
+            const UsmMorph::File morph = UsmMorph::Parse(morphBytes);
+            if (!morph.valid) {
+                fail(morph.warnings.empty() ? "parser rejected resource" : morph.warnings.front());
+                continue;
+            }
+
+            const PackResourceEntry* meshResource = nullptr;
+            for (const auto& candidate : directory.resources) {
+                if (candidate.type == RES_KEY_MESH && candidate.hash == morphResource.hash) {
+                    meshResource = &candidate;
+                    break;
+                }
+            }
+            if (!meshResource || meshResource->offset > blob.size() ||
+                meshResource->size > blob.size() - meshResource->offset) {
+
+                ++externalMeshCount;
+                continue;
+            }
+            std::vector<uint8_t> pcmBytes(blob.begin() + meshResource->offset,
+                                          blob.begin() + meshResource->offset + meshResource->size);
+            std::vector<HeadlessPcmSection> pcmSections;
+            std::string pcmError;
+            if (!ReadHeadlessPcmSections(pcmBytes, pcmSections, pcmError)) {
+                fail(pcmError);
+                continue;
+            }
+
+            bool resourceFailed = false;
+            setCount += morph.sets.size();
+            for (size_t targetIndex = 0; targetIndex < morph.sets.size(); ++targetIndex) {
+                const auto& target = morph.sets[targetIndex];
+                if (target.sections.size() != pcmSections.size()) {
+                    fail("target " + std::to_string(targetIndex) + " section count differs from PCM");
+                    resourceFailed = true;
+                    break;
+                }
+                sectionRecordCount += target.sections.size();
+                for (size_t sectionIndex = 0; sectionIndex < target.sections.size(); ++sectionIndex) {
+                    const auto& section = target.sections[sectionIndex];
+                    const auto& pcmSection = pcmSections[sectionIndex];
+
+                    if (section.vertex_count != 0 &&
+                        section.vertex_count != pcmSection.vertexCount) {
+                        fail("target " + std::to_string(targetIndex) + " section " +
+                             std::to_string(sectionIndex) + " vertex count differs from PCM");
+                        resourceFailed = true;
+                        break;
+                    }
+                    if (section.position.values.empty()) continue;
+                    ++positionStreamCount;
+                    for (uint8_t changed : section.position.changed) changedVertexCount += changed != 0;
+                    if (targetIndex != 0) continue;
+
+                    for (size_t vertex = 0; vertex < section.position.values.size(); ++vertex) {
+                        const size_t pcmPosition = pcmSection.vertexOffset + vertex * pcmSection.stride;
+                        if (std::memcmp(section.position.values[vertex].data(),
+                                        pcmBytes.data() + pcmPosition, 12) != 0) {
+                            fail("neutral position bits differ at section " +
+                                 std::to_string(sectionIndex) + " vertex " +
+                                 std::to_string(vertex));
+                            resourceFailed = true;
+                            break;
+                        }
+                        ++neutralVertexCount;
+                    }
+                    if (resourceFailed) break;
+                }
+                if (resourceFailed) break;
+            }
+        }
+    }
+
+    return failureCount == 0 ? 0 : 1;
+}
+
+static int InspectAnimationMorphHeadless(const std::string& packArg) {
+    const fs::path packPath = fs::absolute(packArg);
+    if (!fs::exists(packPath)) {
+        std::cerr << "Pack does not exist: " << packPath.string() << std::endl;
+        return 2;
+    }
+
+    SpiderManTool tool;
+    const fs::path packDir = packPath.parent_path();
+    tool.searchPath = packDir.string();
+    LoadBestDictionaryForPack(tool, packDir);
+    for (const auto& entry : fs::directory_iterator(packDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (ext == ".pcpack") tool.foundPacks.push_back(entry.path());
+    }
+    std::sort(tool.foundPacks.begin(), tool.foundPacks.end());
+    tool.BuildGlobalSkeletonIndex();
+    tool.OpenPCPack(packPath.string());
+
+    std::cout << "SKELETON_CANDIDATES count=" << tool.skeletonCandidates.size() << std::endl;
+    for (size_t skeletonIndex = 0; skeletonIndex < tool.skeletonCandidates.size(); ++skeletonIndex) {
+        const auto& candidate = tool.skeletonCandidates[skeletonIndex];
+        if (!candidate.data) continue;
+        const auto& skeleton = *candidate.data;
+        std::cout << "  skeleton[" << skeletonIndex << "] name=" << candidate.name
+                  << " hash=0x" << std::hex << candidate.hash << std::dec
+                  << " kind=" << skeleton.skeleton_kind
+                  << " slots=" << skeleton.generic_component_slot_count
+                  << " pose_size=" << skeleton.generic_pose_size << std::endl;
+        if (!skeleton.generic_default_pose.empty()) {
+            std::cout << "    generic_default_pose=";
+            for (uint8_t byte : skeleton.generic_default_pose) {
+                static constexpr char digits[] = "0123456789abcdef";
+                std::cout << digits[byte >> 4] << digits[byte & 15];
+            }
+            std::cout << std::endl;
+        }
+        for (const auto& [boneIndex, boneName] : skeleton.bone_map) {
+            const auto parentIt = skeleton.parent_map.find(boneIndex);
+            const int parentIndex = parentIt == skeleton.parent_map.end() ? -1 : parentIt->second;
+            std::cout << "    bone[" << boneIndex << "] name=" << boneName
+                      << " parent=" << parentIndex << std::endl;
+        }
+        for (size_t componentIndex = 0; componentIndex < skeleton.components.size(); ++componentIndex) {
+            const auto& component = skeleton.components[componentIndex];
+            std::cout << "    component[" << componentIndex << "] slot="
+                      << component.component_index << " type=" << component.type_name
+                      << " hash=0x" << std::hex << component.type_id << std::dec
+                      << " flags=0x" << std::hex << component.component_flags << std::dec
+                      << " bones=" << component.bone_indices.size()
+                      << " skel_bytes=" << component.raw_skel_block.size()
+                      << " pose_bytes=" << component.raw_default_pose_block.size() << std::endl;
+            if (component.type_id == NalCompType::ArbitraryPO) {
+                std::cout << "      arb_header=";
+                for (uint32_t value : component.arb_header) std::cout << value << ',';
+                std::cout << " eval_order=";
+                for (uint32_t value : component.arb_eval_order) std::cout << value << ',';
+                std::cout << std::endl;
+                for (size_t nodeIndex = 0; nodeIndex < component.arb_nodes.size(); ++nodeIndex) {
+                    const auto& node = component.arb_nodes[nodeIndex];
+                    std::cout << "      arb_node[" << nodeIndex << "] name=" << node.name
+                              << " matrix=" << node.my_matrix_ix
+                              << " parent=" << node.parent_matrix_ix
+                              << " quat=" << node.quat_ix
+                              << " pos=" << node.pos_ix
+                              << " quat_anim=" << node.is_quat_anim
+                              << " pos_anim=" << node.is_pos_anim << std::endl;
+                }
+            }
+            if (component.type_id == NalCompType::Tentacles) {
+                std::cout << "      tentacle_default=";
+                for (size_t valueIndex = 0;
+                     valueIndex < component.default_pose.tentacle_values.size(); ++valueIndex) {
+                    if (valueIndex) std::cout << ',';
+                    std::cout << component.default_pose.tentacle_values[valueIndex];
+                }
+                std::cout << std::endl;
+            }
+        }
+        for (size_t infoIndex = 0; infoIndex < skeleton.generic_component_infos.size(); ++infoIndex) {
+            const auto& info = skeleton.generic_component_infos[infoIndex];
+            std::cout << "    info[" << infoIndex << "] type=" << info.type_name
+                      << " hash=0x" << std::hex << info.type_hash << std::dec
+                      << " first=" << info.first_component
+                      << " count=" << info.component_count
+                      << " pose_offset=" << info.pose_offset << std::endl;
+        }
+    }
+
+    if (!tool.loadedAnimFile) {
+        std::cout << "ANIMATIONS count=0" << std::endl;
+        return 0;
+    }
+    std::cout << "ANIMATIONS count=" << tool.loadedAnimFile->animations.size() << std::endl;
+    for (size_t animationIndex = 0;
+         animationIndex < tool.loadedAnimFile->animations.size(); ++animationIndex) {
+        const auto& animation = tool.loadedAnimFile->animations[animationIndex];
+        std::cout << "  animation[" << animationIndex << "] name=" << animation.name
+                  << " frames=" << animation.frame_count
+                  << " t_scale=" << animation.t_scale
+                  << " current_time=" << animation.current_time
+                  << " generic=" << (animation.is_gen_anim() ? 1 : 0)
+                  << " decoded=" << (animation.generic_decoded.complete ? 1 : 0)
+                  << " warnings=" << animation.generic_decoded.warnings.size();
+        if (animation.skeleton) std::cout << " skeleton=" << animation.skeleton->name;
+        std::cout << std::endl;
+        for (size_t componentIndex = 0; componentIndex < animation.components.size(); ++componentIndex) {
+            const auto& component = animation.components[componentIndex];
+            std::cout << "    component[" << componentIndex << "] comp_ix=" << component.comp_ix
+                      << " slot=" << component.slot_ix << " type=0x" << std::hex
+                      << component.type_hash << " mask=0x" << component.mask << std::dec
+                      << " tracks=" << component.ntracks
+                      << " codecs=" << component.codec_ixs.size()
+                      << " encoded_bytes=" << component.encoded_data.size()
+                      << " decoded_frames=" << component.decoded.frames.size();
+            if (!component.decode_error.empty())
+                std::cout << " error=" << component.decode_error;
+            if (component.comp_ix == NalComp::TENTACLE && !component.decoded.frames.empty()) {
+                float minimum = std::numeric_limits<float>::max();
+                float maximum = std::numeric_limits<float>::lowest();
+                for (const auto& frame : component.decoded.frames) {
+                    for (float value : frame) {
+                        minimum = std::min(minimum, value);
+                        maximum = std::max(maximum, value);
+                    }
+                }
+                std::cout << " value_range=" << minimum << ".." << maximum;
+            }
+            std::cout << std::endl;
+        }
+        for (const auto& warning : animation.generic_decoded.warnings)
+            std::cout << "    warning: " << warning << std::endl;
+    }
+    return 0;
+}
+
+static int ScanAnimationFailuresHeadless(const std::string& packDirArg) {
+    const fs::path packDir = fs::absolute(packDirArg);
+    if (!fs::is_directory(packDir)) return 2;
+    SpiderManTool tool;
+    tool.searchPath = packDir.string();
+    LoadBestDictionaryForPack(tool, packDir);
+    for (const auto& entry : fs::directory_iterator(packDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (extension == ".pcpack") tool.foundPacks.push_back(entry.path());
+    }
+    std::sort(tool.foundPacks.begin(), tool.foundPacks.end());
+    tool.BuildGlobalSkeletonIndex();
+    uint64_t animationCount = 0, genericWarningCount = 0, componentFailureCount = 0;
+    for (const auto& packPath : tool.foundPacks) {
+        tool.OpenPCPack(packPath.string());
+        if (!tool.loadedAnimFile) continue;
+        for (const auto& animation : tool.loadedAnimFile->animations) {
+            ++animationCount;
+            if (animation.is_gen_anim() && !animation.generic_decoded.complete) {
+                ++genericWarningCount;
+                std::cout << "[GENERIC WARN] " << packPath.filename().string()
+                          << " / " << animation.name;
+                for (const auto& warning : animation.generic_decoded.warnings)
+                    std::cout << " | " << warning;
+                std::cout << std::endl;
+            }
+            for (const auto& component : animation.components) {
+                if (component.decode_error.empty()) continue;
+                ++componentFailureCount;
+                std::cout << "[COMPONENT FAIL] " << packPath.filename().string()
+                          << " / " << animation.name << " / " << component.comp_ix
+                          << " | " << component.decode_error << std::endl;
+            }
+        }
+    }
+    return componentFailureCount == 0 ? 0 : 21;
+}
+
 static int ValidateAllPacksHeadless(const std::string& packDirArg) {
     fs::path packDir = fs::absolute(packDirArg);
     if (!fs::is_directory(packDir)) {
@@ -133,13 +799,12 @@ static int ValidateAllPacksHeadless(const std::string& packDirArg) {
     uint64_t pcmCount = 0;
     uint64_t convertedPcmCount = 0;
     uint64_t nonRenderablePcmCount = 0;
+    uint64_t morphAnimationCount = 0;
     uint64_t warningCount = 0;
     uint64_t failureCount = 0;
 
     for (size_t packIndex = 0; packIndex < tool.foundPacks.size(); ++packIndex) {
         const fs::path& packPath = tool.foundPacks[packIndex];
-        std::cout << "[VALIDATE " << (packIndex + 1) << "/" << tool.foundPacks.size()
-                  << "] " << packPath.filename().string() << std::endl;
         try {
             tool.OpenPCPack(packPath.string());
             if (!tool.currentDir.valid) {
@@ -174,13 +839,23 @@ static int ValidateAllPacksHeadless(const std::string& packDirArg) {
                     warningCount += animation.warnings.size();
                     componentCount += animation.components.size();
                     if (animation.is_gen_anim()) {
+                        bool hasMorphTrack = false;
+                        for (const auto& warning : animation.generic_decoded.warnings) {
+                            if (warning.find("USMMorph generic tracks") != std::string::npos) {
+                                hasMorphTrack = true;
+                                break;
+                            }
+                        }
+                        if (hasMorphTrack) {
+                            ++morphAnimationCount;
+                        }
                         if (!animation.generic_decoded.complete) {
-                            std::cerr << "[FAIL] generic animation did not decode: "
+
+                            std::cerr << "[WARN] non-renderable generic animation: "
                                       << packPath.filename().string() << " / "
                                       << animation.name << std::endl;
                             for (const auto& warning : animation.generic_decoded.warnings)
                                 std::cerr << "       " << warning << std::endl;
-                            ++failureCount;
                         }
                         decodedFrameCount += animation.generic_decoded.world_frames.size();
                         for (const auto& frame : animation.generic_decoded.world_frames) {
@@ -246,8 +921,7 @@ static int ValidateAllPacksHeadless(const std::string& packDirArg) {
                 if (fs::exists(probePath, fsError) && fs::file_size(probePath, fsError) >= 20) {
                     ++convertedPcmCount;
                 } else {
-                    // Some PCM resources contain helpers/collision data with no
-                    // renderable type-512 LOD. They still passed bounds parsing.
+
                     ++nonRenderablePcmCount;
                 }
                 fs::remove(probePath, fsError);
@@ -263,20 +937,6 @@ static int ValidateAllPacksHeadless(const std::string& packDirArg) {
     }
 
     fs::remove(scratchDir, fsError);
-    std::cout << "VALIDATION_SUMMARY"
-              << " packs=" << tool.foundPacks.size()
-              << " resources=" << resourceCount
-              << " skeletons=" << skeletonCount
-              << " animations=" << animationCount
-              << " components=" << componentCount
-              << " decoded_frames=" << decodedFrameCount
-              << " decoded_values=" << decodedValueCount
-              << " pcms=" << pcmCount
-              << " converted_pcms=" << convertedPcmCount
-              << " nonrenderable_pcms=" << nonRenderablePcmCount
-              << " warnings=" << warningCount
-              << " failures=" << failureCount
-              << std::endl;
     return failureCount == 0 ? 0 : 10;
 }
 
@@ -294,11 +954,17 @@ static int TestPreviewTabCacheHeadless() {
     firstMesh.vbo = 102;
     firstMesh.ebo = 103;
     tool.previewMeshes.push_back(firstMesh);
+    tool.proceduralTentacleMesh.vao = 111;
+    tool.proceduralTentacleMesh.vbo = 112;
+    tool.proceduralTentacleMesh.ebo = 113;
     tool.isModelLoaded = true;
     tool.isModelPreview = true;
     tool.camPos[0] = 11.0f;
     tool.animPlaybackTime = 3.25f;
     tool.loadedSkeletonName = "first_skeleton";
+    tool.loadedVisemeStreams.resize(1);
+    tool.loadedVisemeStreams[0].name = "first_viseme";
+    tool.selectedVisemeIndex = 0;
     tool.StoreActivePreviewTab();
 
     RenderMesh secondMesh{};
@@ -310,31 +976,111 @@ static int TestPreviewTabCacheHeadless() {
     second.modelLoaded = true;
     second.modelPreview = true;
     second.meshes.push_back(secondMesh);
+    second.proceduralTentacleMesh.vao = 211;
+    second.proceduralTentacleMesh.vbo = 212;
+    second.proceduralTentacleMesh.ebo = 213;
     second.camPos[0] = 22.0f;
     second.animPlaybackTime = 7.5f;
     second.loadedSkeletonName = "second_skeleton";
+    second.loadedVisemeStreams.resize(1);
+    second.loadedVisemeStreams[0].name = "second_viseme";
+    second.selectedVisemeIndex = 0;
 
     tool.ActivatePreviewTab(1);
     const bool secondRestored = tool.previewMeshes.size() == 1 &&
-        tool.previewMeshes[0].vao == 201 && tool.camPos[0] == 22.0f &&
-        tool.animPlaybackTime == 7.5f && tool.loadedSkeletonName == "second_skeleton";
+        tool.previewMeshes[0].vao == 201 && tool.proceduralTentacleMesh.vao == 211 &&
+        tool.camPos[0] == 22.0f &&
+        tool.animPlaybackTime == 7.5f && tool.loadedSkeletonName == "second_skeleton" &&
+        tool.selectedVisemeIndex == 0 && tool.loadedVisemeStreams.size() == 1 &&
+        tool.loadedVisemeStreams[0].name == "second_viseme";
 
     tool.camPos[0] = 23.0f;
     tool.animPlaybackTime = 8.25f;
     tool.ActivatePreviewTab(0);
     const bool firstRestored = tool.previewMeshes.size() == 1 &&
-        tool.previewMeshes[0].vao == 101 && tool.camPos[0] == 11.0f &&
-        tool.animPlaybackTime == 3.25f && tool.loadedSkeletonName == "first_skeleton";
+        tool.previewMeshes[0].vao == 101 && tool.proceduralTentacleMesh.vao == 111 &&
+        tool.camPos[0] == 11.0f &&
+        tool.animPlaybackTime == 3.25f && tool.loadedSkeletonName == "first_skeleton" &&
+        tool.selectedVisemeIndex == 0 && tool.loadedVisemeStreams.size() == 1 &&
+        tool.loadedVisemeStreams[0].name == "first_viseme";
 
     tool.ActivatePreviewTab(1);
     const bool secondPreserved = tool.previewMeshes.size() == 1 &&
-        tool.previewMeshes[0].vao == 201 && tool.camPos[0] == 23.0f &&
-        tool.animPlaybackTime == 8.25f;
+        tool.previewMeshes[0].vao == 201 && tool.proceduralTentacleMesh.vao == 211 &&
+        tool.camPos[0] == 23.0f &&
+        tool.animPlaybackTime == 8.25f && tool.loadedVisemeStreams.size() == 1 &&
+        tool.loadedVisemeStreams[0].name == "second_viseme";
 
     const bool ok = secondRestored && firstRestored && secondPreserved;
-    std::cout << "PREVIEW_TAB_CACHE_SUMMARY switches=3 reloads=0 result="
-              << (ok ? "pass" : "fail") << std::endl;
     return ok ? 0 : 11;
+}
+
+static int TestVisemePlaybackHeadless(const std::string& packArg) {
+    const fs::path packPath = fs::absolute(packArg);
+    if (!fs::exists(packPath)) {
+        std::cerr << "Pack does not exist: " << packPath.string() << std::endl;
+        return 2;
+    }
+
+    SpiderManTool tool;
+    tool.searchPath = packPath.parent_path().string();
+    LoadBestDictionaryForPack(tool, packPath.parent_path());
+    tool.OpenPCPack(packPath.string());
+
+    const PackResourceEntry* morphResource = nullptr;
+    for (const auto& resource : tool.currentDir.resources) {
+        if (resource.type == RES_KEY_MORPH) {
+            morphResource = &resource;
+            break;
+        }
+    }
+    if (!morphResource || tool.loadedVisemeStreams.empty()) {
+        std::cerr << "Pack has no local PCMORPH/viseme pair" << std::endl;
+        return 12;
+    }
+    tool.LoadMorphForCurrentModel(morphResource->hash);
+    if (!tool.loadedMorphFile.valid) return 13;
+
+    int streamIndex = 0;
+    for (int index = 0; index < static_cast<int>(tool.loadedVisemeStreams.size()); ++index) {
+        if (tool.loadedVisemeStreams[index].name.find("_EDD_") != std::string::npos) {
+            streamIndex = index;
+            break;
+        }
+    }
+    const auto& stream = tool.loadedVisemeStreams[streamIndex];
+    if (tool.loadedMorphFile.sets.size() <= stream.channel_count) return 14;
+    tool.selectedAnimIndex = -1;
+    tool.selectedVisemeIndex = streamIndex;
+    tool.isAnimPlaying = true;
+    tool.animPlaybackTime = 0.0f;
+    tool.UpdateAnimationPlayback(0.0f);
+
+    auto weightsMatch = [&](uint32_t frame) {
+        const float* source = stream.frame(frame);
+        if (!source) return false;
+        for (uint32_t channel = 0; channel < stream.channel_count; ++channel) {
+            if (std::memcmp(&tool.morphTargetWeights[channel + 1],
+                            &source[channel], sizeof(float)) != 0) return false;
+        }
+        return true;
+    };
+    const bool frameZeroExact = weightsMatch(0);
+
+    tool.animPlaybackTime = 1.5f / static_cast<float>(stream.sample_rate);
+    tool.UpdateAnimationPlayback(0.0f);
+    const bool frameOneExact = stream.frame_count < 2 ||
+        (tool.currentAnimFrame == 1 && weightsMatch(1));
+
+    tool.animPlaybackTime = static_cast<float>(stream.frame_count) /
+                            static_cast<float>(stream.sample_rate);
+    tool.UpdateAnimationPlayback(1.0f / static_cast<float>(stream.sample_rate));
+    const bool stoppedNeutral = !tool.isAnimPlaying &&
+        std::all_of(tool.morphTargetWeights.begin(), tool.morphTargetWeights.end(),
+                    [](float value) { return value == 0.0f; });
+
+    const bool ok = frameZeroExact && frameOneExact && stoppedNeutral;
+    return ok ? 0 : 15;
 }
 
 int main(int argc, char** argv) {
@@ -344,15 +1090,35 @@ int main(int argc, char** argv) {
     if (argc >= 3 && std::string(argv[1]) == "--validate-all-packs") {
         return ValidateAllPacksHeadless(argv[2]);
     }
+    if (argc >= 3 && std::string(argv[1]) == "--inspect-morph-pack") {
+        return InspectMorphPackHeadless(argv[2]);
+    }
+    if (argc >= 3 && std::string(argv[1]) == "--inspect-animation-morph") {
+        return InspectAnimationMorphHeadless(argv[2]);
+    }
+    if (argc >= 3 && std::string(argv[1]) == "--scan-animation-failures") {
+        return ScanAnimationFailuresHeadless(argv[2]);
+    }
+    if (argc >= 3 && std::string(argv[1]) == "--validate-morph-packs") {
+        return ValidateMorphPacksHeadless(argv[2]);
+    }
+    if (argc >= 3 && std::string(argv[1]) == "--test-viseme-playback") {
+        return TestVisemePlaybackHeadless(argv[2]);
+    }
     if (argc >= 2 && std::string(argv[1]) == "--test-preview-tab-cache") {
         return TestPreviewTabCacheHeadless();
     }
 
     const bool testWorldInstancingGl =
         argc >= 2 && std::string(argv[1]) == "--test-world-instancing-gl";
+    const bool testMorphRenderGl =
+        argc >= 3 && std::string(argv[1]) == "--test-morph-render-gl";
+    const bool captureModelAnimationGl =
+        argc >= 5 && std::string(argv[1]) == "--capture-model-animation-gl";
 
     if (!glfwInit()) return 1;
-    if (testWorldInstancingGl) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    if (testWorldInstancingGl || testMorphRenderGl || captureModelAnimationGl)
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     const char* glsl_version = "#version 130";
     GLFWwindow* window = glfwCreateWindow(1024, 768, "Ultimate Spider-Browser", NULL, NULL);
     if (!window) return 1;
@@ -393,6 +1159,339 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     SpiderManTool tool;
+
+    if (captureModelAnimationGl) {
+        const fs::path packPath = fs::absolute(argv[2]);
+        const fs::path outputPath = fs::absolute(argv[3]);
+        const std::string animationName = argv[4];
+        const int requestedFrame = argc >= 6 ? std::max(0, std::atoi(argv[5])) : 0;
+        std::string requestedModel = argc >= 7 ? argv[6] : packPath.stem().string();
+        const float requestedOrbitDegrees = argc >= 8 ? std::strtof(argv[7], nullptr) : 0.0f;
+        std::transform(requestedModel.begin(), requestedModel.end(), requestedModel.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (!fs::exists(packPath)) return 22;
+
+        tool.InitModelPreview();
+        tool.searchPath = packPath.parent_path().string();
+        LoadBestDictionaryForPack(tool, packPath.parent_path());
+        for (const auto& entry : fs::directory_iterator(packPath.parent_path())) {
+            if (!entry.is_regular_file()) continue;
+            std::string extension = entry.path().extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+            if (extension == ".pcpack") tool.foundPacks.push_back(entry.path());
+        }
+        std::sort(tool.foundPacks.begin(), tool.foundPacks.end());
+
+        for (int packIndex = 0; packIndex < static_cast<int>(tool.foundPacks.size()); ++packIndex) {
+            tool.BuildGlobalTextureIndexStep(packIndex);
+        }
+        tool.OpenPCPack(packPath.string());
+
+        int modelIndex = -1;
+        int firstModelIndex = -1;
+        for (int index = 0; index < static_cast<int>(tool.entries.size()); ++index) {
+            if (!tool.entries[index].isPcm) continue;
+            if (firstModelIndex < 0) firstModelIndex = index;
+
+            std::string candidate = tool.entries[index].name;
+            std::transform(candidate.begin(), candidate.end(), candidate.begin(),
+                [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+            const fs::path candidatePath(candidate);
+            if (!requestedModel.empty() &&
+                (candidate == requestedModel || candidatePath.stem().string() == requestedModel)) {
+                modelIndex = index;
+                break;
+            }
+            if (!requestedModel.empty() && modelIndex < 0 &&
+                candidate.find(requestedModel) != std::string::npos) {
+                modelIndex = index;
+            }
+        }
+        if (modelIndex < 0) modelIndex = firstModelIndex;
+        if (modelIndex < 0) return 23;
+        tool.LoadModelToGL(modelIndex);
+        if (std::isfinite(requestedOrbitDegrees) && requestedOrbitDegrees != 0.0f) {
+            constexpr float kPi = 3.14159265358979323846f;
+            const float angle = requestedOrbitDegrees * kPi / 180.0f;
+            const float offsetX = tool.camPos[0] - tool.modelCenter[0];
+            const float offsetZ = tool.camPos[2] - tool.modelCenter[2];
+            tool.camPos[0] = tool.modelCenter[0] + offsetX * std::cos(angle) - offsetZ * std::sin(angle);
+            tool.camPos[2] = tool.modelCenter[2] + offsetX * std::sin(angle) + offsetZ * std::cos(angle);
+            tool.camFront[0] = tool.modelCenter[0] - tool.camPos[0];
+            tool.camFront[1] = tool.modelCenter[1] - tool.camPos[1];
+            tool.camFront[2] = tool.modelCenter[2] - tool.camPos[2];
+            const float frontLength = std::sqrt(tool.camFront[0] * tool.camFront[0] +
+                tool.camFront[1] * tool.camFront[1] + tool.camFront[2] * tool.camFront[2]);
+            if (frontLength > 0.0001f) {
+                tool.camFront[0] /= frontLength;
+                tool.camFront[1] /= frontLength;
+                tool.camFront[2] /= frontLength;
+            }
+        }
+
+        if (animationName == "scan") {
+            struct VertexBufferCopy {
+                std::vector<float> interleaved;
+            };
+            std::vector<VertexBufferCopy> copies(tool.previewMeshes.size());
+            for (size_t section = 0; section < tool.previewMeshes.size(); ++section) {
+                const auto& mesh = tool.previewMeshes[section];
+                const size_t floatCount = (mesh.positions.size() / 3) * 20;
+                copies[section].interleaved.resize(floatCount);
+                glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+                glGetBufferSubData(GL_ARRAY_BUFFER, 0,
+                    static_cast<GLsizeiptr>(floatCount * sizeof(float)),
+                    copies[section].interleaved.data());
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+            struct ScanResult {
+                std::string animation;
+                int frame = 0;
+                int section = 0;
+                uint16_t edgeA = 0;
+                uint16_t edgeB = 0;
+                float edgeRatio = 0.0f;
+            };
+            std::vector<ScanResult> results;
+            tool.captureEvaluatedSkinMatrices = true;
+            tool.skipDrawAfterPoseEvaluation = true;
+            tool.selectedVisemeIndex = -1;
+            if (tool.loadedAnimFile) {
+                for (int animationIndex = 0;
+                     animationIndex < static_cast<int>(tool.loadedAnimFile->animations.size());
+                     ++animationIndex) {
+                    const auto& animation = tool.loadedAnimFile->animations[animationIndex];
+                    const int frameCount = animation.playback_frame_count();
+                    float animationMax = 0.0f;
+                    int animationMaxFrame = 0, animationMaxSection = 0;
+                    uint16_t animationEdgeA = 0, animationEdgeB = 0;
+                    tool.selectedAnimIndex = animationIndex;
+                    for (int frame = 0; frame < frameCount; ++frame) {
+                        tool.currentAnimFrame = frame;
+                        tool.animFrameFraction = 0.0f;
+                        tool.RenderModelPreview();
+                        if (!tool.evaluatedSkinningActive ||
+                            tool.evaluatedGlobalBoneMatrices.empty()) continue;
+
+                        for (size_t section = 0; section < tool.previewMeshes.size(); ++section) {
+                            const auto& mesh = tool.previewMeshes[section];
+                            const auto& source = copies[section].interleaved;
+                            const size_t vertexCount = mesh.positions.size() / 3;
+                            if (source.size() != vertexCount * 20) continue;
+                            std::vector<std::array<float, 3>> deformed(vertexCount);
+                            for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+                                const float* v = source.data() + vertex * 20;
+                                float out[3] = {0.0f, 0.0f, 0.0f};
+                                float usedWeight = 0.0f;
+                                for (int influence = 0; influence < 4; ++influence) {
+                                    const float weight = v[12 + influence];
+                                    if (weight <= 0.0f) continue;
+                                    const int local = static_cast<int>(v[8 + influence] + 0.5f);
+                                    int global = local;
+                                    if (!mesh.bonePalette.empty()) {
+                                        if (local < 0 || local >= static_cast<int>(mesh.bonePalette.size()))
+                                            continue;
+                                        global = mesh.bonePalette[local];
+                                    }
+                                    if (global < 0 ||
+                                        static_cast<size_t>(global * 16 + 15) >=
+                                            tool.evaluatedGlobalBoneMatrices.size()) continue;
+                                    const float* matrix =
+                                        tool.evaluatedGlobalBoneMatrices.data() + global * 16;
+                                    out[0] += weight * (matrix[0] * v[0] + matrix[4] * v[1] +
+                                                       matrix[8] * v[2] + matrix[12]);
+                                    out[1] += weight * (matrix[1] * v[0] + matrix[5] * v[1] +
+                                                       matrix[9] * v[2] + matrix[13]);
+                                    out[2] += weight * (matrix[2] * v[0] + matrix[6] * v[1] +
+                                                       matrix[10] * v[2] + matrix[14]);
+                                    usedWeight += weight;
+                                }
+                                if (usedWeight < 0.999f) {
+                                    out[0] += (1.0f - usedWeight) * v[0];
+                                    out[1] += (1.0f - usedWeight) * v[1];
+                                    out[2] += (1.0f - usedWeight) * v[2];
+                                }
+                                deformed[vertex] = {out[0], out[1], out[2]};
+                            }
+
+                            float sectionMax = 0.0f;
+                            uint16_t sectionEdgeA = 0, sectionEdgeB = 0;
+                            auto edge = [&](uint16_t a, uint16_t b) {
+                                if (a >= vertexCount || b >= vertexCount || a == b) return;
+                                const float* pa = source.data() + static_cast<size_t>(a) * 20;
+                                const float* pb = source.data() + static_cast<size_t>(b) * 20;
+                                const float bx = pa[0] - pb[0], by = pa[1] - pb[1], bz = pa[2] - pb[2];
+                                const float baseLength = std::sqrt(bx * bx + by * by + bz * bz);
+                                if (baseLength < 1e-5f) return;
+                                const auto& da = deformed[a];
+                                const auto& db = deformed[b];
+                                const float dx = da[0] - db[0], dy = da[1] - db[1], dz = da[2] - db[2];
+                                const float ratio =
+                                    std::sqrt(dx * dx + dy * dy + dz * dz) / baseLength;
+                                if (ratio > sectionMax) {
+                                    sectionMax = ratio;
+                                    sectionEdgeA = a;
+                                    sectionEdgeB = b;
+                                }
+                            };
+                            if (mesh.mode == GL_TRIANGLES) {
+                                for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+                                    edge(mesh.indices[i], mesh.indices[i + 1]);
+                                    edge(mesh.indices[i + 1], mesh.indices[i + 2]);
+                                    edge(mesh.indices[i + 2], mesh.indices[i]);
+                                }
+                            } else {
+                                for (size_t i = 0; i + 2 < mesh.indices.size(); ++i) {
+                                    edge(mesh.indices[i], mesh.indices[i + 1]);
+                                    edge(mesh.indices[i + 1], mesh.indices[i + 2]);
+                                    edge(mesh.indices[i + 2], mesh.indices[i]);
+                                }
+                            }
+                            if (sectionMax > animationMax) {
+                                animationMax = sectionMax;
+                                animationMaxFrame = frame;
+                                animationMaxSection = static_cast<int>(section);
+                                animationEdgeA = sectionEdgeA;
+                                animationEdgeB = sectionEdgeB;
+                            }
+                        }
+                    }
+                    results.push_back({animation.name, animationMaxFrame,
+                                       animationMaxSection, animationEdgeA,
+                                       animationEdgeB, animationMax});
+                }
+            }
+            return 0;
+        }
+
+        int animationIndex = animationName == "none" ? -2 : -1;
+        if (animationIndex != -2 && tool.loadedAnimFile) {
+            for (int index = 0;
+                 index < static_cast<int>(tool.loadedAnimFile->animations.size()); ++index) {
+                if (tool.loadedAnimFile->animations[index].name == animationName) {
+                    animationIndex = index;
+                    break;
+                }
+            }
+        }
+        if (animationIndex == -1) return 24;
+        const NalAnimEntry* animation = animationIndex >= 0
+            ? &tool.loadedAnimFile->animations[animationIndex]
+            : nullptr;
+        tool.selectedAnimIndex = animationIndex;
+        tool.selectedVisemeIndex = -1;
+        tool.currentAnimFrame = animation
+            ? std::min(requestedFrame, std::max(0, animation->playback_frame_count() - 1))
+            : 0;
+        tool.animFrameFraction = 0.0f;
+        tool.animPlaybackTime = static_cast<float>(tool.currentAnimFrame) / 30.0f;
+        tool.isAnimPlaying = false;
+        tool.showSkeleton = true;
+        tool.captureEvaluatedSkinMatrices = true;
+        tool.RenderModelPreview();
+
+        constexpr int width = 3840;
+        constexpr int height = 2160;
+        std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+        std::vector<uint8_t> flipped(pixels.size());
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, tool.modelFbo);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        for (int row = 0; row < height; ++row) {
+            std::memcpy(flipped.data() + static_cast<size_t>(row) * width * 4,
+                        pixels.data() + static_cast<size_t>(height - 1 - row) * width * 4,
+                        static_cast<size_t>(width) * 4);
+        }
+        const int wrote = stbi_write_png(outputPath.string().c_str(), width, height, 4,
+                                         flipped.data(), width * 4);
+        return wrote ? 0 : 25;
+    }
+
+    if (testMorphRenderGl) {
+        const fs::path packPath = fs::absolute(argv[2]);
+        if (!fs::exists(packPath)) return 16;
+        tool.InitModelPreview();
+        tool.searchPath = packPath.parent_path().string();
+        LoadBestDictionaryForPack(tool, packPath.parent_path());
+        tool.OpenPCPack(packPath.string());
+
+        uint32_t morphHash = 0;
+        uint32_t requestedMorphHash = 0;
+        if (argc >= 4) {
+            try { requestedMorphHash = static_cast<uint32_t>(std::stoul(argv[3], nullptr, 0)); }
+            catch (...) { return 17; }
+        }
+        for (const auto& resource : tool.currentDir.resources) {
+            if (resource.type == RES_KEY_MORPH &&
+                (!requestedMorphHash || resource.hash == requestedMorphHash)) {
+                morphHash = resource.hash;
+                break;
+            }
+        }
+        int modelIndex = -1;
+        for (int index = 0; index < static_cast<int>(tool.entries.size()); ++index) {
+            if (tool.entries[index].isPcm && tool.entries[index].hash == morphHash) {
+                modelIndex = index;
+                break;
+            }
+        }
+        if (!morphHash || modelIndex < 0 || tool.loadedVisemeStreams.empty()) return 17;
+        tool.LoadModelToGL(modelIndex);
+        if (!tool.loadedMorphFile.valid || tool.previewMeshes.empty()) return 18;
+
+        int streamIndex = -1;
+        uint32_t sampleFrame = 0;
+        for (int candidate = 0;
+             candidate < static_cast<int>(tool.loadedVisemeStreams.size()) && streamIndex < 0;
+             ++candidate) {
+            const auto& stream = tool.loadedVisemeStreams[candidate];
+            for (uint32_t frame = 0; frame < stream.frame_count && streamIndex < 0; ++frame) {
+                const float* weights = stream.frame(frame);
+                for (uint32_t channel = 0; weights && channel < stream.channel_count; ++channel) {
+                    if (weights[channel] != 0.0f && channel + 1 < tool.loadedMorphFile.sets.size()) {
+                        streamIndex = candidate;
+                        sampleFrame = frame;
+                        break;
+                    }
+                }
+            }
+        }
+        if (streamIndex < 0) return 19;
+
+        const auto& stream = tool.loadedVisemeStreams[streamIndex];
+        tool.selectedAnimIndex = -1;
+        tool.selectedVisemeIndex = streamIndex;
+        tool.isAnimPlaying = true;
+        tool.animPlaybackTime = (static_cast<float>(sampleFrame) + 0.25f) /
+                                static_cast<float>(stream.sample_rate);
+        tool.UpdateAnimationPlayback(0.0f);
+        while (glGetError() != GL_NO_ERROR) {}
+        tool.ApplyMorphTargets();
+
+        bool cpuChanged = false;
+        bool gpuExact = false;
+        for (const auto& mesh : tool.previewMeshes) {
+            if (!mesh.vbo || mesh.morphVertexData.empty() || mesh.positions.size() % 3 != 0) continue;
+            const size_t vertexCount = mesh.positions.size() / 3;
+            for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+                const float* cpu = mesh.morphVertexData.data() + vertex * 20;
+                const float* base = mesh.positions.data() + vertex * 3;
+                if (cpu[0] == base[0] && cpu[1] == base[1] && cpu[2] == base[2]) continue;
+                cpuChanged = true;
+                float gpu[3] = {};
+                glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+                glGetBufferSubData(GL_ARRAY_BUFFER,
+                    static_cast<GLintptr>(vertex * 20 * sizeof(float)), sizeof(gpu), gpu);
+                gpuExact = std::memcmp(gpu, cpu, sizeof(gpu)) == 0;
+                break;
+            }
+            if (cpuChanged) break;
+        }
+        const GLenum glError = glGetError();
+        const bool ok = cpuChanged && gpuExact && glError == GL_NO_ERROR;
+        return ok ? 0 : 20;
+    }
 
     if (testWorldInstancingGl) {
         tool.InitModelPreview();
@@ -462,13 +1561,6 @@ int main(int argc, char** argv) {
         const bool bufferOk = instanceBufferBytes == (GLint)(2 * (17 * sizeof(float)));
         const bool ok = shaderLinked == GL_TRUE && instancingFunctionsLoaded &&
                         mesh.instanceDrawCount == 2 && bufferOk && drawError == GL_NO_ERROR;
-        std::cout << "WORLD_INSTANCING_GL_SUMMARY shader="
-                  << (shaderLinked == GL_TRUE ? "pass" : "fail")
-                  << " functions=" << (instancingFunctionsLoaded ? "pass" : "fail")
-                  << " instances=" << mesh.instanceDrawCount
-                  << " buffer_bytes=" << instanceBufferBytes
-                  << " draw=" << (drawError == GL_NO_ERROR ? "pass" : "fail")
-                  << " result=" << (ok ? "pass" : "fail") << std::endl;
         return ok ? 0 : 12;
     }
 
@@ -484,7 +1576,6 @@ int main(int argc, char** argv) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        // Update animation playback
         tool.UpdateAnimationPlayback(ImGui::GetIO().DeltaTime);
 
         RenderUI(tool);

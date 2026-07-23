@@ -1,6 +1,6 @@
-﻿static bool SkipSceneEntitySection(const std::vector<uint8_t>& data, size_t& cursor) {
+static bool SkipSceneEntitySection(const std::vector<uint8_t>& data, size_t& cursor) {
     if (cursor + 8 > data.size()) return false;
-    cursor += 4; // field_3C
+    cursor += 4;
     uint32_t groupCount = ReadU32LE(data, cursor);
     cursor += 4;
     if (groupCount > 10000) return false;
@@ -25,9 +25,7 @@
             cursor += 4;
             if (regionStringCount > 100000) return false;
             cursor = AlignUp(cursor, 8);
-            // OpenUSM uses fixedstring<8> here, which is 8 dwords (32 bytes),
-            // not an 8-byte string. Using 8 desyncs the later parse codes and
-            // makes lego maps disappear or get found at the wrong offset.
+
             if (cursor + (size_t)regionStringCount * 32 > data.size()) return false;
             cursor += (size_t)regionStringCount * 32;
         }
@@ -52,8 +50,7 @@ static bool SkipScenePayload(const std::vector<uint8_t>& data, uint32_t parseCod
         if (cursor + 4 > data.size()) return false;
         uint32_t triggerCount = ReadU32LE(data, cursor);
         if (triggerCount > 100000) return false;
-        // world_dynamics_system::un_mash_box_triggers uses fixedstring<8>
-        // (32 bytes), flags (4), convex_box (0x78), and vector3d (12).
+
         size_t bytes = 4 + (size_t)triggerCount * (32 + 4 + 0x78 + 12);
         if (cursor + bytes > data.size()) return false;
         cursor += bytes;
@@ -224,7 +221,7 @@ static std::vector<SceneEntityMashRecord> FindSceneEntityMashRecords(const std::
 
     if (parseCode != 0 || cursor + 8 > blockData.size()) return records;
 
-    cursor += 4; // field_3C
+    cursor += 4;
     uint32_t groupCount = ReadU32LE(blockData, cursor);
     cursor += 4;
     if (groupCount > 10000) return {};
@@ -320,8 +317,6 @@ static EntityMeshRef FindEntityMeshRef(
     if (hasSharedStart && scanRange(sharedStart, scanEnd, result)) return result;
     if (scanRange(rec.mashStart, scanEnd, result)) return result;
 
-    // OpenUSM passes the first mash in a scene entity group back into
-    // parse_entity_mash as the shared data pointer for the following entities.
     if (rec.sharedMashStart != rec.mashStart && rec.sharedMashSize >= 16) {
         size_t sharedMashEnd = std::min(rec.sharedMashStart + rec.sharedMashSize, blockData.size());
         uint32_t sharedOffset = ReadU32LE(blockData, rec.sharedMashStart + 8);
@@ -334,4 +329,3 @@ static EntityMeshRef FindEntityMeshRef(
 
     return result;
 }
-

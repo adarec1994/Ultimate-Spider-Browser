@@ -1,4 +1,4 @@
-﻿#include "world/common/WorldCommon.cpp"
+#include "world/common/WorldCommon.cpp"
 #include "world/unique/UniquePcms.cpp"
 #include "world/zones/ZoneChunks.cpp"
 #include "world/scene/SceneEntities.cpp"
