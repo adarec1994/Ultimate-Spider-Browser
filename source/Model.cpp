@@ -2719,13 +2719,8 @@ static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
     if (len > 0.0001f) { nx /= len; ny /= len; nz /= len; }
 }
 
-void SpiderManTool::LoadMorphForCurrentModel(uint32_t meshHash) {
-    loadedMorphFile = {};
-    morphTargetWeights.clear();
-    focusMorphsTab = false;
-    if (isWorldMode) return;
-
-    std::vector<uint8_t> bytes;
+bool SpiderManTool::FetchMorphBytesForHash(uint32_t meshHash, std::vector<uint8_t>& out) {
+    out.clear();
 
     // 1) Prefer a morph co-located in the currently open pack.
     if (!pcPackData.empty()) {
@@ -2733,9 +2728,9 @@ void SpiderManTool::LoadMorphForCurrentModel(uint32_t meshHash) {
             if (resource.type == RES_KEY_MORPH && resource.hash == meshHash &&
                 resource.size != 0 && resource.offset <= pcPackData.size() &&
                 resource.size <= pcPackData.size() - resource.offset) {
-                bytes.assign(pcPackData.begin() + resource.offset,
-                             pcPackData.begin() + resource.offset + resource.size);
-                break;
+                out.assign(pcPackData.begin() + resource.offset,
+                           pcPackData.begin() + resource.offset + resource.size);
+                return true;
             }
         }
     }
@@ -2743,21 +2738,28 @@ void SpiderManTool::LoadMorphForCurrentModel(uint32_t meshHash) {
     // 2) Otherwise resolve the same mesh's morph from any other pack. Character-viewer
     //    packs (CH_VWR_*) ship the head mesh but not the morph, which only lives in the
     //    cutscene/IGC packs; the mesh hash is identical there, so the morph still matches.
-    if (bytes.empty()) {
-        BuildGlobalMorphIndex();
-        auto it = globalMorphIndex.find(meshHash);
-        if (it != globalMorphIndex.end() && it->second.size != 0) {
-            std::ifstream f(it->second.packPath, std::ios::binary);
-            if (f.is_open()) {
-                std::vector<uint8_t> buf(it->second.size);
-                f.seekg(it->second.offset);
-                f.read(reinterpret_cast<char*>(buf.data()), it->second.size);
-                if (f.good()) bytes = std::move(buf);
-            }
+    BuildGlobalMorphIndex();
+    auto it = globalMorphIndex.find(meshHash);
+    if (it != globalMorphIndex.end() && it->second.size != 0) {
+        std::ifstream f(it->second.packPath, std::ios::binary);
+        if (f.is_open()) {
+            std::vector<uint8_t> buf(it->second.size);
+            f.seekg(it->second.offset);
+            f.read(reinterpret_cast<char*>(buf.data()), it->second.size);
+            if (f.good()) { out = std::move(buf); return true; }
         }
     }
+    return false;
+}
 
-    if (bytes.empty()) return;
+void SpiderManTool::LoadMorphForCurrentModel(uint32_t meshHash) {
+    loadedMorphFile = {};
+    morphTargetWeights.clear();
+    focusMorphsTab = false;
+    if (isWorldMode) return;
+
+    std::vector<uint8_t> bytes;
+    if (!FetchMorphBytesForHash(meshHash, bytes)) return;
 
     loadedMorphFile = UsmMorph::Parse(bytes);
     if (!loadedMorphFile.valid) {
@@ -4350,7 +4352,7 @@ void SpiderManTool::LoadModelToGL(int index) {
     }
 }
 
-void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath) {
+void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath, uint32_t meshHash) {
     ParseMaterialEntries(pcmData);
 
     BinaryReader br(pcmData);
@@ -4375,6 +4377,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         std::vector<float> pos, norm, uvs, weights;
         std::vector<uint16_t> joints, indices;
         float minP[3], maxP[3];
+        int sectionIndex = -1;   // PCM first-LOD section index, for aligning morph deltas
     };
     std::vector<SubmeshData> submeshes;
     std::vector<float> allIBMs;
@@ -4409,7 +4412,9 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             smRefs.push_back({matRef, smOfs});
         }
 
-        for(auto& [matRef, smOfs] : smRefs) {
+        for (size_t sectionIndex = 0; sectionIndex < smRefs.size(); ++sectionIndex) {
+            const auto [matRef, smOfs] = smRefs[sectionIndex];
+            (void)matRef;
             if (smOfs + 96 > pcmData.size()) continue;
 
             br.Seek(smOfs);
@@ -4433,6 +4438,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             bonePalette.load(pcmData, smOfs);
 
             SubmeshData sm;
+            sm.sectionIndex = (int)sectionIndex;
             sm.name = ReadName(meshNameRef);
             sm.textureName = mat.textureName;
             sm.isTranslucent = mat.isTranslucent;
@@ -4571,6 +4577,14 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     }
 
     SkinningGLBWriter writer;
+    // Resolve the mesh's morph (blend shapes) for export. Keyed by mesh hash; may live in
+    // another pack (see FetchMorphBytesForHash). Side-effect-free — does not touch UI state.
+    UsmMorph::File morphFile;
+    if (meshHash != 0) {
+        std::vector<uint8_t> morphBytes;
+        if (FetchMorphBytesForHash(meshHash, morphBytes))
+            morphFile = UsmMorph::Parse(morphBytes);
+    }
     std::vector<int> boneNodeIndices;
     std::vector<std::array<float, 16>> restLocalMatrices;
     std::vector<GlbExportQuat> restLocalQuatNal;
@@ -4793,6 +4807,31 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         ibmAccessor = writer.AddAccessor(ibmView, 5126, (int)totalBones, "MAT4");
     }
 
+    // Merged model: every submesh becomes a primitive of ONE glTF mesh -> a single object in
+    // Blender (the character's parts aren't modular). glTF requires all primitives in a mesh to
+    // share the same morph-target count, so every primitive declares the full set: face sections
+    // carry real POSITION deltas; all other primitives point at zero accessors (no bufferView =
+    // all zeros, free), so the shape keys exist consistently but move only the face.
+    auto sectionHasData = [&](int sectionIndex, int vertCount, size_t t) {
+        return morphFile.valid && sectionIndex >= 0 && vertCount > 0 && t < morphFile.sets.size() &&
+               sectionIndex < (int)morphFile.sets[t].sections.size() &&
+               morphFile.sets[t].sections[sectionIndex].vertex_count == (uint32_t)vertCount &&
+               (int)morphFile.sets[t].sections[sectionIndex].position.values.size() >= vertCount;
+    };
+    int morphTargetCount = (morphFile.valid && morphFile.sets.size() > 1)
+        ? (int)(morphFile.sets.size() - 1) : 0;
+    if (morphTargetCount > 0) {
+        bool anyReal = false;
+        for (auto& sm : submeshes) {
+            const int vc = (int)sm.pos.size() / 3;
+            for (size_t t = 1; t < morphFile.sets.size() && !anyReal; ++t)
+                if (sectionHasData(sm.sectionIndex, vc, t)) anyReal = true;
+            if (anyReal) break;
+        }
+        if (!anyReal) morphTargetCount = 0;   // morph didn't match this mesh; don't add dead keys
+    }
+
+    int meshIdx = writer.StartMesh(modelName);
     for (size_t si = 0; si < submeshes.size(); si++) {
         auto& sm = submeshes[si];
 
@@ -4821,15 +4860,47 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             weightAcc = writer.AddAccessor(weightView, 5126, (int)sm.weights.size() / 4, "VEC4");
         }
 
-        std::string meshName = sm.name.empty() ? "submesh_" + std::to_string(si) : sm.name;
-        int meshIdx = writer.StartMesh(meshName);
-        writer.AddPrimitive(posAcc, normAcc, uvAcc, indAcc, jointAcc, weightAcc, matIdx);
-        writer.EndMesh();
+        std::vector<int> morphPosAccessors;
+        if (morphTargetCount > 0) {
+            const int vertCount = (int)sm.pos.size() / 3;
+            for (size_t t = 1; t < morphFile.sets.size(); ++t) {
+                if (sectionHasData(sm.sectionIndex, vertCount, t)) {
+                    const auto& vals = morphFile.sets[t].sections[sm.sectionIndex].position.values;
+                    std::vector<float> built((size_t)vertCount * 3, 0.0f);
+                    float dmin[3] = {1e9f, 1e9f, 1e9f}, dmax[3] = {-1e9f, -1e9f, -1e9f};
+                    for (int v = 0; v < vertCount; ++v)
+                        for (int k = 0; k < 3; ++k) {
+                            float f = vals[v][k];
+                            built[(size_t)v * 3 + k] = f;
+                            dmin[k] = std::min(dmin[k], f);
+                            dmax[k] = std::max(dmax[k], f);
+                        }
+                    int dView = writer.AddBufferView(built.data(), built.size() * sizeof(float), 34962);
+                    morphPosAccessors.push_back(writer.AddAccessor(dView, 5126, vertCount, "VEC3", dmin, dmax));
+                } else {
+                    // This shape key doesn't move this primitive: free all-zero accessor.
+                    morphPosAccessors.push_back(writer.AddZeroAccessor(vertCount, "VEC3", 5126));
+                }
+            }
+        }
 
-        int skinIdx = (hasSkinning && jointAcc >= 0) ? 0 : -1;
-        int nodeIdx = writer.AddNode(meshName, meshIdx, skinIdx);
-        writer.AddToScene(nodeIdx);
+        writer.AddPrimitive(posAcc, normAcc, uvAcc, indAcc, jointAcc, weightAcc, matIdx, morphPosAccessors);
     }
+
+    std::vector<float> morphWeights;
+    std::vector<std::string> morphNames;
+    if (morphTargetCount > 0) {
+        morphWeights.assign(morphTargetCount, 0.0f);
+        for (int t = 1; t <= morphTargetCount; ++t) {
+            std::string nm = (t <= (int)UsmViseme::RETAIL_CHANNEL_COUNT) ? "Viseme " : "Shape ";
+            nm += (t < 10 ? "0" : "") + std::to_string(t);
+            morphNames.push_back(nm);
+        }
+    }
+    writer.EndMesh(morphWeights, morphNames);
+
+    int nodeIdx = writer.AddNode(modelName, meshIdx, hasSkinning ? 0 : -1);
+    writer.AddToScene(nodeIdx);
 
     int exportedAnimations = 0;
     if (hasSkinning && loadedAnimFile && loadedSkeleton && !restLocalMatrices.empty() && !boneNodeIndices.empty()) {

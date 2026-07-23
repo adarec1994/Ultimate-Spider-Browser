@@ -1826,7 +1826,7 @@ void SpiderManTool::RenderModelPreview() {
                 return a->comp_ix < b->comp_ix;
             });
 
-        for (const NalAnimComponent* compPtr : sortedComponents) {
+            wfor (const NalAnimComponent* compPtr : sortedComponents) {
             const NalAnimComponent& comp = *compPtr;
             if (frame0 < 0 || frame0 >= (int)comp.decoded.frames.size()) continue;
             const auto& fv0 = comp.decoded.frames[frame0];

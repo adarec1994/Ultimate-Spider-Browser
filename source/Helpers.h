@@ -249,6 +249,7 @@ class SkinningGLBWriter {
     std::vector<int> jointIndices;
     int skinRootIndex = -1;
     int meshCount = 0;
+    int primitiveInMesh = 0;   // primitives written in the current mesh, for comma separation
     int nodeCount = 0;
 
     void AlignBuffer() { while (buffer.size() % 4 != 0) buffer.push_back(0); }
@@ -374,15 +375,45 @@ public:
         return (int)accessors.size() - 1;
     }
 
+    int AddZeroAccessor(int count, const char* type, int componentType) {
+        // Accessor with no bufferView => all-zero values (valid glTF). Lets a merged mesh give
+        // every primitive the full morph-target set: primitives a shape key doesn't move point
+        // at a free zero accessor instead of storing a buffer full of zero deltas.
+        Accessor acc = {-1, componentType, count, type};
+        accessors.push_back(acc);
+        return (int)accessors.size() - 1;
+    }
+
     int StartMesh(const std::string& name) {
         if (meshCount > 0) meshesJson << ",";
         meshesJson << "{\"name\":\"" << JsonEscape(name) << "\",\"primitives\":[";
+        primitiveInMesh = 0;
         return meshCount++;
     }
 
-    void EndMesh() { meshesJson << "]}"; }
+    void EndMesh(const std::vector<float>& weights = {},
+                 const std::vector<std::string>& targetNames = {}) {
+        meshesJson << "]";
+        if (!weights.empty()) {
+            meshesJson << ",\"weights\":[";
+            for (size_t i = 0; i < weights.size(); ++i)
+                meshesJson << weights[i] << (i + 1 < weights.size() ? "," : "");
+            meshesJson << "]";
+        }
+        if (!targetNames.empty()) {
+            // Blender reads mesh.extras.targetNames as shape-key names.
+            meshesJson << ",\"extras\":{\"targetNames\":[";
+            for (size_t i = 0; i < targetNames.size(); ++i)
+                meshesJson << "\"" << JsonEscape(targetNames[i]) << "\""
+                           << (i + 1 < targetNames.size() ? "," : "");
+            meshesJson << "]}";
+        }
+        meshesJson << "}";
+    }
 
-    void AddPrimitive(int posAcc, int normAcc, int uvAcc, int indAcc, int jointAcc, int weightAcc, int matIdx = -1) {
+    void AddPrimitive(int posAcc, int normAcc, int uvAcc, int indAcc, int jointAcc, int weightAcc, int matIdx = -1,
+                      const std::vector<int>& morphPosAccessors = {}) {
+        if (primitiveInMesh++ > 0) meshesJson << ",";
         meshesJson << "{\"attributes\":{";
         meshesJson << "\"POSITION\":" << posAcc;
         if (normAcc >= 0) meshesJson << ",\"NORMAL\":" << normAcc;
@@ -393,6 +424,14 @@ public:
 
         if (matIdx >= 0) {
             meshesJson << ",\"material\":" << matIdx;
+        }
+        if (!morphPosAccessors.empty()) {
+            // glTF morph targets: one POSITION-delta accessor per target.
+            meshesJson << ",\"targets\":[";
+            for (size_t i = 0; i < morphPosAccessors.size(); ++i)
+                meshesJson << "{\"POSITION\":" << morphPosAccessors[i] << "}"
+                           << (i + 1 < morphPosAccessors.size() ? "," : "");
+            meshesJson << "]";
         }
         meshesJson << "}";
     }
@@ -527,7 +566,9 @@ public:
         json << "\"accessors\":[";
         for (size_t i = 0; i < accessors.size(); i++) {
             auto& acc = accessors[i];
-            json << "{\"bufferView\":" << acc.bufferView << ",\"componentType\":" << acc.componentType
+            json << "{";
+            if (acc.bufferView >= 0) json << "\"bufferView\":" << acc.bufferView << ",";
+            json << "\"componentType\":" << acc.componentType
                  << ",\"count\":" << acc.count << ",\"type\":\"" << acc.type << "\"";
             if (!acc.min.empty() && acc.min.size() == acc.max.size()) {
                 json << ",\"min\":[";

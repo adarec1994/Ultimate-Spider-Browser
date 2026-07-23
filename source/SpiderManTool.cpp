@@ -603,6 +603,50 @@ void SpiderManTool::BuildGlobalMorphIndex() {
     }
 }
 
+void SpiderManTool::BuildGlobalAnimIndex() {
+    if (globalAnimIndexBuilt) return;
+    globalAnimIndexBuilt = true;
+    globalAnimIndex.clear();
+
+    for (const auto& packPath : foundPacks) {
+        std::ifstream f(packPath, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) continue;
+        size_t fileSize = (size_t)f.tellg();
+        if (fileSize < 0x40) continue;
+
+        uint32_t mashSize = 0;
+        f.seekg(0x1C);
+        f.read((char*)&mashSize, 4);
+        if (mashSize < 0x40 || mashSize > fileSize) continue;
+
+        std::vector<uint8_t> dirBlob(mashSize);
+        f.seekg(0);
+        f.read((char*)dirBlob.data(), mashSize);
+        if (!f.good()) continue;
+
+        PackDirectory dir = PackDirectory::Parse(dirBlob);
+        if (!dir.valid) continue;
+
+        std::vector<AnimFileLocation> animLocs;
+        for (const auto& a : dir.animFiles) {
+            if (a.size >= 64 && (uint64_t)a.offset + a.size <= fileSize)
+                animLocs.push_back({packPath.string(), a.offset, a.size});
+        }
+        if (animLocs.empty()) continue;
+
+        // Index each anim file in this pack under every skeleton hash present in the same pack,
+        // so a model can find its clips by its skeleton hash.
+        std::vector<uint32_t> skelHashes;
+        for (const auto& s : dir.skeletons) skelHashes.push_back(s.nameHash);
+        for (const auto& r : dir.resources)
+            if (r.type == RES_KEY_NAL_SKL) skelHashes.push_back(r.hash);
+
+        for (uint32_t h : skelHashes)
+            for (const auto& loc : animLocs)
+                globalAnimIndex[h].push_back(loc);
+    }
+}
+
 std::shared_ptr<NalSkeletonData> SpiderManTool::LoadSkeletonFromLocation(const SkeletonLocation& loc) {
     std::ifstream f(loc.packPath, std::ios::binary);
     if (!f.is_open()) return nullptr;
@@ -680,12 +724,21 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
             skelRefs.push_back({cand.data->name_hash, cand.name, cand.data});
     }
 
-    struct AnimSource { uint32_t offset; uint32_t size; };
+    struct AnimSource { uint32_t offset; uint32_t size; std::vector<uint8_t> ownedBytes; };
     std::vector<AnimSource> sources;
     auto addAnimSource = [&](uint32_t offset, uint32_t size) {
         for (const auto& existing : sources)
-            if (existing.offset == offset) return;
-        sources.push_back({offset, size});
+            if (existing.ownedBytes.empty() && existing.offset == offset) return;
+        sources.push_back({offset, size, {}});
+    };
+    // A source's bytes come from the current pack (pcPackData at offset) unless it was resolved
+    // cross-pack, in which case it owns its bytes.
+    auto sourceData = [&](const AnimSource& s) -> const uint8_t* {
+        if (!s.ownedBytes.empty()) return s.ownedBytes.data();
+        return pcPackData.empty() ? nullptr : &pcPackData[s.offset];
+    };
+    auto sourceSize = [&](const AnimSource& s) -> size_t {
+        return s.ownedBytes.empty() ? s.size : s.ownedBytes.size();
     };
     if (currentDir.valid) {
         for (const auto& a : currentDir.animFiles) {
@@ -702,75 +755,116 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         if (sig == NAL_ANIM_CONTAINER) addAnimSource(e.offset, e.size);
     }
 
-    for (const auto& src : sources) {
-        int32_t numSkels = 0;
-        if ((size_t)src.offset + 64 > pcPackData.size()) continue;
-        memcpy(&numSkels, &pcPackData[src.offset + 12], 4);
-        for (int i = 0; i < numSkels; i++) {
-            size_t entryOff = (size_t)src.offset + 64 + (size_t)i * 32;
-            if (entryOff + 32 > pcPackData.size()) break;
-            uint32_t skelHash;
-            memcpy(&skelHash, &pcPackData[entryOff + 8], 4);
-
-            bool haveIt = false;
-            for (const auto& ref : skelRefs) {
-                if (ref.hash == skelHash) { haveIt = true; break; }
-            }
-            if (haveIt) continue;
-
-            BuildGlobalSkeletonIndex();
-            auto it = globalSkeletonIndex.find(skelHash);
-            if (it == globalSkeletonIndex.end()) continue;
-            auto skel = LoadSkeletonFromLocation(it->second);
-            if (!skel) continue;
-            skelRefs.push_back({skelHash, skel->name, skel});
-
-            SkeletonCandidate cand;
-            cand.data = skel;
-            cand.name = skel->name;
-            cand.hash = skelHash;
-            cand.entryIndex = -1;
-            skeletonCandidates.push_back(cand);
-            if (!loadedSkeleton) {
-                ActivateSkeletonCandidate((int)skeletonCandidates.size() - 1);
-            }
-
-        }
-    }
-
+    // Scan an anim source's referenced skeletons, resolve any missing ones cross-pack (adding
+    // them as candidates), then parse and merge its clips into `merged`. Shared by the current
+    // pack pass and the cross-pack fallback below.
     std::shared_ptr<NalAnimFile> merged;
-    for (const auto& src : sources) {
-        std::string tempPath = "temp_anim.pcanim";
-        {
-            std::ofstream tmp(tempPath, std::ios::binary);
-            if (!tmp.is_open()) continue;
-            tmp.write((const char*)&pcPackData[src.offset], src.size);
+    auto processSources = [&](const std::vector<AnimSource>& srcs) {
+        for (const auto& src : srcs) {
+            const uint8_t* d = sourceData(src);
+            const size_t n = sourceSize(src);
+            if (!d || n < 64) continue;
+            int32_t numSkels = 0;
+            memcpy(&numSkels, d + 12, 4);
+            for (int i = 0; i < numSkels; i++) {
+                size_t entryOff = 64 + (size_t)i * 32;
+                if (entryOff + 32 > n) break;
+                uint32_t skelHash;
+                memcpy(&skelHash, d + entryOff + 8, 4);
+
+                bool haveIt = false;
+                for (const auto& ref : skelRefs)
+                    if (ref.hash == skelHash) { haveIt = true; break; }
+                if (haveIt) continue;
+
+                BuildGlobalSkeletonIndex();
+                auto it = globalSkeletonIndex.find(skelHash);
+                if (it == globalSkeletonIndex.end()) continue;
+                auto skel = LoadSkeletonFromLocation(it->second);
+                if (!skel) continue;
+                skelRefs.push_back({skelHash, skel->name, skel});
+
+                SkeletonCandidate cand;
+                cand.data = skel;
+                cand.name = skel->name;
+                cand.hash = skelHash;
+                cand.entryIndex = -1;
+                skeletonCandidates.push_back(cand);
+                if (!loadedSkeleton)
+                    ActivateSkeletonCandidate((int)skeletonCandidates.size() - 1);
+            }
         }
 
-        NalSkeletonData* fallbackSkel = loadedSkeleton ? loadedSkeleton.get() : nullptr;
-        NalAnimFile animFile = ParseNalAnimation(tempPath, skelRefs, fallbackSkel, true);
-        std::remove(tempPath.c_str());
+        for (const auto& src : srcs) {
+            const uint8_t* d = sourceData(src);
+            const size_t n = sourceSize(src);
+            if (!d || n == 0) continue;
+            std::string tempPath = "temp_anim.pcanim";
+            {
+                std::ofstream tmp(tempPath, std::ios::binary);
+                if (!tmp.is_open()) continue;
+                tmp.write((const char*)d, n);
+            }
 
-        const size_t parsedAnimationCount = animFile.animations.size();
-        animFile.animations.erase(
-            std::remove_if(animFile.animations.begin(), animFile.animations.end(),
-                [](const NalAnimEntry& anim) { return anim.frame_count <= 0; }),
-            animFile.animations.end());
-        const size_t sentinelCount = parsedAnimationCount - animFile.animations.size();
-        if (sentinelCount > 0) {
+            NalSkeletonData* fallbackSkel = loadedSkeleton ? loadedSkeleton.get() : nullptr;
+            NalAnimFile animFile = ParseNalAnimation(tempPath, skelRefs, fallbackSkel, true);
+            std::remove(tempPath.c_str());
 
+            animFile.animations.erase(
+                std::remove_if(animFile.animations.begin(), animFile.animations.end(),
+                    [](const NalAnimEntry& anim) { return anim.frame_count <= 0; }),
+                animFile.animations.end());
+
+            if (animFile.animations.empty()) continue;
+            if (!merged) {
+                merged = std::make_shared<NalAnimFile>(std::move(animFile));
+            } else {
+                merged->animations.insert(merged->animations.end(),
+                                          animFile.animations.begin(), animFile.animations.end());
+                merged->skeletons.insert(merged->skeletons.end(),
+                                         animFile.skeletons.begin(), animFile.skeletons.end());
+                merged->num_anims += animFile.num_anims;
+            }
         }
+    };
 
-        if (animFile.animations.empty()) continue;
-        if (!merged) {
-            merged = std::make_shared<NalAnimFile>(std::move(animFile));
-        } else {
-            merged->animations.insert(merged->animations.end(),
-                                      animFile.animations.begin(), animFile.animations.end());
-            merged->skeletons.insert(merged->skeletons.end(),
-                                     animFile.skeletons.begin(), animFile.skeletons.end());
-            merged->num_anims += animFile.num_anims;
+    auto hasCompatibleAnim = [&]() -> bool {
+        if (!merged) return false;
+        for (const auto& a : merged->animations)
+            if (!a.skeleton || !loadedSkeleton ||
+                nal_skeleton_pose_compatible(a.skeleton.get(), loadedSkeleton.get()))
+                return true;
+        return false;
+    };
+
+    processSources(sources);
+
+    // Cross-pack fallback: if the current pack produced no animation compatible with the loaded
+    // skeleton (e.g. a character opened from a cutscene pack that only has a scene anim, or no
+    // anim file at all), pull its clips from another pack that contains its skeleton — its
+    // CH_VWR viewer/costume pack. Mirrors the cross-pack morph resolution.
+    if (!hasCompatibleAnim() && !skelRefs.empty()) {
+        BuildGlobalAnimIndex();
+        std::vector<AnimSource> crossSources;
+        std::vector<std::string> seen;
+        for (const auto& ref : skelRefs) {
+            auto it = globalAnimIndex.find(ref.hash);
+            if (it == globalAnimIndex.end()) continue;
+            for (const auto& loc : it->second) {
+                if (loc.size < 64) continue;
+                std::string key = loc.packPath + "#" + std::to_string(loc.offset);
+                if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+                seen.push_back(key);
+                std::ifstream af(loc.packPath, std::ios::binary);
+                if (!af.is_open()) continue;
+                std::vector<uint8_t> bytes(loc.size);
+                af.seekg(loc.offset);
+                af.read(reinterpret_cast<char*>(bytes.data()), loc.size);
+                if (af.gcount() != (std::streamsize)loc.size) continue;
+                crossSources.push_back(AnimSource{0, loc.size, std::move(bytes)});
+            }
         }
+        processSources(crossSources);
     }
 
     if (merged) {

@@ -433,7 +433,7 @@ public:
     unsigned int LoadTextureFromData(const std::vector<uint8_t>& data);
     unsigned int LoadTextureByName(const std::string& textureName);
 
-    void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath);
+    void ConvertPCM(const std::vector<uint8_t>& pcmData, const std::string& outPath, uint32_t meshHash = 0);
     void AnalyzePCM(int index);
     void AnalyzePCMDetailed(const std::vector<uint8_t>& pcmData);
 
@@ -515,6 +515,15 @@ public:
     std::map<uint32_t, MorphLocation> globalMorphIndex;
     bool globalMorphIndexBuilt = false;
     void BuildGlobalMorphIndex();
+
+    // Animations, like skeletons, may live in a different pack than the mesh: a character loaded
+    // from a cutscene pack has no anim file; its clips ship in its CH_VWR viewer/costume pack.
+    // Maps a skeleton hash -> anim-file locations in packs that also contain that skeleton, so a
+    // model can pull its animations cross-pack when the current pack has none.
+    struct AnimFileLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
+    std::map<uint32_t, std::vector<AnimFileLocation>> globalAnimIndex;
+    bool globalAnimIndexBuilt = false;
+    void BuildGlobalAnimIndex();
 
     struct EntityLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
     std::map<uint32_t, std::vector<EntityLocation>> globalEntityIndex;
@@ -609,6 +618,9 @@ public:
     void LoadAnimationForCurrentPack();
     void LoadVisemeStreamsForCurrentPack();
     void LoadMorphForCurrentModel(uint32_t meshHash);
+    // Side-effect-free morph resolver (current pack, then global index) shared by the viewer
+    // loader and the GLB exporter. Returns the raw .pcmorph bytes for a mesh hash.
+    bool FetchMorphBytesForHash(uint32_t meshHash, std::vector<uint8_t>& out);
     void ApplyMorphTargets();
     void UpdateAnimationPlayback(float deltaTime);
     int FindEntryBySignature(uint32_t sig) const;

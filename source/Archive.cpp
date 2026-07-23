@@ -205,8 +205,11 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
     if (entries.empty()) return;
 
     const int suspendedPreviewTab = activePreviewTab;
-    if (convertAll && suspendedPreviewTab >= 0) {
-        StoreActivePreviewTab();
+    if (convertAll) {
+        // Populate skeleton candidates (and animations) for the pack so per-mesh export can
+        // select the right rig AND so LoadAnimationForCurrentPack can resolve clips cross-pack
+        // when this pack has no anim file of its own.
+        if (suspendedPreviewTab >= 0) StoreActivePreviewTab();
         LoadSkeletonForCurrentPack();
         LoadAnimationForCurrentPack();
     }
@@ -228,7 +231,7 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
             SelectSkeletonForMesh(e.name, e.hash);
             if (!loadedAnimFile) LoadAnimationForCurrentPack();
             std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-            ConvertPCM(pcmData, glbPath.string());
+            ConvertPCM(pcmData, glbPath.string(), e.hash);
         } else {
             std::ofstream out(fullFilePath, std::ios::binary);
             if (out.is_open()) {
@@ -271,7 +274,7 @@ void SpiderManTool::ExtractFile(int index, bool asGlb) {
         SelectSkeletonForMesh(e.name, e.hash);
         if (!loadedAnimFile) LoadAnimationForCurrentPack();
         std::vector<uint8_t> pcmData(pcPackData.begin() + e.offset, pcPackData.begin() + e.offset + e.size);
-        ConvertPCM(pcmData, glbPath.string());
+        ConvertPCM(pcmData, glbPath.string(), e.hash);
         if (suspendedPreviewTab >= 0 && previewTabs[suspendedPreviewTab].hasCachedState) {
             RestorePreviewTab(suspendedPreviewTab);
         }

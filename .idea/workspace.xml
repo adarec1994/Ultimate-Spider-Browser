@@ -66,38 +66,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/imgui.ini" beforeDir="false" afterPath="$PROJECT_DIR$/imgui.ini" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Archive.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Archive.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/source/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/EntityBoneMapping.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/EntityBoneMapping.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Helpers.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/Helpers.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Interface.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Model.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalAnimCodec.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalAnimCodec.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalAnimation.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalAnimation.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalGenericCodec.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalGenericCodec.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalIntegration.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalIntegration.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalSkeleton.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalSkeleton.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/PackDirectory.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/PackDirectory.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Render.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/World.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/World.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/main.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/PackEntities.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/PackEntities.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/WorldLoader.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/WorldLoader.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/common/WorldCommon.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/common/WorldCommon.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/conglomerates/Conglomerates.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/conglomerates/Conglomerates.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/interiors/Interiors.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/interiors/Interiors.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/lego/Lego.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/lego/Lego.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/scene/SceneEntities.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/scene/SceneEntities.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/unique/UniquePcms.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/UniquePcms.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/zones/ZoneChunks.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/zones/ZoneChunks.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/usm_engine_pose_pipeline.md" beforeDir="false" afterPath="$PROJECT_DIR$/usm_engine_pose_pipeline.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -447,7 +421,7 @@
       <workItem from="1780471898596" duration="3265000" />
       <workItem from="1783150748095" duration="3061000" />
       <workItem from="1784537309260" duration="9536000" />
-      <workItem from="1784670498308" duration="16093000" />
+      <workItem from="1784670498308" duration="19355000" />
     </task>
     <servers />
   </component>
