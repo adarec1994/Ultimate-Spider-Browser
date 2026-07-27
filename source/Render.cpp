@@ -1627,7 +1627,7 @@ void SpiderManTool::RenderModelPreview() {
     if (!isWorldMode && loadedAnimFile && loadedSkeleton && selectedAnimIndex >= 0 &&
         selectedAnimIndex < (int)loadedAnimFile->animations.size() &&
         (!loadedAnimFile->animations[selectedAnimIndex].skeleton ||
-         nal_skeleton_pose_compatible(
+         nal_skeleton_pose_inheritable(
              loadedAnimFile->animations[selectedAnimIndex].skeleton.get(),
              loadedSkeleton.get())) &&
         logicalBoneCount > 0 && meshBoneCount > 0) {
@@ -1681,6 +1681,10 @@ void SpiderManTool::RenderModelPreview() {
         } else if (!anim.is_gen_anim()) {
 
         const NalSkeletonData* animSkel = anim.skeleton ? anim.skeleton.get() : loadedSkeleton.get();
+        // The rig we drive is always the LOADED skeleton. For an inherited clip (a costume variant
+        // playing its base character's animation) animSkel has different bone indices, so component
+        // data must come from the loaded rig or the pose lands on the wrong bones.
+        const NalSkeletonData* rigSkel = loadedSkeleton.get();
         int playbackFrameCount = anim.playback_frame_count();
         int frame0 = std::max(0, std::min(currentAnimFrame, std::max(0, playbackFrameCount - 1)));
         int frame1 = frame0 + 1;
@@ -1701,8 +1705,8 @@ void SpiderManTool::RenderModelPreview() {
         bool hasTentaclePose = false;
 
         auto parentOf = [&](int idx) -> int {
-            auto it = animSkel->parent_map.find(idx);
-            if (it == animSkel->parent_map.end()) return -1;
+            auto it = rigSkel->parent_map.find(idx);
+            if (it == rigSkel->parent_map.end()) return -1;
             int parent = it->second;
             return (parent >= 0 && parent < logicalBoneCount && parent != idx) ? parent : -1;
         };
@@ -1735,15 +1739,31 @@ void SpiderManTool::RenderModelPreview() {
             hasRestLocalQuat[i] = 1;
         }
 
-        auto findComponentForAnim = [&](const NalAnimComponent& comp) -> const NalComponentData* {
-            if (comp.slot_ix >= 0 && comp.slot_ix < (int)animSkel->components.size()) {
-                const auto& bySlot = animSkel->components[comp.slot_ix];
+        auto findComponentIn = [&](const NalSkeletonData* skel,
+                                   const NalAnimComponent& comp) -> const NalComponentData* {
+            if (!skel) return nullptr;
+            if (comp.slot_ix >= 0 && comp.slot_ix < (int)skel->components.size()) {
+                const auto& bySlot = skel->components[comp.slot_ix];
                 if (nal_type_to_comp_id(bySlot.type_id) == comp.comp_ix) return &bySlot;
             }
-            for (const auto& sc : animSkel->components) {
+            for (const auto& sc : skel->components) {
                 if (nal_type_to_comp_id(sc.type_id) == comp.comp_ix) return &sc;
             }
             return nullptr;
+        };
+
+        // Component data comes from the rig being driven; the anim's own skeleton is used only to
+        // verify the pose layout matches. An inherited component whose block doesn't line up (a
+        // variant's accessory/ArbitraryPO) returns null here, so it is left at rest rather than
+        // driven with data meant for a different rig.
+        auto findComponentForAnim = [&](const NalAnimComponent& comp) -> const NalComponentData* {
+            const NalComponentData* rigComp = findComponentIn(rigSkel, comp);
+            if (!rigComp) return nullptr;
+            if (animSkel != rigSkel) {
+                const NalComponentData* srcComp = findComponentIn(animSkel, comp);
+                if (srcComp && !nal_component_pose_compatible(*srcComp, *rigComp)) return nullptr;
+            }
+            return rigComp;
         };
 
         auto setBoneDeltaQuat = [&](int boneIdx, QuatWXYZ delta) {
@@ -1806,7 +1826,7 @@ void SpiderManTool::RenderModelPreview() {
 
         bool animHasStdLegs = false;
         bool animHasStdArms = false;
-        for (const auto& comp : anim.components) {
+        for (   const auto& comp : anim.components) {
             if (!comp.decoded.frames.empty()) {
                 animHasStdLegs = animHasStdLegs || comp.comp_ix == NalComp::LEGS;
                 animHasStdArms = animHasStdArms || comp.comp_ix == NalComp::ARMS;
@@ -1826,7 +1846,7 @@ void SpiderManTool::RenderModelPreview() {
                 return a->comp_ix < b->comp_ix;
             });
 
-            wfor (const NalAnimComponent* compPtr : sortedComponents) {
+        for (const NalAnimComponent* compPtr : sortedComponents) {
             const NalAnimComponent& comp = *compPtr;
             if (frame0 < 0 || frame0 >= (int)comp.decoded.frames.size()) continue;
             const auto& fv0 = comp.decoded.frames[frame0];
@@ -2916,6 +2936,11 @@ void SpiderManTool::RenderModelPreview() {
     glDepthMask(GL_TRUE);
     glBlendEquation(GL_FUNC_ADD);
 
+    if (showCollision) {
+        if (collisionVertCount == 0) BuildCollisionVisual();
+        RenderCollisionOverlay();
+    }
+
     if (showSkeleton && !isWorldMode && skeletonBoneCount > 0) {
         RenderSkeletonOverlay();
     }
@@ -3221,6 +3246,224 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
 
 }
 
+// Rebuilds the collision wireframe from the current model's bounds.
+//
+// The engine never stores a per-model collision shape for actors: collision_capsule::compute_dimensions
+// derives it from the visual bounding sphere every time --
+//     base   = center + Y * (0.125 * R)
+//     end    = base   + Y * (0.500 * R)
+//     radius = 0.25 * R
+// so we reproduce that here rather than inventing our own capsule. The bounding sphere is drawn too,
+// because it is what the broad phase actually rejects against (collide_sphere_entity).
+void SpiderManTool::BuildCollisionVisual() {
+    collisionVertCount = 0;
+
+    float mn[3] = { 1e30f, 1e30f, 1e30f };
+    float mx[3] = { -1e30f, -1e30f, -1e30f };
+    bool any = false;
+    for (const auto& m : previewMeshes) {
+        if (m.isHidden || m.positions.empty()) continue;
+        for (int i = 0; i < 3; i++) {
+            mn[i] = std::min(mn[i], m.bboxMin[i]);
+            mx[i] = std::max(mx[i], m.bboxMax[i]);
+        }
+        any = true;
+    }
+    if (!any) return;
+
+    const float center[3] = { (mn[0]+mx[0])*0.5f, (mn[1]+mx[1])*0.5f, (mn[2]+mx[2])*0.5f };
+    float radius = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        const float half = (mx[i]-mn[i]) * 0.5f;
+        radius += half * half;
+    }
+    radius = std::sqrt(radius);
+    if (radius <= 0.0f) return;
+
+    const float capBaseY = center[1] + 0.125f * radius;
+    const float capEndY  = capBaseY  + 0.500f * radius;
+    const float capR     = 0.250f * radius;
+
+    struct LineVert { float x, y, z, r, g, b; };
+    std::vector<LineVert> verts;
+
+    auto addLine = [&](float ax, float ay, float az, float bx, float by, float bz,
+                       float r, float g, float b) {
+        verts.push_back({ax, ay, az, r, g, b});
+        verts.push_back({bx, by, bz, r, g, b});
+    };
+
+    constexpr int SEG = 32;
+    constexpr float TWO_PI = 6.2831853f;
+
+    // --- capsule (green) --------------------------------------------------------------------
+    // Collision is mutually exclusive in the engine (actor.cpp: is_flagged(2)=capsule,
+    // is_flagged(4)=mesh, else no collision at all). A static prop therefore never gets a capsule,
+    // so only skinned actors are given one here -- otherwise we would be inventing a shape the
+    // engine would not have. Skinned/skeletal is our stand-in for the entity's capsule flag.
+    const bool isActor = (skeletonBoneCount > 0);
+    if (isActor) {
+        auto ring = [&](float cy, float rad, float r, float g, float b) {
+            for (int i = 0; i < SEG; i++) {
+                const float a0 = TWO_PI * i / SEG, a1 = TWO_PI * (i+1) / SEG;
+                addLine(center[0]+std::cos(a0)*rad, cy, center[2]+std::sin(a0)*rad,
+                        center[0]+std::cos(a1)*rad, cy, center[2]+std::sin(a1)*rad, r, g, b);
+            }
+        };
+        ring(capBaseY, capR, 0.2f, 1.0f, 0.3f);
+        ring(capEndY,  capR, 0.2f, 1.0f, 0.3f);
+
+        for (int i = 0; i < 4; i++) {
+            const float a = TWO_PI * i / 4;
+            const float px = center[0] + std::cos(a)*capR, pz = center[2] + std::sin(a)*capR;
+            addLine(px, capBaseY, pz, px, capEndY, pz, 0.2f, 1.0f, 0.3f);
+
+            // hemisphere arcs closing each end
+            for (int s = 0; s < SEG/4; s++) {
+                const float t0 = (float)s / (SEG/4) * (3.14159265f*0.5f);
+                const float t1 = (float)(s+1) / (SEG/4) * (3.14159265f*0.5f);
+                addLine(center[0]+std::cos(a)*capR*std::cos(t0), capEndY + capR*std::sin(t0), center[2]+std::sin(a)*capR*std::cos(t0),
+                        center[0]+std::cos(a)*capR*std::cos(t1), capEndY + capR*std::sin(t1), center[2]+std::sin(a)*capR*std::cos(t1),
+                        0.2f, 1.0f, 0.3f);
+                addLine(center[0]+std::cos(a)*capR*std::cos(t0), capBaseY - capR*std::sin(t0), center[2]+std::sin(a)*capR*std::cos(t0),
+                        center[0]+std::cos(a)*capR*std::cos(t1), capBaseY - capR*std::sin(t1), center[2]+std::sin(a)*capR*std::cos(t1),
+                        0.2f, 1.0f, 0.3f);
+            }
+        }
+    }
+
+    // --- world/prop collision OBBs (cyan): 12 edges each, corners = center +/- X +/- Y +/- Z ---
+    // Collision resources are named after the *pack entry*, not the per-section material name:
+    // entry VCL_AMBULANCE -> VCL_AMBULANCE000. RenderMesh::meshName holds material names
+    // ("muscle", "solid blue spidey"), so matching against that never hits -- match the loaded
+    // entry instead, allowing the trailing NNN index.
+    std::string ownerName;
+    if (selectedFileIndex >= 0 && selectedFileIndex < (int)entries.size()) {
+        ownerName = StrToLower(entries[selectedFileIndex].name);
+        const size_t dot = ownerName.find_last_of('.');
+        if (dot != std::string::npos) ownerName = ownerName.substr(0, dot);
+    }
+
+    std::vector<const CollisionObb*> visibleObbs;
+    if (isWorldMode) {
+        // World collision is authored per *region*, not per mesh -- BD.PCPACK holds meshes bdc,
+        // boardsa, bd_seawall... and a single "bd_beach000" covering the lot. There is nothing to
+        // match name-wise, so in world mode show every collision mesh the pack carries.
+        for (const auto& group : collisionGroups)
+            for (const auto& obb : group.obbs) visibleObbs.push_back(&obb);
+    } else if (!ownerName.empty()) {
+        for (const auto& group : collisionGroups) {
+            if (group.name.size() < ownerName.size()) continue;
+            if (group.name.compare(0, ownerName.size(), ownerName) != 0) continue;
+            bool restIsDigits = true;
+            for (size_t i = ownerName.size(); i < group.name.size(); ++i)
+                if (!std::isdigit((unsigned char)group.name[i])) { restIsDigits = false; break; }
+            if (!restIsDigits) continue;
+            for (const auto& obb : group.obbs) visibleObbs.push_back(&obb);
+        }
+    }
+
+    // Single-prop packs frequently carry exactly one collision mesh for the one model they hold;
+    // fall back to it when the name lookup found nothing (dictionary misses are common).
+    if (visibleObbs.empty() && !isWorldMode && collisionGroups.size() == 1) {
+        for (const auto& obb : collisionGroups[0].obbs) visibleObbs.push_back(&obb);
+    }
+
+    collisionObbsDrawn = (int)visibleObbs.size();
+
+    // LoadAllWorldGeometries places world geometry through a base transform with X negated, so the
+    // authored collision has to be mirrored the same way to sit on top of it.
+    const float mirrorX = isWorldMode ? -1.0f : 1.0f;
+
+    for (const auto* obbPtr : visibleObbs) {
+        const auto& obb = *obbPtr;
+        float corner[8][3];
+        for (int i = 0; i < 8; i++) {
+            const float sx = (i & 1) ? 1.0f : -1.0f;
+            const float sy = (i & 2) ? 1.0f : -1.0f;
+            const float sz = (i & 4) ? 1.0f : -1.0f;
+            for (int k = 0; k < 3; k++) {
+                const float axisScale = (k == 0) ? mirrorX : 1.0f;
+                corner[i][k] = axisScale *
+                    (obb.center[k] + sx*obb.axisX[k] + sy*obb.axisY[k] + sz*obb.axisZ[k]);
+            }
+        }
+        static const int edges[12][2] = {
+            {0,1},{2,3},{4,5},{6,7},   // along X
+            {0,2},{1,3},{4,6},{5,7},   // along Y
+            {0,4},{1,5},{2,6},{3,7}    // along Z
+        };
+        for (const auto& e : edges) {
+            addLine(corner[e[0]][0], corner[e[0]][1], corner[e[0]][2],
+                    corner[e[1]][0], corner[e[1]][1], corner[e[1]][2],
+                    0.25f, 0.85f, 1.0f);
+        }
+    }
+
+    // --- bounding sphere (amber): three great circles -----------------------------------------
+    // This is collision_geometry::get_bounding_sphere_radius, the broad-phase reject used by
+    // collide_sphere_entity. It only exists when the entity actually has a collision geometry,
+    // so it is suppressed when there is none to describe.
+    if (isActor || collisionObbsDrawn > 0) {
+        for (int axis = 0; axis < 3; axis++) {
+            for (int i = 0; i < SEG; i++) {
+                const float a0 = TWO_PI * i / SEG, a1 = TWO_PI * (i+1) / SEG;
+                float p0[3] = {center[0], center[1], center[2]};
+                float p1[3] = {center[0], center[1], center[2]};
+                const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+                p0[u] += std::cos(a0)*radius; p0[v] += std::sin(a0)*radius;
+                p1[u] += std::cos(a1)*radius; p1[v] += std::sin(a1)*radius;
+                addLine(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], 1.0f, 0.7f, 0.15f);
+            }
+        }
+    }
+
+    if (verts.empty()) return;
+
+    if (!collisionVao) glGenVertexArrays(1, &collisionVao);
+    if (!collisionVbo) glGenBuffers(1, &collisionVbo);
+    glBindVertexArray(collisionVao);
+    glBindBuffer(GL_ARRAY_BUFFER, collisionVbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.size()*sizeof(LineVert), verts.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(LineVert), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(LineVert), (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+
+    collisionVertCount = (int)verts.size();
+}
+
+void SpiderManTool::RenderCollisionOverlay() {
+    if (!collisionVao || collisionVertCount == 0 || skeletonProgram == 0) return;
+
+    glUseProgram(skeletonProgram);
+
+    float fov = 1.0f;
+    float aspect = 3840.0f / 2160.0f;
+    float znear = 0.1f, zfar = 20000.0f;
+    float proj[16] = {0};
+    float tanHalfFov = tan(fov / 2.0f);
+    proj[0] = 1.0f / (aspect * tanHalfFov);
+    proj[5] = 1.0f / tanHalfFov;
+    proj[10] = -(zfar + znear) / (zfar - znear);
+    proj[11] = -1.0f;
+    proj[14] = -(2.0f * zfar * znear) / (zfar - znear);
+
+    float view[16];
+    float target[3] = { camPos[0]+camFront[0], camPos[1]+camFront[1], camPos[2]+camFront[2] };
+    LookAt(camPos, target, camUp, view);
+
+    glUniformMatrix4fv(glGetUniformLocation(skeletonProgram, "projection"), 1, GL_FALSE, proj);
+    glUniformMatrix4fv(glGetUniformLocation(skeletonProgram, "view"), 1, GL_FALSE, view);
+
+    glBindVertexArray(collisionVao);
+    glEnable(GL_DEPTH_TEST);
+    glLineWidth(1.0f);
+    glDrawArrays(GL_LINES, 0, collisionVertCount);
+    glBindVertexArray(0);
+}
+
 void SpiderManTool::RenderSkeletonOverlay() {
     if (!skeletonVao || skeletonBoneCount == 0 || skeletonProgram == 0) return;
 
@@ -3434,6 +3677,7 @@ void SpiderManTool::StoreActivePreviewTab() {
     selectedMeshPcmData.clear();
     showWorldMeshDetails = false;
     showSkeleton = false;
+    collisionVertCount = 0;   // bounds changed; overlay rebuilds on next draw
     selectedBoneIndex = -1;
     isRotatingBone = false;
     boneRotationAngle = 0.0f;

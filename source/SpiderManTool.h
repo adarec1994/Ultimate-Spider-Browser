@@ -65,6 +65,20 @@ struct FileEntry {
     std::vector<std::string> subItems;
 };
 
+// Which of the world loader's four passes produced a mesh. Lets the viewer group and export them
+// separately -- they have genuinely different placement semantics (zone/interior geometry is placed
+// once, conglomerate members carry a relative po, lego is GPU-instanced).
+enum class WorldMeshKind : uint8_t {
+    None = 0,      // model preview, not world geometry
+    Zone,          // LoadWorldZoneChunks  - city shell, streets, terrain
+    Interior,      // LoadWorldInteriorMeshes
+    SceneEntity,   // simple single-mesh scene placements
+    Conglomerate,  // multi-part scene entities (BuildConglomerateMemberPlacements)
+    Lego,          // batched/instanced small props
+    Ocean,
+    Skybox,
+};
+
 struct RenderMesh {
     struct Instance {
 
@@ -98,6 +112,7 @@ struct RenderMesh {
 
     bool isWater = false;
     bool skipPicking = false;
+    WorldMeshKind worldKind = WorldMeshKind::None;
     uint32_t shaderType = 0;
     bool isPersonMaterial = false;
     std::array<float, 4> personBaseColor = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -382,6 +397,44 @@ public:
 
     void BuildSkeletonVisual(const std::vector<uint8_t>& pcmData);
     void RenderSkeletonOverlay();
+
+    // Collision overlay. USM has no authored collision spheres: collision_geometry defines only
+    // CAPSULE and MESH, and an actor's capsule is *derived* at runtime from the model's bounding
+    // sphere (collision_capsule::compute_dimensions). BuildCollisionVisual reproduces that formula
+    // exactly, so what's drawn is what the engine would collide with.
+    bool showCollision = false;
+    unsigned int collisionVao = 0;
+    unsigned int collisionVbo = 0;
+    int collisionVertCount = 0;
+
+    // World/prop collision: an OBB tree from a 'COLL' resource. Axes are pre-scaled by their
+    // half-extent, so the corners are center +/- axisX +/- axisY +/- axisZ.
+    struct CollisionObb {
+        float center[3];
+        float radius;
+        float axisX[3];
+        float axisY[3];
+        float axisZ[3];
+    };
+    // Collision resources are named "<MESHNAME>" + a 3-digit index (VCL_AMBULANCE -> VCL_AMBULANCE000),
+    // so a group is matched back to the mesh it belongs to by that name, and only the groups
+    // belonging to currently loaded meshes are drawn.
+    struct CollisionGroup {
+        std::string name;
+        std::vector<CollisionObb> obbs;
+    };
+    std::vector<CollisionGroup> collisionGroups;
+    int collisionObbsDrawn = 0;
+
+    // Stamped onto every mesh the world loader creates; each pass sets it before adding meshes.
+    WorldMeshKind currentWorldKind = WorldMeshKind::None;
+    void ExportWorldMeshesByKind(const std::vector<WorldMeshKind>& kinds, const std::string& label);
+
+    void LoadCollisionMeshesForCurrentPack();
+    void LoadCollisionMeshesForWorld();
+    void AppendCollisionGroups(const std::vector<uint8_t>& packData, const PackDirectory& dir);
+    void BuildCollisionVisual();
+    void RenderCollisionOverlay();
     int PickBoneAtScreenPos(float screenX, float screenY, float vpW, float vpH);
     void ApplyBoneRotation(int boneIdx, float angle, int axis);
     void ResetBoneRotation();
@@ -447,6 +500,9 @@ public:
     void AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0, const float* transform = nullptr, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
     void AddMeshInstancesFromDataBatched(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const std::vector<std::array<float, 16>>& transforms, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
     struct PendingWorldInstanceBatch {
+        // Which loader pass queued this. Captured at queue time because the batch is materialised
+        // later, when currentWorldKind no longer reflects the pass that produced it.
+        WorldMeshKind kind = WorldMeshKind::None;
         std::vector<uint8_t> pcmData;
         std::string modelName;
         std::string sourcePack;
@@ -473,7 +529,43 @@ public:
     void SelectGlobalSearchResult(int index);
 
     void ExportSelectedWorldMesh(bool asGlb);
+
+    // World scene export. Runs stepped so the UI can show progress: ExtractAllWorldMeshes() loads
+    // the world itself (the caller does not need to have it loaded) and builds the work list, then
+    // WorldExportStep() is pumped once per frame until exportProgress == exportTotal.
     void ExtractAllWorldMeshes();
+    void WorldExportStep(int itemsThisFrame);
+
+    struct WorldExportItem {
+        int meshIndex = -1;          // index into previewMeshes
+        std::string relPath;         // "glb/<category>/<name>.glb"
+        std::string outFile;         // absolute path
+        std::string name;
+        std::string category;
+        std::string textureName;
+        uint32_t textureHash = 0;
+        // Material's shader name ("usstreet", "smsimple", "usperson"...). Read from material
+        // offset +0x04; it selects which of the engine's shaders drew this mesh, so it is the
+        // right hint for picking a matching material on the importing side.
+        std::string shaderName;
+        // Zone (district pack) this mesh came from; zone chunks are grouped into one folder
+        // per zone.
+        std::string pcmName;
+    };
+    struct WorldExportPlacement {
+        int meshId = 0;
+        std::string name;
+        std::array<float, 16> transform{};
+    };
+
+    bool isExportingWorld = false;
+    int exportProgress = 0;
+    int exportTotal = 0;
+    std::string exportCurrentItem;
+    std::vector<WorldExportItem> exportItems;
+    std::vector<WorldExportPlacement> exportPlacements;
+    std::vector<RenderMesh> exportSavedMeshes;
+    std::string exportRootDir;
 
     std::shared_ptr<NalSkeletonData> loadedSkeleton;
     std::shared_ptr<NalAnimFile>     loadedAnimFile;

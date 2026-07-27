@@ -180,6 +180,51 @@ struct NalSkeletonData {
     std::vector<std::string> warnings;
 };
 
+// Can a single component's pose data authored against `a` drive `b`? True when the pose payload
+// and bone table line up, so decoded values land on the same roles. Type ids may legitimately
+// differ (TorsoHead_OneNeck vs TorsoHead_TwoNeck): the TwoNeck variant's extra neck_aux is a
+// static leaf built from skeleton data, so it consumes no pose bytes and the payload is identical.
+static inline bool nal_component_pose_compatible(const NalComponentData& a,
+                                                 const NalComponentData& b) {
+    if (a.bone_indices.size() != b.bone_indices.size()) return false;
+    if (a.raw_default_pose_block.size() != b.raw_default_pose_block.size()) return false;
+    if (a.other_matrix_indices.size() != b.other_matrix_indices.size()) return false;
+    if (a.arb_nodes.size() != b.arb_nodes.size()) return false;
+    for (size_t n = 0; n < a.arb_nodes.size(); ++n) {
+        if (a.arb_nodes[n].my_matrix_ix != b.arb_nodes[n].my_matrix_ix ||
+            a.arb_nodes[n].parent_matrix_ix != b.arb_nodes[n].parent_matrix_ix)
+            return false;
+    }
+    return true;
+}
+
+// Can `anim`'s clips drive the `skel` rig at all? Characters inherit animation sets: a costume
+// variant (e.g. peter_hooded) ships clips authored for its base character (ultimate_spiderman)
+// while tweaking its own rig, so requiring a whole-skeleton match throws away perfectly usable
+// data. Require the same kind and slot layout, and that every BONE-DRIVING component lines up;
+// boneless blocks (accessory/ArbitraryPO) may differ and are simply skipped at pose time.
+static inline bool nal_skeleton_pose_inheritable(const NalSkeletonData* anim,
+                                                 const NalSkeletonData* skel) {
+    if (!anim || !skel) return false;
+    if (anim == skel) return true;
+    if (anim->skeleton_kind != skel->skeleton_kind) return false;
+    if (anim->components.size() != skel->components.size()) return false;
+
+    bool anyDriving = false;
+    for (size_t i = 0; i < anim->components.size(); ++i) {
+        const auto& ac = anim->components[i];
+        const auto& bc = skel->components[i];
+        if (ac.component_index != bc.component_index) return false;
+        const bool aDrives = !ac.bone_indices.empty();
+        const bool bDrives = !bc.bone_indices.empty();
+        if (aDrives != bDrives) return false;
+        if (!aDrives) continue;   // boneless block: tolerated here, skipped when posing
+        if (!nal_component_pose_compatible(ac, bc)) return false;
+        anyDriving = true;
+    }
+    return anyDriving;
+}
+
 static inline bool nal_skeleton_pose_compatible(const NalSkeletonData* a,
                                                 const NalSkeletonData* b) {
     if (!a || !b) return false;

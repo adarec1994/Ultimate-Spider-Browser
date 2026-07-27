@@ -466,14 +466,14 @@ void SpiderManTool::ActivateSkeletonCandidate(int candidateIndex) {
         if (selectedMatches) {
             const auto& selected = loadedAnimFile->animations[selectedAnimIndex];
             selectedMatches = !selected.skeleton ||
-                nal_skeleton_pose_compatible(selected.skeleton.get(), loadedSkeleton.get());
+                nal_skeleton_pose_inheritable(selected.skeleton.get(), loadedSkeleton.get());
         }
         if (!selectedMatches) {
             selectedAnimIndex = -1;
             for (int i = 0; i < (int)loadedAnimFile->animations.size(); ++i) {
                 const auto& candidate = loadedAnimFile->animations[i];
                 if (!candidate.skeleton ||
-                    nal_skeleton_pose_compatible(candidate.skeleton.get(), loadedSkeleton.get())) {
+                    nal_skeleton_pose_inheritable(candidate.skeleton.get(), loadedSkeleton.get())) {
                     selectedAnimIndex = i;
                     break;
                 }
@@ -832,7 +832,7 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         if (!merged) return false;
         for (const auto& a : merged->animations)
             if (!a.skeleton || !loadedSkeleton ||
-                nal_skeleton_pose_compatible(a.skeleton.get(), loadedSkeleton.get()))
+                nal_skeleton_pose_inheritable(a.skeleton.get(), loadedSkeleton.get()))
                 return true;
         return false;
     };
@@ -874,7 +874,7 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         for (int i = 0; i < (int)merged->animations.size(); ++i) {
             const auto& candidate = merged->animations[i];
             if (!candidate.skeleton || !loadedSkeleton ||
-                nal_skeleton_pose_compatible(candidate.skeleton.get(), loadedSkeleton.get())) {
+                nal_skeleton_pose_inheritable(candidate.skeleton.get(), loadedSkeleton.get())) {
                 selectedAnimIndex = i;
                 break;
             }

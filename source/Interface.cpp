@@ -30,6 +30,11 @@ bool IsWorldInteriorPack(const std::string& stemName) {
 }
 
 void RenderUI(SpiderManTool& tool) {
+    // Pump the world export a slice at a time so the progress bar below actually animates.
+    if (tool.isExportingWorld) {
+        tool.WorldExportStep(8);
+    }
+
     if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
         const int PACKS_PER_FRAME = 10;
         for (int i = 0; i < PACKS_PER_FRAME && tool.indexingProgress < tool.indexingTotal; i++) {
@@ -198,6 +203,51 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::Image((void*)(intptr_t)tool.viewportTextureId, winSize, ImVec2(0,1), ImVec2(1,0));
         bool viewportImageHovered = ImGui::IsItemHovered();
 
+        // World export menu. RMB is also the fly-camera drag, so only treat a right-click as a
+        // context menu when the mouse didn't move -- otherwise the menu pops every time you finish
+        // looking around.
+        if (tool.isWorldMode && viewportImageHovered &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+            !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Right)) {
+            ImGui::OpenPopup("WorldExportMenu");
+        }
+        if (ImGui::BeginPopup("WorldExportMenu")) {
+            using Kind = WorldMeshKind;
+            auto countOf = [&](std::initializer_list<Kind> kinds) {
+                int n = 0;
+                for (const auto& m : tool.previewMeshes)
+                    for (Kind k : kinds)
+                        if (m.worldKind == k) { ++n; break; }
+                return n;
+            };
+
+            const int nZone   = countOf({Kind::Zone, Kind::SceneEntity});
+            const int nInt    = countOf({Kind::Interior});
+            const int nCong   = countOf({Kind::Conglomerate});
+            const int nLego   = countOf({Kind::Lego});
+
+            ImGui::TextDisabled("Extract to GLB");
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Zone Chunks + Simple Scenes", nullptr, false, nZone > 0))
+                tool.ExportWorldMeshesByKind({Kind::Zone, Kind::SceneEntity}, "zones_scenes");
+            ImGui::SameLine(); ImGui::TextDisabled("(%d)", nZone);
+
+            if (ImGui::MenuItem("Interiors", nullptr, false, nInt > 0))
+                tool.ExportWorldMeshesByKind({Kind::Interior}, "interiors");
+            ImGui::SameLine(); ImGui::TextDisabled("(%d)", nInt);
+
+            if (ImGui::MenuItem("Conglomerates", nullptr, false, nCong > 0))
+                tool.ExportWorldMeshesByKind({Kind::Conglomerate}, "conglomerates");
+            ImGui::SameLine(); ImGui::TextDisabled("(%d)", nCong);
+
+            if (ImGui::MenuItem("Lego Props", nullptr, false, nLego > 0))
+                tool.ExportWorldMeshesByKind({Kind::Lego}, "lego");
+            ImGui::SameLine(); ImGui::TextDisabled("(%d)", nLego);
+
+            ImGui::EndPopup();
+        }
+
         bool uiHovered = ImGui::GetIO().WantCaptureMouse;
         bool isViewportActive = !uiHovered;
 
@@ -248,7 +298,42 @@ void RenderUI(SpiderManTool& tool) {
                 ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.4f, 0.9f), "Selected: %s",
                                    instanceName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)).c_str() : instanceName.c_str());
             }
+
+            // World collision is region-scoped (one COLL per district, not per mesh), so in world
+            // mode every collision mesh the pack carries is shown.
+            ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 70));
+            if (ImGui::Checkbox("Show Collision", &tool.showCollision)) {
+                tool.collisionVertCount = 0;
+            }
+            if (tool.showCollision) {
+                ImGui::SameLine();
+                if (tool.collisionObbsDrawn > 0) {
+                    ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 0.9f), "%d OBBs",
+                                       tool.collisionObbsDrawn);
+                } else {
+                    ImGui::TextColored(ImVec4(0.8f, 0.5f, 0.4f, 0.9f), "none in this pack");
+                }
+            }
         } else {
+            ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 20));
+            if (ImGui::Checkbox("Show Collision", &tool.showCollision)) {
+                tool.collisionVertCount = 0;   // force a rebuild on next draw
+            }
+            if (tool.showCollision) {
+                // The engine gives an entity a capsule OR a collision mesh OR nothing
+                // (actor.cpp: is_flagged(2) / is_flagged(4) / set_colgeom(nullptr)), so report
+                // which of the three this model actually is rather than always drawing both.
+                ImGui::SameLine();
+                if (tool.collisionObbsDrawn > 0) {
+                    ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 0.9f), "mesh: %d OBBs",
+                                       tool.collisionObbsDrawn);
+                } else if (tool.skeletonBoneCount > 0) {
+                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.3f, 0.9f), "capsule (derived)");
+                } else {
+                    ImGui::TextColored(ImVec4(0.8f, 0.5f, 0.4f, 0.9f), "no collision geometry");
+                }
+            }
+
             if (tool.skeletonBoneCount > 0) {
                 ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 45));
                 ImGui::Checkbox("Show Skeleton", &tool.showSkeleton);
@@ -355,7 +440,7 @@ void RenderUI(SpiderManTool& tool) {
     if (!tool.isWorldMode && tool.activePreviewTab >= 0 && tool.loadedSkeleton &&
         tool.loadedAnimFile) {
         for (const auto& anim : tool.loadedAnimFile->animations) {
-            if (!anim.skeleton || nal_skeleton_pose_compatible(
+            if (!anim.skeleton || nal_skeleton_pose_inheritable(
                     anim.skeleton.get(), tool.loadedSkeleton.get())) {
                 hasCompatibleAnimations = true;
                 break;
@@ -397,7 +482,7 @@ void RenderUI(SpiderManTool& tool) {
                     if (hasCompatibleAnimations) {
                         for (int i = 0; i < (int)tool.loadedAnimFile->animations.size(); ++i) {
                             const auto& anim = tool.loadedAnimFile->animations[i];
-                            if (anim.skeleton && !nal_skeleton_pose_compatible(
+                            if (anim.skeleton && !nal_skeleton_pose_inheritable(
                                     anim.skeleton.get(), tool.loadedSkeleton.get())) {
                                 continue;
                             }
@@ -1034,6 +1119,36 @@ void RenderUI(SpiderManTool& tool) {
             }
         }
         ImGui::End();
+    }
+
+    // World export progress. Modal so the meshes being written aren't disturbed mid-flight.
+    if (tool.isExportingWorld) {
+        ImGuiViewport* evp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(evp->Pos.x + evp->Size.x * 0.5f,
+                                       evp->Pos.y + evp->Size.y * 0.5f),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(460, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+        ImGui::Begin("Exporting World", nullptr,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoTitleBar);
+
+        ImGui::TextColored(ImVec4(1, 1, 1, 0.9f), "Exporting world to GLB + nyc.json");
+        ImGui::Spacing();
+
+        const float frac = (tool.exportTotal > 0)
+            ? (float)tool.exportProgress / (float)tool.exportTotal : 0.0f;
+        char overlay[64];
+        snprintf(overlay, sizeof(overlay), "%d / %d meshes",
+                 tool.exportProgress, tool.exportTotal);
+        ImGui::ProgressBar(frac, ImVec2(-1, 22), overlay);
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "%s",
+                           tool.exportCurrentItem.empty() ? "..." : tool.exportCurrentItem.c_str());
+        ImGui::End();
+        ImGui::PopStyleVar();
     }
 
     if (tool.notificationTimer > 0.0f) {

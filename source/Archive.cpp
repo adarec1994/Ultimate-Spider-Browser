@@ -121,6 +121,7 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
     });
 
     LoadAnimationStateMachinesForCurrentPack();
+    LoadCollisionMeshesForCurrentPack();
 
     if (!preservePreviewTab) {
         LoadSkeletonForCurrentPack();
@@ -138,6 +139,80 @@ void SpiderManTool::LoadAnimationStateMachinesForCurrentPack() {
         auto file = UsmAls::Parse(pcPackData.data() + resource.offset,
                                   resource.size, resource.hash);
         if (file.valid) animationStateMachines.push_back(std::move(file));
+    }
+}
+
+// Parses every COLLISION_MESH ('COLL') resource in the open pack.
+//
+// Layout, verified against the shipped data (all axis triples come out exactly mutually
+// orthogonal, which is what confirms the field boundaries):
+//     0x00 'COLL' | 0x04 version | 0x08 total size | 0x0C count | 0x10 obb[]
+// and per 0x38-byte OBB:
+//     0x00 center | 0x0C bounding radius | 0x10 X axis | 0x1C Y axis | 0x28 Z axis | 0x34 flags
+// The axis vectors are already scaled by their half-extent, so the eight corners are simply
+// center +/- X +/- Y +/- Z. Note OpenUSM's colmesh_common.h types the Y/Z axis floats as `int`
+// (field_1C..field_30) -- that is a decompiler artifact, they are floats.
+// World geometry is assembled from every pack in foundPacks (LoadAllWorldGeometries), never through
+// OpenPCPack, so currentDir/pcPackData describe an unrelated pack and carry none of the world's
+// collision. Scan the packs directly instead.
+void SpiderManTool::LoadCollisionMeshesForWorld() {
+    collisionGroups.clear();
+    collisionVertCount = 0;
+
+    for (const auto& path : foundPacks) {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file) continue;
+        const std::streamsize size = file.tellg();
+        if (size <= 0) continue;
+        file.seekg(0, std::ios::beg);
+        std::vector<uint8_t> blob(static_cast<size_t>(size));
+        if (!file.read(reinterpret_cast<char*>(blob.data()), size)) continue;
+
+        const PackDirectory dir = PackDirectory::Parse(blob);
+        if (!dir.valid) continue;
+        AppendCollisionGroups(blob, dir);
+    }
+}
+
+void SpiderManTool::LoadCollisionMeshesForCurrentPack() {
+    collisionGroups.clear();
+    collisionVertCount = 0;
+    if (!currentDir.valid || pcPackData.empty()) return;
+    AppendCollisionGroups(pcPackData, currentDir);
+}
+
+void SpiderManTool::AppendCollisionGroups(const std::vector<uint8_t>& packData,
+                                          const PackDirectory& dir) {
+    for (const auto& resource : dir.resources) {
+        if (resource.type != RES_KEY_COLLISION_MESH || resource.size < 0x48) continue;
+        if (resource.offset > packData.size() ||
+            resource.size > packData.size() - resource.offset) continue;
+
+        const uint8_t* d = packData.data() + resource.offset;
+        if (std::memcmp(d, "COLL", 4) != 0) continue;
+
+        CollisionGroup group;
+        auto nameIt = dictionary.find(resource.hash);
+        if (nameIt != dictionary.end()) group.name = StrToLower(nameIt->second);
+
+        const uint32_t count = (resource.size - 0x10) / 0x38;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint8_t* o = d + 0x10 + i * 0x38;
+            CollisionObb obb;
+            std::memcpy(obb.center, o + 0x00, sizeof(float) * 3);
+            std::memcpy(&obb.radius, o + 0x0C, sizeof(float));
+            std::memcpy(obb.axisX,  o + 0x10, sizeof(float) * 3);
+            std::memcpy(obb.axisY,  o + 0x1C, sizeof(float) * 3);
+            std::memcpy(obb.axisZ,  o + 0x28, sizeof(float) * 3);
+
+            // Degenerate/placeholder nodes carry a zero frame; skip so they don't draw as dots.
+            const float ext = std::fabs(obb.axisX[0]) + std::fabs(obb.axisY[1]) + std::fabs(obb.axisZ[2]);
+            if (ext <= 0.0f) continue;
+
+            group.obbs.push_back(obb);
+        }
+
+        if (!group.obbs.empty()) collisionGroups.push_back(std::move(group));
     }
 }
 

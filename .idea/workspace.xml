@@ -66,12 +66,20 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/AnimationStateMachine.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/AnimationStateMachine.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/AnimationStateMachine.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/AnimationStateMachine.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Archive.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Archive.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Helpers.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/Helpers.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Model.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/NalSkeleton.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalSkeleton.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Render.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/WorldLoader.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/WorldLoader.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -144,11 +152,6 @@
   }
 }</component>
   <component name="RunManager" selected="CMake Application.USM">
-    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
-      </method>
-    </configuration>
     <configuration name="USM" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="USM" TARGET_NAME="USM" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="USM" RUN_TARGET_NAME="USM">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
@@ -335,10 +338,6 @@
       </method>
     </configuration>
     <list>
-      <item itemvalue="CMake Application.glfw" />
-      <item itemvalue="CMake Application.uninstall" />
-      <item itemvalue="CMake Application.docs" />
-      <item itemvalue="CMake Application.update_mappings" />
       <item itemvalue="CMake Application.boing" />
       <item itemvalue="CMake Application.gears" />
       <item itemvalue="CMake Application.heightmap" />
@@ -368,6 +367,10 @@
       <item itemvalue="CMake Application.title" />
       <item itemvalue="CMake Application.triangle-vulkan" />
       <item itemvalue="CMake Application.windows" />
+      <item itemvalue="CMake Application.docs" />
+      <item itemvalue="CMake Application.glfw" />
+      <item itemvalue="CMake Application.uninstall" />
+      <item itemvalue="CMake Application.update_mappings" />
       <item itemvalue="CMake Application.USM" />
       <item itemvalue="CMake Application.glad" />
       <item itemvalue="CMake Application.imgui" />
@@ -422,6 +425,8 @@
       <workItem from="1783150748095" duration="3061000" />
       <workItem from="1784537309260" duration="9536000" />
       <workItem from="1784670498308" duration="19355000" />
+      <workItem from="1784853372129" duration="7000" />
+      <workItem from="1785159707950" duration="597000" />
     </task>
     <servers />
   </component>

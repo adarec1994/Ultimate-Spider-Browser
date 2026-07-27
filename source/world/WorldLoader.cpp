@@ -37,7 +37,9 @@ void SpiderManTool::LoadAllWorldGeometries() {
     std::map<std::string, uint32_t> pcmNameToHash;
     BuildWorldPcmIndex(*this, pcmIndex, pcmNameToHash);
 
+    currentWorldKind = WorldMeshKind::Zone;
     int zoneGeoCount = LoadWorldZoneChunks(*this, baseTransform);
+    currentWorldKind = WorldMeshKind::Interior;
     int interiorMeshCount = LoadWorldInteriorMeshes(*this, baseTransform);
 
     std::map<uint32_t, std::vector<uint8_t>> pcmDataCache;
@@ -155,6 +157,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
                                 blockData, rec, meshHashBindings, pcmIndex, memberPlacements);
 
                         if (builtConglomerate) {
+                            currentWorldKind = WorldMeshKind::Conglomerate;
                             int placedMembers = 0;
                             for (const auto& member : memberPlacements) {
                                 uint32_t memberPcmHash = member.meshRef.pcmHash;
@@ -253,6 +256,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
                                 ? instanceName
                                 : (pcmName.empty() ? "scene_entity" : pcmName));
 
+                        currentWorldKind = WorldMeshKind::SceneEntity;
                         AddMeshFromDataWithTransform(pcmDataCache[pcmHash], modelName, nullptr,
                                                      ref.packPath, ref.absOffset, combinedTransform,
                                                      meshRef.meshOffsetInPcm);
@@ -600,6 +604,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
                     ? (dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "unknown")
                     : instanceName;
 
+                currentWorldKind = WorldMeshKind::SceneEntity;
                 AddMeshFromDataWithTransform(pcmData, modelName, nullptr,
                                              ref.packPath, ref.absOffset,
                                              combinedTransform);
@@ -608,6 +613,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
             }
 
             if (blockInfo.tocType == 0x0A) {
+                currentWorldKind = WorldMeshKind::Lego;
                 QueueLegoPlacementsFromBlock(*this, blockData, meshHashBindings, pcmIndex,
                                              baseTransform, legoBatches,
                                              totalLegoRecords, loadedLegoRecords,
@@ -725,6 +731,7 @@ void SpiderManTool::LoadAllWorldGeometries() {
         file.close();
     }
 
+    currentWorldKind = WorldMeshKind::Lego;
     FlushLegoBatches(*this, pcmIndex, pcmDataCache, legoBatches,
                      loadedLegoRecords, skippedLegoNoModel);
 
@@ -742,8 +749,13 @@ void SpiderManTool::LoadAllWorldGeometries() {
     pcmDataCache.clear();
     FlushPendingWholeWorldInstances();
 
+    currentWorldKind = WorldMeshKind::Skybox;
     LoadSkybox();
+    currentWorldKind = WorldMeshKind::SceneEntity;
     InstanceWholeWorldMeshes();
+
+    // World collision lives across every pack, not in currentDir, so gather it here.
+    LoadCollisionMeshesForWorld();
 
     isModelLoaded = true;
 }

@@ -3,7 +3,12 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <limits>
+#include <map>
+#include <sstream>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -14,6 +19,7 @@
 #endif
 
 #include "SpiderManTool.h"
+#include "PackDirectory.h"
 #include "Interface.h"
 #include "NalIntegration.h"
 #include "stb_image_write.h"
@@ -21,6 +27,17 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+
+// AnimationStateMachineView.cpp has an equivalent, but it lives in an anonymous
+// namespace so it can't be shared.
+static std::string AlsResolveHash(const SpiderManTool& tool, uint32_t hash) {
+    if (!hash) return "None";
+    auto found = tool.dictionary.find(hash);
+    if (found != tool.dictionary.end()) return found->second;
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%08X", hash);
+    return buf;
+}
 
 static void LoadBestDictionaryForPack(SpiderManTool& tool, const fs::path& packDir) {
     fs::path textDict = packDir / "string_hash_dictionary.txt";
@@ -704,6 +721,482 @@ static int InspectAnimationMorphHeadless(const std::string& packArg) {
     return 0;
 }
 
+// Blend time the engine derives from a state's flag word, from sub_497DD0 in
+// USM.exe. The order of the tests matters - 0x20 wins over 0x40 wins over 0x80
+// wins over 0x100 - and anything with none of them set snaps.
+static float AlsBlendTimeForState(uint16_t flags, float animDuration) {
+    if (flags & 0x0020) return 0.0f;
+    if (flags & 0x0040) return 0.13333f;   // 4 frames @ 30fps
+    if (flags & 0x0080) return 0.26666f;   // 8 frames @ 30fps
+    if (flags & 0x0100) {                  // proportional, clamped
+        const float t = animDuration * 0.2f;
+        return t < 0.26666f ? t : 0.26666f;
+    }
+    return 0.0f;
+}
+
+static std::string JsonEscape(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 2);
+    for (char c : value) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+// Dumps every ALS state and category with the semantics recovered from USM.exe:
+// the real blend time behind each state's flag word, and the loop flag and
+// duration read off the animation the state plays (NAL header +52 bit 0 and
+// +56). Rules come out with their raw parameter ids so the "p104 <= n" pattern -
+// frames remaining in the current animation - stays visible.
+static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg) {
+    const fs::path packPath = fs::absolute(packArg);
+    if (!fs::exists(packPath)) {
+        std::cerr << "Pack does not exist: " << packPath.string() << std::endl;
+        return 2;
+    }
+
+    SpiderManTool tool;
+    const fs::path packDir = packPath.parent_path();
+    tool.searchPath = packDir.string();
+    LoadBestDictionaryForPack(tool, packDir);
+    for (const auto& entry : fs::directory_iterator(packDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (ext == ".pcpack") tool.foundPacks.push_back(entry.path());
+    }
+    std::sort(tool.foundPacks.begin(), tool.foundPacks.end());
+    tool.BuildGlobalSkeletonIndex();
+    tool.OpenPCPack(packPath.string());
+
+    if (tool.animationStateMachines.empty()) {
+        std::cerr << "No ALS resource in pack" << std::endl;
+        return 3;
+    }
+
+    // hash -> (loop, duration, name), so a state can report what it actually plays.
+    struct AnimInfo { bool looping = false; float duration = 0.f; std::string name; bool found = false; };
+    std::map<uint32_t, AnimInfo> animByHash;
+    if (tool.loadedAnimFile) {
+        for (const auto& anim : tool.loadedAnimFile->animations) {
+            AnimInfo info;
+            info.looping  = anim.is_looping();
+            info.duration = anim.t_scale;
+            info.name     = anim.name;
+            info.found    = true;
+            animByHash[anim.name_hash] = info;
+        }
+    }
+
+    auto name = [&](uint32_t hash) { return AlsResolveHash(tool, hash); };
+
+    std::ostringstream out;
+    out << std::boolalpha;
+    out << "{\n  \"pack\": \"" << JsonEscape(packPath.filename().string()) << "\",\n";
+    out << "  \"animations_in_pack\": " << animByHash.size() << ",\n";
+    out << "  \"machines\": [\n";
+
+    auto emitRules = [&](const std::vector<UsmAls::Rule>& rules, const char* label,
+                         const std::string& indent, bool trailingComma) {
+        out << indent << "\"" << label << "\": [";
+        for (size_t i = 0; i < rules.size(); ++i) {
+            const auto& rule = rules[i];
+            out << (i ? ",\n" : "\n") << indent << "  {";
+            // Array order is evaluation order - can_transition takes the first match.
+            out << "\"order\": " << rule.priority;
+            out << ", \"action\": " << rule.action.type;
+            // Layer rules: conditionA is the layer id, conditionB the state/category hash.
+            if (rule.kind == UsmAls::RuleKind::Layer) {
+                out << ", \"layer\": " << rule.conditionA;
+                out << ", \"match\": \"" << JsonEscape(name(
+                        static_cast<uint32_t>(rule.conditionB))) << "\"";
+            }
+            // Incoming rules carry an optional "coming from" guard: conditionA is
+            // the hash, conditionB picks whether it names a category or a state.
+            if (rule.kind == UsmAls::RuleKind::Incoming && rule.conditionA) {
+                out << ", \"from\": \"" << JsonEscape(name(
+                        static_cast<uint32_t>(rule.conditionA))) << "\"";
+                out << ", \"from_is_category\": " << (rule.conditionB != 0);
+            }
+            out << ", \"target\": \"" << JsonEscape(name(rule.action.target)) << "\"";
+            if (rule.trigger)
+                out << ", \"trigger\": \"" << JsonEscape(name(rule.trigger)) << "\"";
+            if (!rule.action.destinations.empty()) {
+                out << ", \"destinations\": [";
+                for (size_t d = 0; d < rule.action.destinations.size(); ++d) {
+                    const auto& dest = rule.action.destinations[d];
+                    if (d) out << ", ";
+                    out << "{\"state\": \"" << JsonEscape(name(dest.target))
+                        << "\", \"weight\": " << dest.weight << "}";
+                }
+                out << "]";
+            }
+            if (!rule.filters.empty()) {
+                out << ", \"filters\": [";
+                for (size_t f = 0; f < rule.filters.size(); ++f) {
+                    const auto& filter = rule.filters[f];
+                    if (f) out << ", ";
+                    out << "{\"param\": " << filter.parameter
+                        << ", \"min\": " << filter.minimum
+                        << ", \"max\": " << filter.maximum
+                        << ", \"kind\": \"" << (filter.parameter >= 91 ? "internal" : "external")
+                        << "\"}";
+                }
+                out << "]";
+            }
+            if (rule.hasPostAction) out << ", \"post_action\": true";
+            out << "}";
+        }
+        out << (rules.empty() ? "]" : "\n" + indent + "]") << (trailingComma ? ",\n" : "\n");
+    };
+
+    for (size_t m = 0; m < tool.animationStateMachines.size(); ++m) {
+        const auto& file = tool.animationStateMachines[m];
+        for (size_t g = 0; g < file.machines.size(); ++g) {
+            const auto& machine = file.machines[g];
+            out << "    {\n      \"base_layer\": " << machine.baseLayer
+                << ",\n      \"layer_type\": " << machine.layerType
+                << ",\n      \"state_count\": " << machine.states.size()
+                << ",\n      \"category_count\": " << machine.categories.size()
+                << ",\n      \"states\": [\n";
+            for (size_t s = 0; s < machine.states.size(); ++s) {
+                const auto& state = machine.states[s];
+                auto found = animByHash.find(state.animation);
+                const AnimInfo info = (found != animByHash.end()) ? found->second : AnimInfo{};
+                out << "        {\n";
+                out << "          \"state\": \"" << JsonEscape(name(state.id)) << "\",\n";
+                out << "          \"category\": \"" << JsonEscape(name(state.category)) << "\",\n";
+                out << "          \"animation\": \"" << JsonEscape(name(state.animation)) << "\",\n";
+                out << "          \"anim_resolved\": " << info.found << ",\n";
+                out << "          \"anim_name\": \"" << JsonEscape(info.name) << "\",\n";
+                out << "          \"looping\": " << info.looping << ",\n";
+                out << "          \"duration\": " << info.duration << ",\n";
+                out << "          \"flags\": " << state.flags << ",\n";
+                out << "          \"blend_time\": "
+                    << AlsBlendTimeForState(state.flags, info.duration) << ",\n";
+                out << "          \"biped_physics\": " << ((state.flags & 0x0800) != 0) << ",\n";
+                out << "          \"retrigger_same_category\": "
+                    << ((state.flags & 0x0400) != 0) << ",\n";
+                out << "          \"transition_groups\": [";
+                for (size_t t = 0; t < state.transitionGroups.size(); ++t) {
+                    if (t) out << ", ";
+                    out << state.transitionGroups[t];
+                }
+                out << "],\n";
+                emitRules(state.implicitRules, "implicit", "          ", true);
+                emitRules(state.explicitRules, "explicit", "          ", true);
+                emitRules(state.layerRules,    "layer",    "          ", false);
+                out << "        }" << (s + 1 < machine.states.size() ? ",\n" : "\n");
+            }
+            out << "      ],\n      \"categories\": [\n";
+            for (size_t c = 0; c < machine.categories.size(); ++c) {
+                const auto& category = machine.categories[c];
+                out << "        {\n";
+                out << "          \"category\": \"" << JsonEscape(name(category.id)) << "\",\n";
+                out << "          \"flags\": " << category.flags << ",\n";
+                out << "          \"force_entry\": " << ((category.flags & 0x2) != 0) << ",\n";
+                // +0x10 is what category vfunc +0x30 returns: the state used when the
+                // machine is inactive and an explicit request arrives cold.
+                out << "          \"cold_start_state\": \""
+                    << JsonEscape(name(category.label)) << "\",\n";
+                // +0x14 is force_transitions.field_0, the fallback for do_cat_force_trans.
+                out << "          \"force_default_state\": \""
+                    << JsonEscape(name(category.forcedState)) << "\",\n";
+                // force_transitions: previous state/category -> destination, with a default.
+                out << "          \"force_conditions\": [";
+                for (size_t f = 0; f < category.forceConditions.size(); ++f) {
+                    const auto& alter = category.forceConditions[f];
+                    if (f) out << ", ";
+                    out << "{\"mode\": " << alter.mode
+                        << ", \"value\": " << alter.value
+                        << ", \"param\": \"" << JsonEscape(name(alter.parameter)) << "\"}";
+                }
+                out << "],\n";
+                out << "          \"transition_groups\": [";
+                for (size_t t = 0; t < category.transitionGroups.size(); ++t) {
+                    if (t) out << ", ";
+                    out << category.transitionGroups[t];
+                }
+                out << "],\n";
+                emitRules(category.implicitRules, "implicit", "          ", true);
+                emitRules(category.explicitRules, "explicit", "          ", true);
+                emitRules(category.incomingRules, "incoming", "          ", true);
+                emitRules(category.layerRules,    "layer",    "          ", false);
+                out << "        }" << (c + 1 < machine.categories.size() ? ",\n" : "\n");
+            }
+            // Transition groups: shared rule sets that states and categories reference by
+            // index. Own rules overwrite anything a group produced, so these act as a
+            // fallback - and they are where the landing transitions live, which is why
+            // nothing appeared to target BigJmpLand / SoftJmpLand.
+            out << "      ],\n      \"transition_groups\": [\n";
+            for (size_t t = 0; t < machine.transitionGroups.size(); ++t) {
+                const auto& group = machine.transitionGroups[t];
+                out << "        {\n";
+                out << "          \"index\": " << t << ",\n";
+                out << "          \"nested_groups\": " << group.transitionGroups.size() << ",\n";
+                emitRules(group.implicitRules, "implicit", "          ", true);
+                emitRules(group.explicitRules, "explicit", "          ", true);
+                emitRules(group.layerRules,    "layer",    "          ", false);
+                out << "        }" << (t + 1 < machine.transitionGroups.size() ? ",\n" : "\n");
+            }
+
+            const bool lastMachine =
+                (m + 1 == tool.animationStateMachines.size()) && (g + 1 == file.machines.size());
+            out << "      ]\n    }" << (lastMachine ? "\n" : ",\n");
+        }
+    }
+    out << "  ],\n  \"meta_animations\": [\n";
+    bool firstMeta = true;
+    for (const auto& file : tool.animationStateMachines) {
+        for (const auto& meta : file.metaAnimations) {
+            if (!firstMeta) out << ",\n";
+            firstMeta = false;
+            out << "    {\"kind\": " << static_cast<int>(meta.kind)
+                << ", \"type\": " << meta.type
+                << ", \"name\": \"" << JsonEscape(meta.name)
+                << "\", \"hash\": \"" << JsonEscape(name(meta.hash))
+                << "\", \"keys\": [";
+            for (size_t k = 0; k < meta.animationKeys.size(); ++k) {
+                if (k) out << ", ";
+                out << "\"" << JsonEscape(name(meta.animationKeys[k])) << "\"";
+            }
+            out << "]}";
+        }
+    }
+    out << (firstMeta ? "" : "\n") << "  ],\n  \"params\": {\n";
+    // ai::param_block entries - the tuning get_pb_float/get_pb_int read, including the
+    // per-jump-type height/distance pairs that drive the launch velocity.
+    {
+        std::map<std::string, std::string> merged;
+        for (const auto& file : tool.animationStateMachines) {
+            for (const auto& param : file.params) {
+                std::ostringstream value;
+                if (param.type == 1) value << param.ivalue;
+                else if (param.type == 0) value << param.fvalue;
+                else value << "\"type" << param.type << "\"";
+                merged[AlsResolveHash(tool, param.name)] = value.str();
+            }
+        }
+        size_t written = 0;
+        for (const auto& entry : merged) {
+            out << "    \"" << JsonEscape(entry.first) << "\": " << entry.second
+                << (++written < merged.size() ? ",\n" : "\n");
+        }
+    }
+    out << "  }\n}\n";
+
+    std::ofstream stream(fs::absolute(outArg), std::ios::binary);
+    if (!stream) {
+        std::cerr << "Cannot write " << outArg << std::endl;
+        return 4;
+    }
+    stream << out.str();
+    stream.close();
+
+    size_t states = 0, categories = 0, metas = 0;
+    for (const auto& file : tool.animationStateMachines) {
+        for (const auto& machine : file.machines) {
+            states += machine.states.size();
+            categories += machine.categories.size();
+        }
+        metas += file.metaAnimations.size();
+    }
+    std::cout << "states=" << states << " categories=" << categories
+              << " meta_anims=" << metas << " anims_in_pack=" << animByHash.size()
+              << " -> " << fs::absolute(outArg).string() << std::endl;
+    return 0;
+}
+
+// Dumps every BASE_AI (type 56) parameter block as name/value pairs.
+//
+// Records are 12 bytes - hash, value, type (0 float, 1 int) - and the block is sorted by
+// hash. That sortedness is the check that the record stride and start offset are right; a
+// raw byte scan for a known hash finds false positives all over the pack, which is exactly
+// how a 90-metre "jump_run_height" gets believed.
+static int DumpParamsHeadless(const std::string& packArg, const std::string& outArg) {
+    const fs::path packPath = fs::absolute(packArg);
+    if (!fs::exists(packPath)) {
+        std::cerr << "Pack does not exist: " << packPath.string() << std::endl;
+        return 2;
+    }
+
+    SpiderManTool tool;
+    const fs::path packDir = packPath.parent_path();
+    tool.searchPath = packDir.string();
+    LoadBestDictionaryForPack(tool, packDir);
+    tool.OpenPCPack(packPath.string());
+
+    if (!tool.currentDir.valid || tool.pcPackData.empty()) {
+        std::cerr << "Pack directory did not parse" << std::endl;
+        return 3;
+    }
+
+    std::ostringstream out;
+    out << "{\n  \"blocks\": [\n";
+    size_t blockCount = 0, totalRecords = 0;
+
+    for (const auto& resource : tool.currentDir.resources) {
+        if (resource.type != RES_KEY_BASE_AI || resource.size < 12) continue;
+        if (resource.offset > tool.pcPackData.size() ||
+            resource.size > tool.pcPackData.size() - resource.offset) continue;
+
+        const uint8_t* base = tool.pcPackData.data() + resource.offset;
+
+        // Find the record array: the start offset whose 12-byte stride yields the longest
+        // run of strictly increasing hashes with a valid type tag.
+        size_t bestStart = 0, bestRun = 0;
+        for (size_t start = 0; start + 12 <= resource.size && start < 256; start += 4) {
+            size_t run = 0;
+            uint32_t prev = 0;
+            bool first = true;
+            for (size_t p = start; p + 12 <= resource.size; p += 12) {
+                uint32_t hash = 0, type = 0;
+                std::memcpy(&hash, base + p, 4);
+                std::memcpy(&type, base + p + 8, 4);
+                if (type > 1) break;
+                if (!first && hash <= prev) break;
+                prev = hash;
+                first = false;
+                ++run;
+            }
+            if (run > bestRun) { bestRun = run; bestStart = start; }
+        }
+        if (bestRun < 4) continue;
+
+        if (blockCount) out << ",\n";
+        out << "    {\n      \"resource\": \"" << JsonEscape(AlsResolveHash(tool, resource.hash))
+            << "\",\n      \"records\": " << bestRun
+            << ",\n      \"params\": {\n";
+        for (size_t i = 0; i < bestRun; ++i) {
+            const size_t p = bestStart + i * 12;
+            uint32_t hash = 0, type = 0, raw = 0;
+            std::memcpy(&hash, base + p, 4);
+            std::memcpy(&raw, base + p + 4, 4);
+            std::memcpy(&type, base + p + 8, 4);
+            float asFloat = 0.f;
+            std::memcpy(&asFloat, &raw, 4);
+            out << "        \"" << JsonEscape(AlsResolveHash(tool, hash)) << "\": ";
+            if (type == 1) out << static_cast<int32_t>(raw);
+            else           out << asFloat;
+            out << (i + 1 < bestRun ? ",\n" : "\n");
+        }
+        out << "      }\n    }";
+        ++blockCount;
+        totalRecords += bestRun;
+    }
+    out << "\n  ]\n}\n";
+
+    std::ofstream stream(fs::absolute(outArg), std::ios::binary);
+    if (!stream) { std::cerr << "Cannot write " << outArg << std::endl; return 4; }
+    stream << out.str();
+    stream.close();
+
+    std::cout << "param blocks=" << blockCount << " records=" << totalRecords
+              << " -> " << fs::absolute(outArg).string() << std::endl;
+    return 0;
+}
+
+// Dumps the NAL Tentacles component's 15 animated tracks (5 chains x diameter,
+// activity, pull) for every animation in a pack, so they can be rebuilt as
+// engine-side curves. The default pose is all zeros, so without these the
+// tentacles just sit at whatever fixed diameter they were given.
+static int DumpTentacleCurvesHeadless(const std::string& packArg, const std::string& outArg) {
+    const fs::path packPath = fs::absolute(packArg);
+    if (!fs::exists(packPath)) {
+        std::cerr << "Pack does not exist: " << packPath.string() << std::endl;
+        return 2;
+    }
+
+    SpiderManTool tool;
+    const fs::path packDir = packPath.parent_path();
+    tool.searchPath = packDir.string();
+    LoadBestDictionaryForPack(tool, packDir);
+    for (const auto& entry : fs::directory_iterator(packDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (ext == ".pcpack") tool.foundPacks.push_back(entry.path());
+    }
+    std::sort(tool.foundPacks.begin(), tool.foundPacks.end());
+    tool.BuildGlobalSkeletonIndex();
+    tool.OpenPCPack(packPath.string());
+
+    if (!tool.loadedAnimFile) {
+        std::cerr << "No animation file in pack" << std::endl;
+        return 3;
+    }
+
+    // Chain order matches the pose layout used by the preview renderer.
+    static const char* kChainNames[5] = {
+        "UpLeftTent", "UpRightTent", "LowLeftTent", "LowRightTent", "Tongue"};
+    static const char* kTrackNames[3] = {"Diameter", "Activity", "Pull"};
+
+    std::ofstream out(outArg);
+    if (!out) {
+        std::cerr << "Cannot write: " << outArg << std::endl;
+        return 4;
+    }
+
+    out << "{\n  \"pack\": \"" << packPath.stem().string() << "\",\n";
+    out << "  \"chains\": [\"UpLeftTent\", \"UpRightTent\", \"LowLeftTent\", "
+           "\"LowRightTent\", \"Tongue\"],\n";
+    out << "  \"animations\": [\n";
+
+    size_t written = 0;
+    for (const auto& animation : tool.loadedAnimFile->animations) {
+        int tentacleIndex = -1;
+        for (size_t ci = 0; ci < animation.components.size(); ++ci) {
+            if (animation.components[ci].comp_ix == NalComp::TENTACLE &&
+                !animation.components[ci].decoded.frames.empty()) {
+                tentacleIndex = static_cast<int>(ci);
+                break;
+            }
+        }
+        if (tentacleIndex < 0) continue;
+        const auto& frames = animation.components[tentacleIndex].decoded.frames;
+
+        if (written++) out << ",\n";
+        out << "    {\n      \"name\": \"" << animation.name << "\",\n";
+        out << "      \"frames\": " << frames.size() << ",\n";
+        out << "      \"curves\": {\n";
+        for (int chain = 0; chain < 5; ++chain) {
+            for (int track = 0; track < 3; ++track) {
+                const size_t valueIndex = static_cast<size_t>(chain) * 3 + track;
+                out << "        \"" << kChainNames[chain] << "_" << kTrackNames[track] << "\": [";
+                for (size_t frame = 0; frame < frames.size(); ++frame) {
+                    if (frame) out << ", ";
+                    out << (valueIndex < frames[frame].size() ? frames[frame][valueIndex] : 0.0f);
+                }
+                out << (chain == 4 && track == 2 ? "]\n" : "],\n");
+            }
+        }
+        out << "      }\n    }";
+    }
+    out << "\n  ]\n}\n";
+    std::cout << "Wrote " << written << " animations with tentacle tracks to "
+              << outArg << std::endl;
+    return 0;
+}
+
 static int ScanAnimationFailuresHeadless(const std::string& packDirArg) {
     const fs::path packDir = fs::absolute(packDirArg);
     if (!fs::is_directory(packDir)) return 2;
@@ -1095,6 +1588,15 @@ int main(int argc, char** argv) {
     }
     if (argc >= 3 && std::string(argv[1]) == "--inspect-animation-morph") {
         return InspectAnimationMorphHeadless(argv[2]);
+    }
+    if (argc >= 4 && std::string(argv[1]) == "--dump-params") {
+        return DumpParamsHeadless(argv[2], argv[3]);
+    }
+    if (argc >= 4 && std::string(argv[1]) == "--dump-als") {
+        return DumpAlsHeadless(argv[2], argv[3]);
+    }
+    if (argc >= 4 && std::string(argv[1]) == "--dump-tentacle-curves") {
+        return DumpTentacleCurvesHeadless(argv[2], argv[3]);
     }
     if (argc >= 3 && std::string(argv[1]) == "--scan-animation-failures") {
         return ScanAnimationFailuresHeadless(argv[2]);

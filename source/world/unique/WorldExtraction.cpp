@@ -176,7 +176,11 @@ static bool ConvertDDStoPNG(const std::vector<uint8_t>& dds, const fs::path& png
     return stbi_write_png(pngPath.string().c_str(), w, h, 4, rgba.data(), w*4) != 0;
 }
 
-static void WriteGLB(const fs::path& path, const RenderMesh& mesh) {
+// Writes a single-mesh GLB. When pngBytes is supplied the image is embedded as a bufferView-backed
+// glTF image and wired to baseColorTexture, so the model arrives textured in Blender/UE rather than
+// as flat grey with a loose PNG sitting next to it.
+static void WriteGLB(const fs::path& path, const RenderMesh& mesh,
+                     const std::vector<uint8_t>& pngBytes = {}) {
     std::vector<uint16_t> triangleIndices;
     if (mesh.mode == GL_TRIANGLE_STRIP) {
         for (size_t i = 0; i + 2 < mesh.indices.size(); i++) {
@@ -189,6 +193,15 @@ static void WriteGLB(const fs::path& path, const RenderMesh& mesh) {
         triangleIndices = mesh.indices;
     }
     if (triangleIndices.empty()) return;
+
+    // Convert the source winding to glTF's convention (counter-clockwise = front-facing), the same
+    // correction the model exporter applies. The game draws with D3DCULL_CW, the opposite rule, so
+    // passing indices through unchanged yields geometry that reads as inside-out anywhere culling
+    // is enforced -- Blender hides it, UE does not. Runs after the strip conversion above so the
+    // list is uniform either way.
+    for (size_t i = 0; i + 2 < triangleIndices.size(); i += 3) {
+        std::swap(triangleIndices[i + 1], triangleIndices[i + 2]);
+    }
 
     int vertexCount = (int)mesh.positions.size() / 3;
     float minP[3] = {1e30f,1e30f,1e30f}, maxP[3] = {-1e30f,-1e30f,-1e30f};
@@ -215,6 +228,32 @@ static void WriteGLB(const fs::path& path, const RenderMesh& mesh) {
     align(); int idxOff = add(triangleIndices.data(), triangleIndices.size()*2); int idxLen = (int)(triangleIndices.size()*2);
     align();
 
+    // Vertex colours carry the world's baked lighting/AO -- the exterior and building shaders are
+    // essentially diffuse * vertexColour, so dropping these loses most of the world's shading.
+    const bool hasColors = mesh.colors.size() == (size_t)vertexCount * 4;
+    int colOff = 0, colLen = 0;
+    if (hasColors) {
+        colOff = add(mesh.colors.data(), mesh.colors.size() * 4);
+        colLen = (int)(mesh.colors.size() * 4);
+        align();
+    }
+
+    // Image data rides in the same binary chunk as a trailing bufferView.
+    const bool hasImage = !pngBytes.empty();
+    int imgOff = 0, imgLen = 0;
+    if (hasImage) {
+        imgOff = add(pngBytes.data(), pngBytes.size());
+        imgLen = (int)pngBytes.size();
+        align();
+    }
+
+    // bufferViews/accessors are numbered in emission order; keep the indices in sync here so the
+    // optional colour and image views do not shift each other.
+    int nextView = 4;
+    const int colView = hasColors ? nextView++ : -1;
+    const int imgView = hasImage  ? nextView++ : -1;
+    const int colAccessor = hasColors ? 4 : -1;
+
     std::string name = mesh.meshName;
     for (char& c : name) if (c == '"' || c == '\\') c = '_';
 
@@ -224,23 +263,41 @@ static void WriteGLB(const fs::path& path, const RenderMesh& mesh) {
     j << "{\"buffer\":0,\"byteOffset\":" << posOff << ",\"byteLength\":" << posLen << ",\"target\":34962},";
     j << "{\"buffer\":0,\"byteOffset\":" << nrmOff << ",\"byteLength\":" << nrmLen << ",\"target\":34962},";
     j << "{\"buffer\":0,\"byteOffset\":" << uvOff << ",\"byteLength\":" << uvLen << ",\"target\":34962},";
-    j << "{\"buffer\":0,\"byteOffset\":" << idxOff << ",\"byteLength\":" << idxLen << ",\"target\":34963}],";
+    j << "{\"buffer\":0,\"byteOffset\":" << idxOff << ",\"byteLength\":" << idxLen << ",\"target\":34963}";
+    if (hasColors) j << ",{\"buffer\":0,\"byteOffset\":" << colOff << ",\"byteLength\":" << colLen << ",\"target\":34962}";
+    // No 'target' on the image view: it is not vertex or index data.
+    if (hasImage)  j << ",{\"buffer\":0,\"byteOffset\":" << imgOff << ",\"byteLength\":" << imgLen << "}";
+    j << "],";
     j << "\"accessors\":[";
     j << "{\"bufferView\":0,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC3\","
       << "\"min\":[" << minP[0] << "," << minP[1] << "," << minP[2] << "],"
       << "\"max\":[" << maxP[0] << "," << maxP[1] << "," << maxP[2] << "]},";
     j << "{\"bufferView\":1,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC3\"},";
     j << "{\"bufferView\":2,\"componentType\":5126,\"count\":" << vertexCount << ",\"type\":\"VEC2\"},";
-    j << "{\"bufferView\":3,\"componentType\":5123,\"count\":" << triangleIndices.size() << ",\"type\":\"SCALAR\"}],";
+    j << "{\"bufferView\":3,\"componentType\":5123,\"count\":" << triangleIndices.size() << ",\"type\":\"SCALAR\"}";
+    if (hasColors)
+        j << ",{\"bufferView\":" << colView << ",\"componentType\":5126,\"count\":" << vertexCount
+          << ",\"type\":\"VEC4\"}";
+    j << "],";
+    if (hasImage) {
+        j << "\"images\":[{\"bufferView\":" << imgView << ",\"mimeType\":\"image/png\",\"name\":\""
+          << name << "_tex\"}],";
+        j << "\"samplers\":[{\"wrapS\":10497,\"wrapT\":10497}],";
+        j << "\"textures\":[{\"source\":0,\"sampler\":0}],";
+    }
     const char* alphaMode = mesh.isAlphaTest ? "MASK" : (mesh.isTranslucent ? "BLEND" : "OPAQUE");
     j << "\"materials\":[{\"name\":\"" << name << "\",\"doubleSided\":true,"
-      << "\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.8,0.8,0.8,1],\"metallicFactor\":0,\"roughnessFactor\":1},"
+      << "\"pbrMetallicRoughness\":{";
+    if (hasImage) j << "\"baseColorTexture\":{\"index\":0},";
+    else          j << "\"baseColorFactor\":[0.8,0.8,0.8,1],";
+    j << "\"metallicFactor\":0,\"roughnessFactor\":1},"
       << "\"alphaMode\":\"" << alphaMode << "\"";
     if (mesh.isAlphaTest) j << ",\"alphaCutoff\":0.5";
     j << "}],";
     j << "\"meshes\":[{\"name\":\"" << name << "\",\"primitives\":[{"
-      << "\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},"
-      << "\"indices\":3,\"material\":0}]}],";
+      << "\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2";
+    if (hasColors) j << ",\"COLOR_0\":" << colAccessor;
+    j << "},\"indices\":3,\"material\":0}]}],";
     j << "\"nodes\":[{\"name\":\"" << name << "\",\"mesh\":0}],";
     j << "\"scenes\":[{\"nodes\":[0]}],\"scene\":0,";
     j << "\"buffers\":[{\"byteLength\":" << bin.size() << "}]}";
@@ -259,157 +316,295 @@ static void WriteGLB(const fs::path& path, const RenderMesh& mesh) {
     out.close();
 }
 
+// Exports the world as a scene: one GLB per *unique* mesh under world/glb/<category>/, the
+// textures beside them as PNG, and world/nyc.json holding every placement.
+//
+// The world contains the same source geometry many times over (a railing appears thousands of
+// times), so writing geometry per placement would be enormous and lossy. Meshes are deduplicated
+// by source identity (pack + offset + section) and the JSON carries the transforms, which is what
+// a scene importer actually needs.
+//
+// This loads the world itself rather than requiring the caller to have done so, saving and
+// restoring whatever was previously in the viewport. The writing is stepped via WorldExportStep
+// so the UI can show progress instead of freezing.
 void SpiderManTool::ExtractAllWorldMeshes() {
-    if (foundPacks.empty()) return;
+    if (isExportingWorld) return;
 
-    fs::path levelsDir = fs::current_path() / "extracted" / "Levels";
-    fs::path propsDir = fs::current_path() / "extracted" / "Props";
-    fs::create_directories(levelsDir);
-    fs::create_directories(propsDir);
+    exportItems.clear();
+    exportPlacements.clear();
+    exportProgress = 0;
+    exportTotal = 0;
+    exportCurrentItem.clear();
 
-    auto savedMeshes = std::move(previewMeshes);
+    // Take over the viewport for the duration; restored when the export finishes.
+    exportSavedMeshes = std::move(previewMeshes);
     previewMeshes.clear();
+    LoadAllWorldGeometries();
 
-    std::set<uint32_t> exported;
-    int levelCount = 0, propCount = 0;
-
-    for (const auto& packPath : foundPacks) {
-        std::string stem = packPath.stem().string();
-        std::string stemLower = StrToLower(stem);
-        bool isCityArena = (stemLower == "city_arena");
-        if (stem.length() != 2 && !isCityArena) continue;
-
-        std::ifstream file(packPath, std::ios::binary);
-        if (!file.is_open()) continue;
-
-        file.seekg(0, std::ios::end);
-        size_t fileSize = file.tellg();
-        if (fileSize < 64) { file.close(); continue; }
-
-        file.seekg(24);
-        uint32_t headerSize, dataOffset;
-        file.read((char*)&headerSize, 4);
-        file.read((char*)&dataOffset, 4);
-
-        size_t hdrRead = std::min((size_t)dataOffset, std::min(fileSize, (size_t)0x100000));
-        std::vector<uint8_t> hdr(hdrRead);
-        file.seekg(0);
-        file.read((char*)hdr.data(), hdrRead);
-
-        size_t tocStart = FindTocStart(hdr, hdrRead);
-        if (tocStart == 0) { file.close(); continue; }
-
-        struct TocEntry { uint32_t hash, type, absOffset, size; };
-        std::vector<TocEntry> toc;
-        size_t pos = tocStart;
-        while (pos + 16 <= hdrRead) {
-            uint32_t h, t, o, s;
-            memcpy(&h, &hdr[pos], 4); memcpy(&t, &hdr[pos+4], 4);
-            memcpy(&o, &hdr[pos+8], 4); memcpy(&s, &hdr[pos+12], 4);
-            if (t >= 0x1000 || t == 0) break;
-            toc.push_back({h, t, dataOffset + o, s});
-            pos += 16;
+    auto categoryFolder = [](WorldMeshKind k) -> const char* {
+        switch (k) {
+            case WorldMeshKind::Zone:
+            case WorldMeshKind::SceneEntity:  return "zone chunks";
+            case WorldMeshKind::Interior:     return "interior";
+            case WorldMeshKind::Conglomerate: return "conglomerates";
+            case WorldMeshKind::Lego:         return "lego";
+            default:                          return nullptr;
         }
+    };
 
-        uint32_t zoneBaseHash = 0;
-        if (!isCityArena) {
-            std::string zoneBaseName = stemLower + "c";
-            zoneBaseHash = HashString33(zoneBaseName);
-            uint32_t largestHash = 0, largestSize = 0;
-            for (auto& te : toc) {
-                if (te.type == 0x15 && te.size > largestSize) {
-                    largestSize = te.size; largestHash = te.hash;
-                }
-            }
-            if (largestHash != 0 && largestHash != zoneBaseHash) zoneBaseHash = largestHash;
+    const fs::path worldDir = fs::current_path() / "world";
+    const fs::path glbDir   = worldDir / "glb";
+    fs::create_directories(glbDir);
+    for (const char* sub : {"zone chunks", "interior", "conglomerates", "lego"})
+        fs::create_directories(glbDir / sub);
+    exportRootDir = worldDir.string();
+
+    auto sanitize = [](std::string n) {
+        for (char& c : n)
+            if (c == '/' || c == '\\' || c == ':' || c == '*' ||
+                c == '?' || c == '"'  || c == '<' || c == '>' || c == '|') c = '_';
+        if (n.empty()) n = "mesh";
+        return n;
+    };
+
+    // Identity of the geometry itself, not of where it happened to be loaded from.
+    //
+    // The same prop is loaded out of many packs and merged into several instance batches, so
+    // keying on pack/offset produced one GLB per batch ("obj_cardboard x60" and
+    // "obj_cardboard x474" as two files). Keying on the base name plus a geometry signature
+    // collapses those into a single mesh whose instances are pooled from every batch.
+    auto baseMeshName = [](const std::string& n) {
+        // Batched meshes are named "<name> xN"; strip the count so batches of the same prop match.
+        const size_t x = n.rfind(" x");
+        if (x != std::string::npos && x + 2 < n.size()) {
+            bool digits = true;
+            for (size_t i = x + 2; i < n.size(); ++i)
+                if (!std::isdigit((unsigned char)n[i])) { digits = false; break; }
+            if (digits) return n.substr(0, x);
         }
+        return n;
+    };
 
-        for (auto& te : toc) {
-            if (te.type != 0x15) continue;
-            if (te.size < 64) continue;
-            if (exported.count(te.hash)) continue;
-            exported.insert(te.hash);
-
-            std::string meshName = dictionary.count(te.hash) ? dictionary[te.hash] : "";
-            if (meshName.empty()) {
-                char buf[32]; snprintf(buf, 32, "0x%08X", te.hash);
-                meshName = buf;
-            }
-
-            bool isLevel = (!isCityArena && te.hash == zoneBaseHash);
-            fs::path destDir = isLevel ? levelsDir : propsDir;
-
-            if (te.absOffset + te.size > fileSize) continue;
-            std::vector<uint8_t> pcmData(te.size);
-            file.seekg(te.absOffset);
-            file.read((char*)pcmData.data(), te.size);
-
-            previewMeshes.clear();
-            AddMeshFromData(pcmData, meshName, nullptr, packPath.string(), te.absOffset);
-
-            for (size_t mi = 0; mi < previewMeshes.size(); mi++) {
-                auto& m = previewMeshes[mi];
-                if (m.positions.empty() || m.indices.empty()) continue;
-
-                std::string baseName = meshName;
-                if (previewMeshes.size() > 1) baseName += "_" + std::to_string(mi);
-                for (char& c : baseName) if (c=='/'||c=='\\'||c==':'||c=='*'||c=='?'||c=='"'||c=='<'||c=='>'||c=='|') c = '_';
-
-                WriteGLB(destDir / (baseName + ".glb"), m);
-
-                if (!m.textureName.empty()) {
-                    std::string texLower = StrToLower(m.textureName);
-                    std::vector<uint8_t> texData;
-                    bool hasTex = false;
-                    if (globalTextureNameIndex.count(texLower)) {
-                        auto& loc = globalTextureNameIndex[texLower];
-                        std::ifstream tf(loc.packPath, std::ios::binary);
-                        if (tf.is_open()) {
-                            tf.seekg(loc.offset); texData.resize(loc.size);
-                            tf.read((char*)texData.data(), loc.size); tf.close();
-                            hasTex = true;
-                        }
-                    }
-                    if (!hasTex && m.textureHash != 0 && globalTextureIndex.count(m.textureHash)) {
-                        auto& loc = globalTextureIndex[m.textureHash];
-                        std::ifstream tf(loc.packPath, std::ios::binary);
-                        if (tf.is_open()) {
-                            tf.seekg(loc.offset); texData.resize(loc.size);
-                            tf.read((char*)texData.data(), loc.size); tf.close();
-                            hasTex = true;
-                        }
-                    }
-                    if (hasTex) {
-                        std::string texBaseName = m.textureName;
-                        for (char& c : texBaseName) if (c=='/'||c=='\\'||c==':'||c=='*'||c=='?'||c=='"'||c=='<'||c=='>'||c=='|') c = '_';
-                        fs::path ddsPath = destDir / (texBaseName + ".dds");
-                        fs::path pngPath = destDir / (texBaseName + ".png");
-                        if (!fs::exists(ddsPath)) {
-                            std::ofstream dout(ddsPath, std::ios::binary);
-                            dout.write((char*)texData.data(), texData.size());
-                            dout.close();
-                        }
-                        if (!fs::exists(pngPath)) {
-                            ConvertDDStoPNG(texData, pngPath);
-                        }
-                    }
-                }
-            }
-
-            for (auto& m : previewMeshes) {
-                if (m.vao) glDeleteVertexArrays(1, &m.vao);
-                if (m.vbo) glDeleteBuffers(1, &m.vbo);
-                if (m.ebo) glDeleteBuffers(1, &m.ebo);
-                if (m.instanceVbo) glDeleteBuffers(1, &m.instanceVbo);
-            }
-            previewMeshes.clear();
-            if (isLevel) levelCount++; else propCount++;
+    struct MeshKey {
+        std::string name;      // base name, count suffix removed
+        std::string texture;
+        size_t vertexCount;
+        size_t indexCount;
+        bool operator<(const MeshKey& o) const {
+            if (name != o.name) return name < o.name;
+            if (texture != o.texture) return texture < o.texture;
+            if (vertexCount != o.vertexCount) return vertexCount < o.vertexCount;
+            return indexCount < o.indexCount;
         }
+    };
+    std::map<MeshKey, int> uniqueIds;
+    std::map<std::string, int> nameUses;   // keeps filenames unique when names collide
 
-        file.close();
+    for (size_t mi = 0; mi < previewMeshes.size(); ++mi) {
+        const auto& mesh = previewMeshes[mi];
+        const char* folder = categoryFolder(mesh.worldKind);
+        if (!folder) continue;
+        if (mesh.positions.empty() || mesh.indices.empty()) continue;
+
+        const std::string base = baseMeshName(mesh.meshName.empty() ? "mesh" : mesh.meshName);
+        const MeshKey key{ base, StrToLower(mesh.textureName),
+                           mesh.positions.size(), mesh.indices.size() };
+
+        auto found = uniqueIds.find(key);
+        if (found == uniqueIds.end()) {
+            // Group zone chunks by the zone they belong to -- one folder per district pack
+            // (BD, CE, AF...), models loose inside it.
+            std::string subDir;
+            if (std::string(folder) == "zone chunks") {
+                std::string zone;
+                if (!mesh.sourcePack.empty())
+                    zone = StrToLower(fs::path(mesh.sourcePack).stem().string());
+                subDir = sanitize(zone.empty() ? std::string("misc") : zone);
+            }
+
+            const fs::path destDir = subDir.empty() ? (glbDir / folder)
+                                                    : (glbDir / folder / subDir);
+            if (!subDir.empty()) fs::create_directories(destDir);
+
+            // Uniquify per destination folder, so the same name in two PCMs keeps its own name.
+            std::string fileBase = sanitize(base);
+            const std::string useKey = subDir + "/" + fileBase;
+            const int use = nameUses[useKey]++;
+            if (use > 0) fileBase += "_" + std::to_string(use);
+
+            const std::string rel = subDir.empty()
+                ? (std::string("glb/") + folder + "/" + fileBase + ".glb")
+                : (std::string("glb/") + folder + "/" + subDir + "/" + fileBase + ".glb");
+
+            WorldExportItem item;
+            item.meshIndex   = (int)mi;
+            item.name        = fileBase;
+            item.category    = folder;
+            item.pcmName     = subDir;
+            item.relPath     = rel;
+            item.outFile     = (destDir / (fileBase + ".glb")).string();
+            item.textureName = mesh.textureName;
+            item.textureHash = mesh.textureHash;
+            item.shaderName  = mesh.materialShaderName;
+
+            found = uniqueIds.emplace(key, (int)exportItems.size()).first;
+            exportItems.push_back(std::move(item));
+        }
+        const int meshId = found->second;
+
+        // Every way a mesh can be positioned: per-instance, a single placement matrix, or origin.
+        if (!mesh.instances.empty()) {
+            for (size_t ii = 0; ii < mesh.instances.size(); ++ii) {
+                const auto& inst = mesh.instances[ii];
+                if (inst.isHidden) continue;
+                exportPlacements.push_back({ meshId,
+                    inst.name.empty() ? (exportItems[meshId].name + "_" + std::to_string(ii))
+                                      : inst.name,
+                    inst.transform });
+            }
+        } else if (mesh.hasPlacementTransform) {
+            exportPlacements.push_back({ meshId,
+                mesh.placementName.empty() ? exportItems[meshId].name : mesh.placementName,
+                mesh.placementTransform });
+        } else {
+            std::array<float, 16> identity{};
+            identity[0] = identity[5] = identity[10] = identity[15] = 1.0f;
+            exportPlacements.push_back({ meshId, exportItems[meshId].name, identity });
+        }
     }
 
-    previewMeshes = std::move(savedMeshes);
-    ShowNotification("Extracted " + std::to_string(levelCount) + " levels, " + std::to_string(propCount) + " props\n"
-        + levelsDir.string() + "\n" + propsDir.string());
+    if (exportItems.empty()) {
+        previewMeshes = std::move(exportSavedMeshes);
+        exportSavedMeshes.clear();
+        ShowNotification("No categorised world meshes found to export.");
+        return;
+    }
+
+    exportTotal = (int)exportItems.size();
+    isExportingWorld = true;
+}
+
+// Writes a slice of the pending export. Pumped once per frame from the UI so the progress bar
+// updates; when the last item lands it emits nyc.json and hands the viewport back.
+void SpiderManTool::WorldExportStep(int itemsThisFrame) {
+    if (!isExportingWorld) return;
+
+    const fs::path worldDir(exportRootDir);
+
+    for (int n = 0; n < itemsThisFrame && exportProgress < exportTotal; ++n, ++exportProgress) {
+        const auto& item = exportItems[exportProgress];
+        if (item.meshIndex < 0 || item.meshIndex >= (int)previewMeshes.size()) continue;
+        const auto& mesh = previewMeshes[item.meshIndex];
+
+        exportCurrentItem = item.name;
+
+        // Resolve the texture first so it can be embedded in the GLB. It is also written beside
+        // the model as a loose PNG, which keeps the files usable outside a glTF importer.
+        std::vector<uint8_t> pngBytes;
+        if (!item.textureName.empty()) {
+            const fs::path pngPath =
+                fs::path(item.outFile).parent_path() / (item.textureName + ".png");
+
+            if (!fs::exists(pngPath)) {
+                std::vector<uint8_t> dds;
+                auto pull = [&](const auto& index, auto lookup) {
+                    auto it = index.find(lookup);
+                    if (it == index.end()) return false;
+                    std::ifstream tf(it->second.packPath, std::ios::binary);
+                    if (!tf.is_open()) return false;
+                    tf.seekg(it->second.offset);
+                    dds.resize(it->second.size);
+                    tf.read((char*)dds.data(), it->second.size);
+                    return true;
+                };
+                if (!pull(globalTextureNameIndex, StrToLower(item.textureName)) &&
+                    item.textureHash != 0)
+                    pull(globalTextureIndex, item.textureHash);
+
+                if (!dds.empty()) ConvertDDStoPNG(dds, pngPath);
+            }
+
+            // Read back whatever ended up on disk (freshly written or from an earlier mesh that
+            // shares this texture) and embed those exact bytes.
+            std::ifstream pf(pngPath, std::ios::binary | std::ios::ate);
+            if (pf.is_open()) {
+                const std::streamsize sz = pf.tellg();
+                if (sz > 0) {
+                    pngBytes.resize((size_t)sz);
+                    pf.seekg(0);
+                    pf.read((char*)pngBytes.data(), sz);
+                }
+            }
+        }
+
+        WriteGLB(fs::path(item.outFile), mesh, pngBytes);
+    }
+
+    if (exportProgress < exportTotal) return;
+
+    auto jsonEscape = [](const std::string& v) {
+        std::string o;
+        for (char c : v) {
+            if (c == '"' || c == '\\') { o += '\\'; o += c; }
+            else if ((unsigned char)c < 0x20) continue;
+            else o += c;
+        }
+        return o;
+    };
+
+    std::ofstream js(worldDir / "nyc.json");
+    if (js.is_open()) {
+        js << "{\n";
+        js << "  \"name\": \"nyc\",\n";
+        js << "  \"generator\": \"Ultimate-Spider-Browser\",\n";
+        js << "  \"transform_order\": \"column-major 4x4, glTF convention\",\n";
+
+        js << "  \"meshes\": [\n";
+        for (size_t i = 0; i < exportItems.size(); ++i) {
+            const auto& it = exportItems[i];
+            js << "    {\"id\": " << i
+               << ", \"name\": \"" << jsonEscape(it.name) << "\""
+               << ", \"category\": \"" << jsonEscape(it.category) << "\""
+               << ", \"file\": \"" << jsonEscape(it.relPath) << "\""
+               << ", \"texture\": \"" << jsonEscape(it.textureName) << "\""
+               << ", \"shader\": \"" << jsonEscape(it.shaderName) << "\""
+               << ", \"pcm\": \"" << jsonEscape(it.pcmName) << "\"}"
+               << (i + 1 < exportItems.size() ? "," : "") << "\n";
+        }
+        js << "  ],\n";
+
+        js << "  \"instances\": [\n";
+        for (size_t i = 0; i < exportPlacements.size(); ++i) {
+            const auto& p = exportPlacements[i];
+            js << "    {\"mesh\": " << p.meshId
+               << ", \"name\": \"" << jsonEscape(p.name) << "\""
+               << ", \"transform\": [";
+            for (int k = 0; k < 16; ++k) { js << p.transform[k]; if (k < 15) js << ", "; }
+            js << "]}" << (i + 1 < exportPlacements.size() ? "," : "") << "\n";
+        }
+        js << "  ]\n";
+        js << "}\n";
+        js.close();
+    }
+
+    const size_t uniqueCount = exportItems.size();
+    const size_t placeCount  = exportPlacements.size();
+
+    for (auto& m : previewMeshes) {
+        if (m.vao) glDeleteVertexArrays(1, &m.vao);
+        if (m.vbo) glDeleteBuffers(1, &m.vbo);
+        if (m.ebo) glDeleteBuffers(1, &m.ebo);
+        if (m.instanceVbo) glDeleteBuffers(1, &m.instanceVbo);
+    }
+    previewMeshes = std::move(exportSavedMeshes);
+    exportSavedMeshes.clear();
+    exportItems.clear();
+    exportPlacements.clear();
+    isExportingWorld = false;
+    exportCurrentItem.clear();
+
+    ShowNotification("World exported\n" +
+        std::to_string(uniqueCount) + " unique meshes, " +
+        std::to_string(placeCount) + " placements\n" +
+        worldDir.string());
 }

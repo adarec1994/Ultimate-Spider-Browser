@@ -2697,6 +2697,7 @@ void SpiderManTool::AddMeshFromData(const std::vector<uint8_t>& pcmData, std::st
             glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(12*sizeof(float))); glEnableVertexAttribArray(4);
             glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(16*sizeof(float))); glEnableVertexAttribArray(5);
             glBindVertexArray(0);
+            mesh.worldKind = currentWorldKind;
             previewMeshes.push_back(mesh);
         }
     }
@@ -2868,6 +2869,7 @@ void SpiderManTool::FlushPendingWholeWorldInstances() {
         drawMeshCount += previewMeshes.size() - firstMesh;
         for (size_t meshIndex = firstMesh; meshIndex < previewMeshes.size(); ++meshIndex) {
             RenderMesh& mesh = previewMeshes[meshIndex];
+            mesh.worldKind = batch.kind;   // restore the pass that queued it
             const size_t namedCount = std::min(mesh.instances.size(), batch.instanceNames.size());
             for (size_t instanceIndex = 0; instanceIndex < namedCount; ++instanceIndex) {
                 mesh.instances[instanceIndex].name = batch.instanceNames[instanceIndex];
@@ -3251,6 +3253,9 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             batch.sourcePack = sourcePack;
             batch.sourceOffset = sourceOffset;
             batch.onlyMeshOffset = onlyMeshOffset;
+            // Record the kind now: the batch is created later by FlushPendingWholeWorldInstances,
+            // by which point currentWorldKind has moved on to whichever pass ran last.
+            batch.kind = currentWorldKind;
         }
         std::array<float, 16> placement{};
         memcpy(placement.data(), transform, sizeof(float) * 16);
@@ -3602,6 +3607,7 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(12*sizeof(float))); glEnableVertexAttribArray(4);
             glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(16*sizeof(float))); glEnableVertexAttribArray(5);
             glBindVertexArray(0);
+            mesh.worldKind = currentWorldKind;
             previewMeshes.push_back(mesh);
         }
     }
@@ -3876,6 +3882,7 @@ void SpiderManTool::AddMeshInstancesFromDataBatched(
         glEnableVertexAttribArray(5);
         glBindVertexArray(0);
 
+        mesh.worldKind = currentWorldKind;
         previewMeshes.push_back(std::move(mesh));
     };
 
@@ -4553,6 +4560,16 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 sm.indices = newIndices;
             }
 
+            // Convert the source winding to glTF's convention (counter-clockwise = front-facing).
+            // The game draws these with D3DCULL_CW, the opposite rule, so passing the indices
+            // through unchanged yields geometry that reads as inside-out anywhere culling is
+            // actually enforced. Blender hides it (every exported material is doubleSided), but
+            // importers that respect the spec render the back faces. Runs after the strip
+            // conversion above, so sm.indices is a plain triangle list either way.
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
+                std::swap(sm.indices[i + 1], sm.indices[i + 2]);
+            }
+
             if (!sm.pos.empty() && !sm.indices.empty()) {
                 submeshes.push_back(sm);
             }
@@ -4568,6 +4585,20 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             break;
         }
     }
+
+    // Ground the model on Y=0. USM authors character geometry around a pelvis-height origin, so a
+    // raw export lands half below the floor when imported. This vertex-based offset is the fallback
+    // for static meshes; skinned characters refine it to the foot bones below (a stray sole/cloth
+    // vertex under the feet would otherwise over-lift the model). For a skinned mesh glTF ignores
+    // the mesh node's own transform, so the lift must sit on the joints' shared parent (the
+    // "Skeleton" node); for a static mesh it goes on the mesh node itself.
+    float groundOffsetY = 0.0f;
+    {
+        float minY = 1e9f;
+        for (auto& sm : submeshes) minY = std::min(minY, sm.minP[1]);
+        if (minY < 1e9f) groundOffsetY = -minY;
+    }
+    const float groundTranslation[3] = {0.0f, groundOffsetY, 0.0f};
 
     PCMBoneMatrices boneMats;
     for (auto& inf : infos) {
@@ -4741,13 +4772,32 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             activeBoneMapping.meshPoseCount == totalBones &&
             activeBoneMapping.meshToLogical.size() == totalBones &&
             !activeBoneMapping.logicalToMesh.empty();
-        const uint32_t logicalBoneCount = entityMapMatches
+        uint32_t logicalBoneCount = entityMapMatches
             ? (uint32_t)activeBoneMapping.logicalToMesh.size()
             : totalBones;
-        exportLogicalToMesh.resize(logicalBoneCount);
+        // ArbitraryPO chain bones (Venom's tentacles and tongue) sit past the skinning bones, so
+        // the logical range has to be widened to reach them - otherwise both this exporter and
+        // GlbBuildAnimationWorldMatricesForFrame clip them off before they can be written.
+        if (exportSkeleton) {
+            for (const auto& component : exportSkeleton->components) {
+                if (component.type_id != NalCompType::ArbitraryPO) continue;
+                for (const auto& node : component.arb_nodes) {
+                    if (node.my_matrix_ix >= 0) {
+                        logicalBoneCount = std::max(logicalBoneCount,
+                                                    (uint32_t)node.my_matrix_ix + 1);
+                    }
+                }
+            }
+        }
+        exportLogicalToMesh.assign(logicalBoneCount, -1);
         exportMeshToLogical.resize(totalBones);
         for (uint32_t i = 0; i < logicalBoneCount; ++i) {
-            exportLogicalToMesh[i] = entityMapMatches ? activeBoneMapping.logicalToMesh[i] : (int)i;
+            if (entityMapMatches) {
+                exportLogicalToMesh[i] = (i < activeBoneMapping.logicalToMesh.size())
+                    ? activeBoneMapping.logicalToMesh[i] : -1;
+            } else {
+                exportLogicalToMesh[i] = (i < totalBones) ? (int)i : -1;
+            }
         }
         for (uint32_t i = 0; i < totalBones; ++i) {
             exportMeshToLogical[i] = entityMapMatches ? activeBoneMapping.meshToLogical[i] : (int)i;
@@ -4765,16 +4815,156 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 logicalBindMatrices[logical][15] = 1.0f;
             }
         }
+        // Non-skinning chain bones (ArbitraryPO) - Venom's tentacles and tongue.
+        //
+        // The PCM's bone-matrix table only covers bones that vertices are weighted to, so these
+        // never reached the export even though the animation path already evaluates them (see the
+        // arb_nodes loop in GlbBuildAnimationWorldMatricesForFrame). They drive procedural geometry
+        // rather than skin, but they still have to exist as nodes or their animation has nowhere
+        // to land. Their rest pose is stored absolutely, which suits the flat skeleton written here.
+        struct GlbExtraBone {
+            int logical = -1;
+            std::string name;
+            float translation[3] = {0.0f, 0.0f, 0.0f};
+            float rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        };
+        std::vector<GlbExtraBone> extraBones;
+        if (exportSkeleton) {
+            const NalComponentData* arbComponent = nullptr;
+            for (const auto& component : exportSkeleton->components) {
+                if (component.type_id == NalCompType::ArbitraryPO) {
+                    arbComponent = &component;
+                    break;
+                }
+            }
+            if (arbComponent) {
+                for (const auto& node : arbComponent->arb_nodes) {
+                    const int logical = node.my_matrix_ix;
+                    if (logical < 0 || logical >= (int)logicalBoneCount) continue;
+                    if (node.name.empty()) continue;
+                    if (exportLogicalToMesh[logical] >= 0) continue;  // already a skinning bone
+
+                    GlbExtraBone bone;
+                    bone.logical = logical;
+                    bone.name = node.name;
+                    // arb_skel_quats/positions only hold entries for channels the animation
+                    // does NOT drive - for animated channels the index refers to the animation's
+                    // own array instead, so reading it here would pull an unrelated bone's rest
+                    // value. Venom's chains are all pos_anim, hence no authored rest position.
+                    if (!node.is_quat_anim && node.quat_ix < arbComponent->arb_skel_quats.size()) {
+                        const GlbExportQuat q =
+                            GlbQuatFromNal(arbComponent->arb_skel_quats[node.quat_ix]);
+                        bone.rotation[0] = q.x;
+                        bone.rotation[1] = q.y;
+                        bone.rotation[2] = q.z;
+                        bone.rotation[3] = q.w;
+                    }
+                    if (!node.is_pos_anim && node.pos_ix < arbComponent->arb_skel_positions.size()) {
+                        const auto& p = arbComponent->arb_skel_positions[node.pos_ix];
+                        bone.translation[0] = p[0];
+                        bone.translation[1] = p[1];
+                        bone.translation[2] = p[2];
+                    }
+
+                    // Seed the bind matrix too, so an animation that leaves a chain alone still
+                    // poses it at rest instead of collapsing it onto the origin.
+                    const float x = bone.rotation[0], y = bone.rotation[1];
+                    const float z = bone.rotation[2], w = bone.rotation[3];
+                    logicalBindMatrices[logical] = {
+                        1.0f - 2.0f * (y * y + z * z), 2.0f * (x * y + z * w), 2.0f * (x * z - y * w), 0.0f,
+                        2.0f * (x * y - z * w), 1.0f - 2.0f * (x * x + z * z), 2.0f * (y * z + x * w), 0.0f,
+                        2.0f * (x * z + y * w), 2.0f * (y * z - x * w), 1.0f - 2.0f * (x * x + y * y), 0.0f,
+                        bone.translation[0], bone.translation[1], bone.translation[2], 1.0f};
+
+                    extraBones.push_back(bone);
+                }
+            }
+        }
+
         GlbBuildRestLocalMatrices(logicalBindMatrices, exportSkeleton,
                                   restLocalMatrices, restLocalQuatNal);
 
+        // Prefer grounding to the lowest foot/toe joint over the lowest vertex: the foot bone is
+        // the real ground-contact reference, and it's immune to stray sub-foot geometry that made
+        // the vertex-based lift float the character too high.
+        float skelOffsetY = groundOffsetY;
+        {
+            auto isFootBone = [&](int logical) {
+                std::string boneName;
+                if (exportSkeleton) {
+                    auto nameIt = exportSkeleton->bone_map.find(logical);
+                    if (nameIt != exportSkeleton->bone_map.end()) boneName = nameIt->second;
+                }
+                const std::string lower = StrToLower(boneName);
+                return lower.find("foot") != std::string::npos ||
+                       lower.find("toe") != std::string::npos;
+            };
+
+            // Ground against an animated pose, not the bind pose. USM's bind pose stands with the
+            // legs fully extended - Venom's toes sit ~0.8 units below anything an animation
+            // reaches - so lifting by the bind-pose foot puts the T-pose on the floor and leaves
+            // every animation hovering. An idle is the right reference: it's the resting pose the
+            // rest of the animation set is authored around.
+            float minFootY = 1e9f;
+            if (loadedAnimFile && exportSkeleton && !restLocalMatrices.empty()) {
+                const NalAnimEntry* reference = nullptr;
+                for (const auto& candidate : loadedAnimFile->animations) {
+                    if (StrToLower(candidate.name).find("idl") != std::string::npos) {
+                        reference = &candidate;
+                        break;
+                    }
+                }
+                if (!reference && !loadedAnimFile->animations.empty())
+                    reference = &loadedAnimFile->animations.front();
+
+                if (reference) {
+                    std::vector<int> footBones;
+                    for (uint32_t logical = 0; logical < logicalBoneCount; ++logical)
+                        if (isFootBone((int)logical)) footBones.push_back((int)logical);
+
+                    const bool genericReady = reference->is_gen_anim() &&
+                        reference->generic_decoded.complete &&
+                        !reference->generic_decoded.world_frames.empty();
+                    std::vector<std::array<float, 16>> frameWorld;
+                    const int frameCount = reference->playback_frame_count();
+                    for (int frame = 0; frame < frameCount; ++frame) {
+                        if (genericReady) {
+                            GlbBuildGenericAnimationWorldMatricesForFrame(
+                                *reference, logicalBindMatrices, frame, frameWorld);
+                        } else {
+                            GlbBuildAnimationWorldMatricesForFrame(
+                                *reference, *exportSkeleton, logicalBindMatrices,
+                                restLocalMatrices, restLocalQuatNal, frame, frameWorld);
+                        }
+                        for (int logical : footBones)
+                            if (logical < (int)frameWorld.size())
+                                minFootY = std::min(minFootY, frameWorld[logical][13]);
+                    }
+                }
+            }
+
+            // No animation to measure (static props, or a mesh exported on its own): fall back to
+            // the bind-pose foot, which is all that's available.
+            if (minFootY > 1e8f) {
+                for (uint32_t bi = 0; bi < totalBones; ++bi) {
+                    const int logical = exportMeshToLogical.empty() ? (int)bi : exportMeshToLogical[bi];
+                    if (isFootBone(logical))
+                        minFootY = std::min(minFootY, boneMats.matrices[bi][13]);
+                }
+            }
+            if (minFootY < 1e9f) skelOffsetY = -minFootY;
+        }
+        const float skelTranslation[3] = {0.0f, skelOffsetY, 0.0f};
+
+        const uint32_t exportedJointCount = totalBones + (uint32_t)extraBones.size();
+
         std::vector<int> rootBoneNodes;
-        for (uint32_t bi = 0; bi < totalBones; bi++) {
+        for (uint32_t bi = 0; bi < exportedJointCount; bi++) {
             int nodeIndex = 1 + (int)bi;
             rootBoneNodes.push_back(nodeIndex);
         }
 
-        int skeletonRootNode = writer.AddNode("Skeleton", -1, -1, nullptr, rootBoneNodes);
+        int skeletonRootNode = writer.AddNode("Skeleton", -1, -1, nullptr, rootBoneNodes, skelTranslation);
         writer.SetSkinRoot(skeletonRootNode);
         writer.AddToScene(skeletonRootNode);
 
@@ -4796,15 +4986,32 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             writer.AddJoint(boneNode);
         }
 
+        for (const auto& bone : extraBones) {
+            int boneNode = writer.AddNode(bone.name, -1, -1, nullptr, {},
+                                          bone.translation, bone.rotation);
+            // Route this logical bone through the mesh-bone table that the animation writer
+            // indexes with, so its channels resolve to the node just created.
+            exportLogicalToMesh[bone.logical] = (int)boneNodeIndices.size();
+            boneNodeIndices.push_back(boneNode);
+            writer.AddJoint(boneNode);
+        }
+
         std::vector<float> ibmData;
-        ibmData.reserve((size_t)totalBones * 16);
+        ibmData.reserve((size_t)exportedJointCount * 16);
         for (auto& mat : boneMats.matrices) {
             float inv[16];
             if (!InvertMatrix(mat.data(), inv)) GlbMat4Identity(inv);
             for (int i = 0; i < 16; i++) ibmData.push_back(inv[i]);
         }
+        // No vertex is weighted to a chain bone, so its inverse bind matrix never affects a
+        // vertex; identity just keeps the accessor length in step with the joint list.
+        for (size_t extra = 0; extra < extraBones.size(); ++extra) {
+            float identity[16];
+            GlbMat4Identity(identity);
+            for (int i = 0; i < 16; i++) ibmData.push_back(identity[i]);
+        }
         int ibmView = writer.AddBufferView(ibmData.data(), ibmData.size() * sizeof(float), 0);
-        ibmAccessor = writer.AddAccessor(ibmView, 5126, (int)totalBones, "MAT4");
+        ibmAccessor = writer.AddAccessor(ibmView, 5126, (int)exportedJointCount, "MAT4");
     }
 
     // Merged model: every submesh becomes a primitive of ONE glTF mesh -> a single object in
@@ -4899,7 +5106,8 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     }
     writer.EndMesh(morphWeights, morphNames);
 
-    int nodeIdx = writer.AddNode(modelName, meshIdx, hasSkinning ? 0 : -1);
+    int nodeIdx = writer.AddNode(modelName, meshIdx, hasSkinning ? 0 : -1,
+                                 nullptr, {}, hasSkinning ? nullptr : groundTranslation);
     writer.AddToScene(nodeIdx);
 
     int exportedAnimations = 0;
@@ -4908,11 +5116,12 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             const auto& anim = loadedAnimFile->animations[ai];
 
             if (anim.skeleton &&
-                !nal_skeleton_pose_compatible(anim.skeleton.get(), loadedSkeleton.get()))
+                !nal_skeleton_pose_inheritable(anim.skeleton.get(), loadedSkeleton.get()))
                 continue;
-            const NalSkeletonData& poseSkeleton = anim.skeleton
-                ? *anim.skeleton
-                : *loadedSkeleton;
+            // Drive the rig we're exporting, not the rig the clip was authored for: inherited
+            // clips (a costume variant playing its base character's set) reference a base skeleton
+            // whose bone indices differ, so using it here would land the pose on the wrong bones.
+            const NalSkeletonData& poseSkeleton = *loadedSkeleton;
             exportedAnimations += GlbAddAnimationToWriter(
                 writer,
                 anim,
@@ -5493,4 +5702,145 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
             ShowNotification("Exported PCM to:\n"     + pcmPath.string());
         }
     }
+}
+
+// Bulk-exports every loaded world mesh of the given kinds into a single GLB.
+//
+// The world loader produces four distinct classes of geometry (zone chunks, interiors, scene
+// entities / conglomerates, and batched lego props) with different placement semantics, so they
+// are exported separately rather than as one undifferentiated dump. Instanced meshes emit one
+// node per placement sharing a single mesh, which is what keeps a lego export from exploding
+// into thousands of duplicated vertex buffers.
+void SpiderManTool::ExportWorldMeshesByKind(const std::vector<WorldMeshKind>& kinds,
+                                            const std::string& label) {
+    auto wanted = [&](WorldMeshKind k) {
+        return std::find(kinds.begin(), kinds.end(), k) != kinds.end();
+    };
+
+    SkinningGLBWriter writer;
+    std::map<std::string, int> textureByName;
+    int exportedMeshes = 0;
+    int exportedNodes = 0;
+
+    for (size_t mi = 0; mi < previewMeshes.size(); ++mi) {
+        const auto& mesh = previewMeshes[mi];
+        if (!wanted(mesh.worldKind)) continue;
+        if (mesh.positions.empty() || mesh.indices.empty()) continue;
+
+        // Strips need converting to a list, flipping every odd triangle to keep winding uniform.
+        std::vector<uint16_t> tris;
+        if (mesh.mode == GL_TRIANGLE_STRIP) {
+            for (size_t i = 0; i + 2 < mesh.indices.size(); ++i) {
+                uint16_t i0 = mesh.indices[i], i1 = mesh.indices[i+1], i2 = mesh.indices[i+2];
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                if (i % 2 == 0) { tris.push_back(i0); tris.push_back(i1); tris.push_back(i2); }
+                else            { tris.push_back(i0); tris.push_back(i2); tris.push_back(i1); }
+            }
+        } else {
+            tris = mesh.indices;
+        }
+        if (tris.empty()) continue;
+
+        // Source winding is D3D's (drawn with D3DCULL_CW); glTF wants counter-clockwise front
+        // faces, so reverse each triangle -- same correction as WriteGLB and the model exporter.
+        for (size_t i = 0; i + 2 < tris.size(); i += 3) std::swap(tris[i + 1], tris[i + 2]);
+
+        float mn[3] = { 1e30f,  1e30f,  1e30f};
+        float mx[3] = {-1e30f, -1e30f, -1e30f};
+        const int vertCount = (int)mesh.positions.size() / 3;
+        for (int v = 0; v < vertCount; ++v)
+            for (int k = 0; k < 3; ++k) {
+                const float c = mesh.positions[v*3+k];
+                mn[k] = std::min(mn[k], c);
+                mx[k] = std::max(mx[k], c);
+            }
+
+        int texIndex = -1;
+        if (!mesh.textureName.empty()) {
+            const std::string key = StrToLower(mesh.textureName);
+            auto cached = textureByName.find(key);
+            if (cached != textureByName.end()) {
+                texIndex = cached->second;
+            } else {
+                std::vector<uint8_t> dds;
+                auto loadFrom = [&](const auto& index, auto lookup) {
+                    auto it = index.find(lookup);
+                    if (it == index.end()) return false;
+                    std::ifstream f(it->second.packPath, std::ios::binary);
+                    if (!f.is_open()) return false;
+                    f.seekg(it->second.offset);
+                    dds.resize(it->second.size);
+                    f.read((char*)dds.data(), it->second.size);
+                    return true;
+                };
+                if (!loadFrom(globalTextureNameIndex, key) && mesh.textureHash != 0)
+                    loadFrom(globalTextureIndex, mesh.textureHash);
+
+                std::vector<uint8_t> rgba, png;
+                int tw = 0, th = 0;
+                if (!dds.empty() && GlbDecodeDDSToRGBA(dds, rgba, tw, th) &&
+                    GlbEncodePNG(rgba, tw, th, png)) {
+                    texIndex = writer.AddPNGTexture(key, png);
+                }
+                textureByName[key] = texIndex;
+            }
+        }
+
+        const std::string name = mesh.meshName.empty()
+            ? ("mesh_" + std::to_string(mi)) : mesh.meshName;
+        const int matIdx = writer.AddMaterial(name, mesh.isTranslucent, mesh.isAlphaTest, texIndex);
+
+        const int meshIdx = writer.StartMesh(name);
+        const int posView = writer.AddBufferView(mesh.positions.data(),
+                                                 mesh.positions.size()*sizeof(float), 34962);
+        const int posAcc  = writer.AddAccessor(posView, 5126, vertCount, "VEC3", mn, mx);
+
+        int normAcc = -1;
+        if (!mesh.normals.empty()) {
+            const int nv = writer.AddBufferView(mesh.normals.data(),
+                                                mesh.normals.size()*sizeof(float), 34962);
+            normAcc = writer.AddAccessor(nv, 5126, (int)mesh.normals.size()/3, "VEC3");
+        }
+        int uvAcc = -1;
+        if (!mesh.uvs.empty()) {
+            const int uv = writer.AddBufferView(mesh.uvs.data(),
+                                                mesh.uvs.size()*sizeof(float), 34962);
+            uvAcc = writer.AddAccessor(uv, 5126, (int)mesh.uvs.size()/2, "VEC2");
+        }
+        const int indView = writer.AddBufferView(tris.data(), tris.size()*sizeof(uint16_t), 34963);
+        const int indAcc  = writer.AddAccessor(indView, 5123, (int)tris.size(), "SCALAR");
+
+        writer.AddPrimitive(posAcc, normAcc, uvAcc, indAcc, -1, -1, matIdx);
+        writer.EndMesh();
+        ++exportedMeshes;
+
+        // One node per placement; instanced meshes reuse the single mesh above.
+        if (mesh.instances.empty()) {
+            writer.AddToScene(writer.AddNode(name, meshIdx));
+            ++exportedNodes;
+        } else {
+            for (size_t ii = 0; ii < mesh.instances.size(); ++ii) {
+                const auto& inst = mesh.instances[ii];
+                if (inst.isHidden) continue;
+                const std::string instName = inst.name.empty()
+                    ? (name + "_" + std::to_string(ii)) : inst.name;
+                writer.AddToScene(
+                    writer.AddNode(instName, meshIdx, -1, inst.transform.data()));
+                ++exportedNodes;
+            }
+        }
+    }
+
+    if (exportedMeshes == 0) {
+        ShowNotification("No " + label + " meshes loaded to export.");
+        return;
+    }
+
+    fs::path outDir = fs::current_path() / "extracted" / "world_meshes";
+    fs::create_directories(outDir);
+    const fs::path outPath = outDir / ("world_" + label + ".glb");
+    writer.WriteToFile(outPath.string());
+
+    ShowNotification("Exported " + std::to_string(exportedMeshes) + " " + label + " meshes (" +
+                     std::to_string(exportedNodes) + " placements) to:\n" + outPath.string());
 }

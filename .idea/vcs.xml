@@ -2,15 +2,10 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/source/cmake-build-animation-validation/_deps/glad-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/source/cmake-build-animation-validation/_deps/glfw-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/source/cmake-build-animation-validation/_deps/imgui-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/source/cmake-build-animation-validation/_deps/imgui_node_editor-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/source/cmake-build-animation-validation/_deps/imguifiledialog-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/source/cmake-build-animation-validation/_deps/stb-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/glfw-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/imgui-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/imgui_hex_editor-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/imgui_node_editor-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/source/cmake-build-debug/_deps/imguifiledialog-src" vcs="Git" />
   </component>
 </project>
