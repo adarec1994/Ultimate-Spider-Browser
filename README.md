@@ -13,3 +13,8 @@ Currently includes exploring and viewing the contents of all pcpacks, loading an
 WIP:
 
 Rigged models, shaders, and audio.
+
+#Special Thanks
+
+Lemonhaze, his blender plugin helped get this off the ground
+MrMartinInden, his vast work decompiling helped flesh out many of the features.
