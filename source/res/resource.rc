@@ -1,0 +1,5 @@
+#include "resource.h"
+
+IDI_ICON1 ICON DISCARDABLE "spider-browser.ico"
+
+IDR_STRING_HASH_DICT RCDATA "string_hash_dictionary.txt"

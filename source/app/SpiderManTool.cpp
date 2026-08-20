@@ -1,9 +1,18 @@
 #include "SpiderManTool.h"
 #include "NalIntegration.h"
+#include "resource.h"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 void SpiderManTool::ShowNotification(const std::string& msg) {
     notificationMsg = msg;
@@ -46,6 +55,8 @@ void SpiderManTool::LoadConfig() {
                     if (binDictPath.empty() && fs::exists(binDict)) binDictPath = binDict.string();
                     if (!binDictPath.empty()) LoadBinaryDictionary(binDictPath);
                 }
+
+                if (dictionary.empty()) LoadEmbeddedDictionary();
 
                 ScanDirectory();
                 std::sort(foundPacks.begin(), foundPacks.end());
@@ -165,9 +176,7 @@ void SpiderManTool::ScanDirectory() {
     }
 }
 
-void SpiderManTool::LoadDictionary(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) return;
+void SpiderManTool::ParseDictionaryStream(std::istream& file) {
     std::string line;
     std::getline(file, line); std::getline(file, line);
     while (std::getline(file, line)) {
@@ -184,6 +193,29 @@ void SpiderManTool::LoadDictionary(const std::string& path) {
         try { dictionary[std::stoul(hashStr, nullptr, 16)] = name; } catch (...) {}
     }
 
+}
+
+void SpiderManTool::LoadDictionary(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) return;
+    ParseDictionaryStream(file);
+}
+
+void SpiderManTool::LoadEmbeddedDictionary() {
+    HMODULE module = GetModuleHandle(nullptr);
+    HRSRC found = FindResource(module, MAKEINTRESOURCE(IDR_STRING_HASH_DICT), RT_RCDATA);
+    if (!found) return;
+
+    DWORD size = SizeofResource(module, found);
+    HGLOBAL handle = LoadResource(module, found);
+    if (!handle || size == 0) return;
+
+    const char* bytes = (const char*)LockResource(handle);
+    if (!bytes) return;
+
+    std::string text(bytes, size);
+    std::istringstream stream(text);
+    ParseDictionaryStream(stream);
 }
 
 void SpiderManTool::LoadBinaryDictionary(const std::string& path) {
@@ -634,8 +666,6 @@ void SpiderManTool::BuildGlobalAnimIndex() {
         }
         if (animLocs.empty()) continue;
 
-        // Index each anim file in this pack under every skeleton hash present in the same pack,
-        // so a model can find its clips by its skeleton hash.
         std::vector<uint32_t> skelHashes;
         for (const auto& s : dir.skeletons) skelHashes.push_back(s.nameHash);
         for (const auto& r : dir.resources)
@@ -731,8 +761,6 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
             if (existing.ownedBytes.empty() && existing.offset == offset) return;
         sources.push_back({offset, size, {}});
     };
-    // A source's bytes come from the current pack (pcPackData at offset) unless it was resolved
-    // cross-pack, in which case it owns its bytes.
     auto sourceData = [&](const AnimSource& s) -> const uint8_t* {
         if (!s.ownedBytes.empty()) return s.ownedBytes.data();
         return pcPackData.empty() ? nullptr : &pcPackData[s.offset];
@@ -755,9 +783,6 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
         if (sig == NAL_ANIM_CONTAINER) addAnimSource(e.offset, e.size);
     }
 
-    // Scan an anim source's referenced skeletons, resolve any missing ones cross-pack (adding
-    // them as candidates), then parse and merge its clips into `merged`. Shared by the current
-    // pack pass and the cross-pack fallback below.
     std::shared_ptr<NalAnimFile> merged;
     auto processSources = [&](const std::vector<AnimSource>& srcs) {
         for (const auto& src : srcs) {
@@ -839,10 +864,6 @@ void SpiderManTool::LoadAnimationForCurrentPack() {
 
     processSources(sources);
 
-    // Cross-pack fallback: if the current pack produced no animation compatible with the loaded
-    // skeleton (e.g. a character opened from a cutscene pack that only has a scene anim, or no
-    // anim file at all), pull its clips from another pack that contains its skeleton — its
-    // CH_VWR viewer/costume pack. Mirrors the cross-pack morph resolution.
     if (!hasCompatibleAnim() && !skelRefs.empty()) {
         BuildGlobalAnimIndex();
         std::vector<AnimSource> crossSources;

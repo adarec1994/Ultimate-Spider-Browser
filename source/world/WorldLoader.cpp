@@ -1,6 +1,11 @@
-
-
 void SpiderManTool::LoadAllWorldGeometries() {
+    auto pump = [this]() { if (onLoadProgress) onLoadProgress(); };
+
+    isLoadingWorld = true;
+    worldLoadProgress = 0.0f;
+    worldLoadPhase = "Clearing...";
+    pump();
+
     for (auto& mesh : previewMeshes) {
         if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
         if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
@@ -8,6 +13,10 @@ void SpiderManTool::LoadAllWorldGeometries() {
         if (mesh.instanceVbo) glDeleteBuffers(1, &mesh.instanceVbo);
     }
     previewMeshes.clear();
+    worldTokenMarkers.clear();
+    gameTokenDefs.clear();
+    raceDefs.clear();
+    selectedGameTokenIndex = -1;
     pendingWholeWorldInstances.clear();
     collectWholeWorldInstances = true;
     isWorldMode = true;
@@ -33,12 +42,25 @@ void SpiderManTool::LoadAllWorldGeometries() {
     baseTransform[10] =  1.0f;
     baseTransform[15] =  1.0f;
 
+    worldLoadPhase = "Building PCM index...";
+    worldLoadProgress = 0.02f;
+    pump();
+
     std::map<uint32_t, PCMModelRef> pcmIndex;
     std::map<std::string, uint32_t> pcmNameToHash;
     BuildWorldPcmIndex(*this, pcmIndex, pcmNameToHash);
 
+    worldLoadPhase = "Loading zone chunks...";
+    worldLoadProgress = 0.05f;
+    pump();
+
     currentWorldKind = WorldMeshKind::Zone;
     int zoneGeoCount = LoadWorldZoneChunks(*this, baseTransform);
+
+    worldLoadPhase = "Loading interiors...";
+    worldLoadProgress = 0.10f;
+    pump();
+
     currentWorldKind = WorldMeshKind::Interior;
     int interiorMeshCount = LoadWorldInteriorMeshes(*this, baseTransform);
 
@@ -69,8 +91,17 @@ void SpiderManTool::LoadAllWorldGeometries() {
         uint8_t  tocType;
     };
 
+    const int totalPacks = (int)foundPacks.size();
+    int packIdx = 0;
+
     for (const auto& path : foundPacks) {
         std::string stem = StrToLower(path.stem().string());
+
+        worldLoadPhase = "Loading pack " + std::to_string(packIdx + 1) + "/" +
+                         std::to_string(totalPacks) + ": " + stem;
+        worldLoadProgress = 0.15f + 0.70f * ((float)packIdx / (float)std::max(totalPacks, 1));
+        pump();
+        packIdx++;
 
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) continue;
@@ -729,7 +760,13 @@ void SpiderManTool::LoadAllWorldGeometries() {
             }
         }
         file.close();
+        ParseTokenDefList(path.string());
+        ParseRaceScriptInstances(path.string());
     }
+
+    worldLoadPhase = "Batching lego props...";
+    worldLoadProgress = 0.87f;
+    pump();
 
     currentWorldKind = WorldMeshKind::Lego;
     FlushLegoBatches(*this, pcmIndex, pcmDataCache, legoBatches,
@@ -747,6 +784,11 @@ void SpiderManTool::LoadAllWorldGeometries() {
     (void)skippedLegoFiltered;
 
     pcmDataCache.clear();
+
+    worldLoadPhase = "Instancing meshes...";
+    worldLoadProgress = 0.92f;
+    pump();
+
     FlushPendingWholeWorldInstances();
 
     currentWorldKind = WorldMeshKind::Skybox;
@@ -754,8 +796,107 @@ void SpiderManTool::LoadAllWorldGeometries() {
     currentWorldKind = WorldMeshKind::SceneEntity;
     InstanceWholeWorldMeshes();
 
-    // World collision lives across every pack, not in currentDir, so gather it here.
+    worldLoadPhase = "Placing tokens...";
+    worldLoadProgress = 0.95f;
+    pump();
+
+    LoadGameTokenMeshes();
+    ResolveGameTokenLinks();
+
+    worldLoadPhase = "Loading collision...";
+    worldLoadProgress = 0.97f;
+    pump();
+
     LoadCollisionMeshesForWorld();
 
+    isLoadingWorld = false;
+    worldLoadProgress = 1.0f;
+    worldLoadPhase.clear();
     isModelLoaded = true;
+}
+
+void SpiderManTool::LoadSkybox() {
+    for (const auto& path : foundPacks) {
+        std::string stem = StrToLower(path.stem().string());
+        if (stem != "city_arena") continue;
+
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) continue;
+
+        size_t fileSize = file.tellg();
+        if (fileSize < 32) { file.close(); continue; }
+
+        file.seekg(24);
+        uint32_t headerSize, dataOffset;
+        file.read((char*)&headerSize, 4);
+        file.read((char*)&dataOffset, 4);
+        if (!file.good()) { file.close(); continue; }
+
+        size_t start = 0;
+        const uint32_t magic = 0xE3E3E3E3;
+        size_t headerReadSize = std::min((size_t)500000, fileSize);
+        std::vector<uint8_t> tempHeader(headerReadSize);
+        file.seekg(0);
+        file.read((char*)tempHeader.data(), headerReadSize);
+
+        for (size_t i = 0; i + 4 <= tempHeader.size(); i++) {
+            if (*(uint32_t*)&tempHeader[i] == magic) {
+                for (size_t j = i + 4; j < i + 1000 && j + 4 <= tempHeader.size(); j++) {
+                    if (*(uint32_t*)&tempHeader[j] == magic) {
+                        start = j + 4;
+                        break;
+                    }
+                }
+                if (start != 0) break;
+            }
+        }
+
+        if (start == 0) { file.close(); continue; }
+
+        file.clear();
+        file.seekg(start);
+
+        while (file.good()) {
+            uint32_t hash, type, offset, size;
+            file.read((char*)&hash, 4);
+            file.read((char*)&type, 4);
+            file.read((char*)&offset, 4);
+            file.read((char*)&size, 4);
+            if (!file.good()) break;
+            if (type >= 0x1000 || type == 0x0000) break;
+
+            if (size > 4) {
+                size_t filePos = file.tellg();
+                uint32_t absOffset = (uint32_t)(dataOffset + offset);
+                if (absOffset + 4 > fileSize) { file.seekg(filePos); continue; }
+
+                file.seekg(absOffset);
+                uint32_t sig = 0;
+                file.read((char*)&sig, 4);
+
+                if (file.good() && sig == 0x204D4350) {
+                    std::string entryName = dictionary.count(hash) ? StrToLower(dictionary[hash]) : "";
+                    if (entryName == "sky_day") {
+                        std::vector<uint8_t> skyData(size);
+                        file.seekg(absOffset);
+                        file.read((char*)skyData.data(), size);
+
+                        float transformMatrix[16] = {0};
+                        transformMatrix[0] = -1.0f;
+                        transformMatrix[5] = 1.0f;
+                        transformMatrix[10] = 1.0f;
+                        transformMatrix[15] = 1.0f;
+
+                        AddMeshFromDataWithTransform(skyData, "sky_day", nullptr, path.string(), absOffset, transformMatrix);
+                        file.close();
+                        return;
+                    }
+                }
+                file.clear();
+                file.seekg(filePos);
+            }
+        }
+        file.close();
+        break;
+    }
 }

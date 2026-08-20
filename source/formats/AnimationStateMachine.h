@@ -91,11 +91,9 @@ struct TransitionGroup {
     std::vector<Rule> layerRules;
 };
 
-// One entry of an ai::param_block. These are what get_pb_float/get_pb_int read, so the
-// jump tuning (jump_run_height, jump_super_jump_run_distance, ...) lives here.
 struct Param {
     uint32_t name = 0;
-    int type = 0;        // 0 float, 1 int; 3/4/5 carry extra trailing data
+    int type = 0;
     float fvalue = 0.0f;
     int32_t ivalue = 0;
 };
@@ -123,7 +121,6 @@ struct File {
     size_t bytesConsumed = 0;
     std::vector<Machine> machines;
     std::vector<MetaAnimation> metaAnimations;
-    /** Every param_block entry encountered, in parse order. */
     std::vector<Param> params;
 };
 

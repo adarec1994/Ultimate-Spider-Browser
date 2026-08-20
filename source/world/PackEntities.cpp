@@ -1,3 +1,13 @@
+static MarkerType ClassifyTokenName(const std::string& name) {
+    if (name.find("venom_trick_race") != std::string::npos) return MarkerType::VenomTrickRace;
+    if (name.find("trick_race") != std::string::npos)       return MarkerType::TrickRace;
+    if (name.find("jewel_marker") != std::string::npos)     return MarkerType::Comic;
+    if (name.find("elec_marker") != std::string::npos)      return MarkerType::Electric;
+    if (name.find("storm_race") != std::string::npos)       return MarkerType::StormRace;
+    if (name.find("combat_tour") != std::string::npos)      return MarkerType::CombatTour;
+    return MarkerType::Unknown;
+}
+
 void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const float* baseTransform) {
 
     std::ifstream file(packFilePath, std::ios::binary | std::ios::ate);
@@ -269,6 +279,28 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
                 EntityMeshRef meshRef = FindEntityMeshRef(
                     blockData, rec, meshHashBindings, localPcmIndex, nameToHash);
                 uint32_t pcmHash = meshRef.pcmHash;
+
+                if (pcmHash == 0 && !instanceName.empty()) {
+                    MarkerType tt = ClassifyTokenName(instanceName);
+                    if (tt != MarkerType::Unknown) {
+                        float mat[16];
+                        if (FindPlacementMatrixInRange(blockData,
+                                rec.mashStart + 0x44,
+                                rec.mashStart + rec.mashSize, mat)) {
+                            float combined[16];
+                            MultiplyMatrix4x4(mat, baseTransform, combined);
+                            TokenMarker tm;
+                            tm.kind = tt;
+                            tm.position[0] = combined[12];
+                            tm.position[1] = combined[13];
+                            tm.position[2] = combined[14];
+                            tm.name = instanceName;
+                            tm.zone = stem;
+                            worldTokenMarkers.push_back(tm);
+                        }
+                    }
+                    continue;
+                }
                 if (pcmHash == 0) continue;
 
                 std::string pcmName = dictionary.count(pcmHash) ? StrToLower(dictionary[pcmHash]) : "";
@@ -409,7 +441,35 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
                 }
             }
 
-            if (pcmHash == 0) continue;
+            if (pcmHash == 0) {
+                MarkerType tt = ClassifyTokenName(instanceName);
+                if (tt != MarkerType::Unknown) {
+                    float tmat[16];
+                    bool found = false;
+                    for (size_t scanOfs = acePos + 0x44;
+                         scanOfs + 64 <= blockSize && scanOfs < acePos + 0x2000;
+                         scanOfs += 4) {
+                        float c[16]; memcpy(c, &blockData[scanOfs], 64);
+                        if (std::fabs(c[3])>0.01f||std::fabs(c[7])>0.01f||
+                            std::fabs(c[11])>0.01f) continue;
+                        if (std::fabs(c[15]-1.0f)>0.1f) continue;
+                        memcpy(tmat, c, 64); found = true; break;
+                    }
+                    if (found) {
+                        float tc[16];
+                        MultiplyMatrix4x4(tmat, baseTransform, tc);
+                        TokenMarker tm;
+                        tm.kind = tt;
+                        tm.position[0] = tc[12];
+                        tm.position[1] = tc[13];
+                        tm.position[2] = tc[14];
+                        tm.name = instanceName;
+                        tm.zone = stem;
+                        worldTokenMarkers.push_back(tm);
+                    }
+                }
+                continue;
+            }
             if (!pcmCache.count(pcmHash)) {
                 continue;
             }
@@ -611,4 +671,82 @@ void SpiderManTool::LoadPackEntities(const std::string& packFilePath, const floa
     (void)skippedLegoFiltered;
     (void)skippedLegoNoModel;
     (void)stem;
+}
+
+void SpiderManTool::ParseTokenDefList(const std::string& packFilePath) {
+    std::ifstream file(packFilePath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return;
+
+    size_t fileSize = file.tellg();
+    if (fileSize < 64) { file.close(); return; }
+
+    file.seekg(24);
+    uint32_t headerSize, packDataOffset;
+    file.read((char*)&headerSize, 4);
+    file.read((char*)&packDataOffset, 4);
+    if (!file.good()) { file.close(); return; }
+
+    size_t hdrReadSize = std::min((size_t)500000, fileSize);
+    std::vector<uint8_t> tempHeader(hdrReadSize);
+    file.seekg(0);
+    file.read((char*)tempHeader.data(), hdrReadSize);
+
+    size_t tocStart = FindTocStart(tempHeader, hdrReadSize);
+    if (tocStart == 0) { file.close(); return; }
+
+    uint32_t tokenAbsOffset = 0, tokenSize = 0;
+    file.clear();
+    file.seekg(tocStart);
+    while (file.good()) {
+        uint32_t h, t, o, s;
+        file.read((char*)&h, 4); file.read((char*)&t, 4);
+        file.read((char*)&o, 4); file.read((char*)&s, 4);
+        if (!file.good() || t >= 0x1000 || t == 0) break;
+        if (t == RES_KEY_TOKEN_LIST && s > 0x38) {
+            tokenAbsOffset = packDataOffset + o;
+            tokenSize = s;
+            break;
+        }
+    }
+
+    if (tokenAbsOffset == 0 || tokenAbsOffset + tokenSize > fileSize) {
+        file.close();
+        return;
+    }
+
+    std::vector<uint8_t> buf(tokenSize);
+    file.seekg(tokenAbsOffset);
+    file.read((char*)buf.data(), tokenSize);
+    file.close();
+
+    int32_t count;
+    memcpy(&count, buf.data() + 0x04, 4);
+    if (count <= 0 || count > 2000) return;
+
+    size_t pos = 0x38 + 4 * (size_t)count;
+
+    for (int i = 0; i < count; i++) {
+        if (pos + 0x30 > tokenSize) break;
+
+        int32_t strLen;
+        memcpy(&strLen, buf.data() + pos + 0x04, 4);
+
+        GameTokenDef def;
+        memcpy(&def.position[0], buf.data() + pos + 0x10, 4);
+        def.position[0] = -def.position[0];
+        memcpy(&def.position[1], buf.data() + pos + 0x14, 4);
+        memcpy(&def.position[2], buf.data() + pos + 0x18, 4);
+        memcpy(&def.type,        buf.data() + pos + 0x1C, 4);
+        memcpy(&def.tokenId,     buf.data() + pos + 0x24, 4);
+
+        pos += 0x30;
+
+        if (strLen > 0 && pos + strLen + 1 <= tokenSize) {
+            def.name.assign((const char*)(buf.data() + pos), strLen);
+            pos += strLen + 1;
+            pos = (pos + 3) & ~3;
+        }
+
+        gameTokenDefs.push_back(std::move(def));
+    }
 }

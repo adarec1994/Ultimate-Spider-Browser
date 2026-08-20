@@ -66,19 +66,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5b3c6e34-9880-4515-96de-139b1276075b" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/AnimationStateMachine.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/AnimationStateMachine.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/AnimationStateMachine.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/AnimationStateMachine.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Archive.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Archive.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Interface.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Interface.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/Model.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Model.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/NalSkeleton.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/NalSkeleton.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/Render.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/Render.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/SpiderManTool.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/SpiderManTool.h" beforeDir="false" afterPath="$PROJECT_DIR$/source/SpiderManTool.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/main.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/source/world/WorldLoader.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/WorldLoader.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/source/world/unique/WorldExtraction.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -338,43 +329,43 @@
       </method>
     </configuration>
     <list>
+      <item itemvalue="CMake Application.USM" />
       <item itemvalue="CMake Application.boing" />
-      <item itemvalue="CMake Application.gears" />
-      <item itemvalue="CMake Application.heightmap" />
-      <item itemvalue="CMake Application.offscreen" />
-      <item itemvalue="CMake Application.particles" />
-      <item itemvalue="CMake Application.sharing" />
-      <item itemvalue="CMake Application.simple" />
-      <item itemvalue="CMake Application.splitview" />
-      <item itemvalue="CMake Application.wave" />
       <item itemvalue="CMake Application.clipboard" />
       <item itemvalue="CMake Application.cursor" />
+      <item itemvalue="CMake Application.docs" />
       <item itemvalue="CMake Application.empty" />
       <item itemvalue="CMake Application.events" />
       <item itemvalue="CMake Application.gamma" />
+      <item itemvalue="CMake Application.gears" />
+      <item itemvalue="CMake Application.glad" />
+      <item itemvalue="CMake Application.glfw" />
       <item itemvalue="CMake Application.glfwinfo" />
+      <item itemvalue="CMake Application.heightmap" />
       <item itemvalue="CMake Application.icon" />
       <item itemvalue="CMake Application.iconify" />
+      <item itemvalue="CMake Application.imgui" />
+      <item itemvalue="CMake Application.imgui_node_editor" />
       <item itemvalue="CMake Application.inputlag" />
       <item itemvalue="CMake Application.joysticks" />
       <item itemvalue="CMake Application.monitors" />
       <item itemvalue="CMake Application.msaa" />
+      <item itemvalue="CMake Application.offscreen" />
       <item itemvalue="CMake Application.opacity" />
+      <item itemvalue="CMake Application.particles" />
       <item itemvalue="CMake Application.reopen" />
+      <item itemvalue="CMake Application.sharing" />
+      <item itemvalue="CMake Application.simple" />
+      <item itemvalue="CMake Application.splitview" />
       <item itemvalue="CMake Application.tearing" />
       <item itemvalue="CMake Application.threads" />
       <item itemvalue="CMake Application.timeout" />
       <item itemvalue="CMake Application.title" />
       <item itemvalue="CMake Application.triangle-vulkan" />
-      <item itemvalue="CMake Application.windows" />
-      <item itemvalue="CMake Application.docs" />
-      <item itemvalue="CMake Application.glfw" />
       <item itemvalue="CMake Application.uninstall" />
       <item itemvalue="CMake Application.update_mappings" />
-      <item itemvalue="CMake Application.USM" />
-      <item itemvalue="CMake Application.glad" />
-      <item itemvalue="CMake Application.imgui" />
-      <item itemvalue="CMake Application.imgui_node_editor" />
+      <item itemvalue="CMake Application.wave" />
+      <item itemvalue="CMake Application.windows" />
     </list>
   </component>
   <component name="TaskManager">
@@ -427,6 +418,10 @@
       <workItem from="1784670498308" duration="19355000" />
       <workItem from="1784853372129" duration="7000" />
       <workItem from="1785159707950" duration="597000" />
+      <workItem from="1785175779991" duration="919000" />
+      <workItem from="1785376458413" duration="21000" />
+      <workItem from="1785464585416" duration="5650000" />
+      <workItem from="1785689097953" duration="6000" />
     </task>
     <servers />
   </component>

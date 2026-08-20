@@ -1,5 +1,3 @@
-
-
 static bool IsInteriorScenePackName(const std::string& stem) {
     std::string lower = StrToLower(stem);
     return lower.size() >= 6 && lower.substr(2, 4) == "_int";

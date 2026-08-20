@@ -23,6 +23,8 @@ void SpiderManTool::OpenPCPack(const std::string& path) {
             if (m.instanceVbo) glDeleteBuffers(1, &m.instanceVbo);
         }
         previewMeshes.clear();
+        worldTokenMarkers.clear();
+        gameTokenDefs.clear();
 
         for (auto& t : textureCache) {
             if (t.second != 0) glDeleteTextures(1, &t.second);
@@ -142,19 +144,6 @@ void SpiderManTool::LoadAnimationStateMachinesForCurrentPack() {
     }
 }
 
-// Parses every COLLISION_MESH ('COLL') resource in the open pack.
-//
-// Layout, verified against the shipped data (all axis triples come out exactly mutually
-// orthogonal, which is what confirms the field boundaries):
-//     0x00 'COLL' | 0x04 version | 0x08 total size | 0x0C count | 0x10 obb[]
-// and per 0x38-byte OBB:
-//     0x00 center | 0x0C bounding radius | 0x10 X axis | 0x1C Y axis | 0x28 Z axis | 0x34 flags
-// The axis vectors are already scaled by their half-extent, so the eight corners are simply
-// center +/- X +/- Y +/- Z. Note OpenUSM's colmesh_common.h types the Y/Z axis floats as `int`
-// (field_1C..field_30) -- that is a decompiler artifact, they are floats.
-// World geometry is assembled from every pack in foundPacks (LoadAllWorldGeometries), never through
-// OpenPCPack, so currentDir/pcPackData describe an unrelated pack and carry none of the world's
-// collision. Scan the packs directly instead.
 void SpiderManTool::LoadCollisionMeshesForWorld() {
     collisionGroups.clear();
     collisionVertCount = 0;
@@ -205,7 +194,6 @@ void SpiderManTool::AppendCollisionGroups(const std::vector<uint8_t>& packData,
             std::memcpy(obb.axisY,  o + 0x1C, sizeof(float) * 3);
             std::memcpy(obb.axisZ,  o + 0x28, sizeof(float) * 3);
 
-            // Degenerate/placeholder nodes carry a zero frame; skip so they don't draw as dots.
             const float ext = std::fabs(obb.axisX[0]) + std::fabs(obb.axisY[1]) + std::fabs(obb.axisZ[2]);
             if (ext <= 0.0f) continue;
 
@@ -281,9 +269,6 @@ void SpiderManTool::ExtractPack(const std::string& packPath, bool convertAll) {
 
     const int suspendedPreviewTab = activePreviewTab;
     if (convertAll) {
-        // Populate skeleton candidates (and animations) for the pack so per-mesh export can
-        // select the right rig AND so LoadAnimationForCurrentPack can resolve clips cross-pack
-        // when this pack has no anim file of its own.
         if (suspendedPreviewTab >= 0) StoreActivePreviewTab();
         LoadSkeletonForCurrentPack();
         LoadAnimationForCurrentPack();

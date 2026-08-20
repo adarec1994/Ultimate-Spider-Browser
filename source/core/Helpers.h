@@ -249,7 +249,7 @@ class SkinningGLBWriter {
     std::vector<int> jointIndices;
     int skinRootIndex = -1;
     int meshCount = 0;
-    int primitiveInMesh = 0;   // primitives written in the current mesh, for comma separation
+    int primitiveInMesh = 0;
     int nodeCount = 0;
 
     void AlignBuffer() { while (buffer.size() % 4 != 0) buffer.push_back(0); }
@@ -376,9 +376,6 @@ public:
     }
 
     int AddZeroAccessor(int count, const char* type, int componentType) {
-        // Accessor with no bufferView => all-zero values (valid glTF). Lets a merged mesh give
-        // every primitive the full morph-target set: primitives a shape key doesn't move point
-        // at a free zero accessor instead of storing a buffer full of zero deltas.
         Accessor acc = {-1, componentType, count, type};
         accessors.push_back(acc);
         return (int)accessors.size() - 1;
@@ -401,7 +398,6 @@ public:
             meshesJson << "]";
         }
         if (!targetNames.empty()) {
-            // Blender reads mesh.extras.targetNames as shape-key names.
             meshesJson << ",\"extras\":{\"targetNames\":[";
             for (size_t i = 0; i < targetNames.size(); ++i)
                 meshesJson << "\"" << JsonEscape(targetNames[i]) << "\""
@@ -426,7 +422,6 @@ public:
             meshesJson << ",\"material\":" << matIdx;
         }
         if (!morphPosAccessors.empty()) {
-            // glTF morph targets: one POSITION-delta accessor per target.
             meshesJson << ",\"targets\":[";
             for (size_t i = 0; i < morphPosAccessors.size(); ++i)
                 meshesJson << "{\"POSITION\":" << morphPosAccessors[i] << "}"

@@ -28,8 +28,6 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-// AnimationStateMachineView.cpp has an equivalent, but it lives in an anonymous
-// namespace so it can't be shared.
 static std::string AlsResolveHash(const SpiderManTool& tool, uint32_t hash) {
     if (!hash) return "None";
     auto found = tool.dictionary.find(hash);
@@ -55,6 +53,8 @@ static void LoadBestDictionaryForPack(SpiderManTool& tool, const fs::path& packD
             tool.LoadBinaryDictionary("string_hash_dictionary.bin");
         }
     }
+
+    if (tool.dictionary.empty()) tool.LoadEmbeddedDictionary();
 }
 
 static int ExportPackGlbHeadless(const std::string& packArg) {
@@ -721,14 +721,11 @@ static int InspectAnimationMorphHeadless(const std::string& packArg) {
     return 0;
 }
 
-// Blend time the engine derives from a state's flag word, from sub_497DD0 in
-// USM.exe. The order of the tests matters - 0x20 wins over 0x40 wins over 0x80
-// wins over 0x100 - and anything with none of them set snaps.
 static float AlsBlendTimeForState(uint16_t flags, float animDuration) {
     if (flags & 0x0020) return 0.0f;
-    if (flags & 0x0040) return 0.13333f;   // 4 frames @ 30fps
-    if (flags & 0x0080) return 0.26666f;   // 8 frames @ 30fps
-    if (flags & 0x0100) {                  // proportional, clamped
+    if (flags & 0x0040) return 0.13333f;
+    if (flags & 0x0080) return 0.26666f;
+    if (flags & 0x0100) {
         const float t = animDuration * 0.2f;
         return t < 0.26666f ? t : 0.26666f;
     }
@@ -758,11 +755,6 @@ static std::string JsonEscape(const std::string& value) {
     return out;
 }
 
-// Dumps every ALS state and category with the semantics recovered from USM.exe:
-// the real blend time behind each state's flag word, and the loop flag and
-// duration read off the animation the state plays (NAL header +52 bit 0 and
-// +56). Rules come out with their raw parameter ids so the "p104 <= n" pattern -
-// frames remaining in the current animation - stays visible.
 static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg) {
     const fs::path packPath = fs::absolute(packArg);
     if (!fs::exists(packPath)) {
@@ -791,7 +783,6 @@ static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg
         return 3;
     }
 
-    // hash -> (loop, duration, name), so a state can report what it actually plays.
     struct AnimInfo { bool looping = false; float duration = 0.f; std::string name; bool found = false; };
     std::map<uint32_t, AnimInfo> animByHash;
     if (tool.loadedAnimFile) {
@@ -819,17 +810,13 @@ static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg
         for (size_t i = 0; i < rules.size(); ++i) {
             const auto& rule = rules[i];
             out << (i ? ",\n" : "\n") << indent << "  {";
-            // Array order is evaluation order - can_transition takes the first match.
             out << "\"order\": " << rule.priority;
             out << ", \"action\": " << rule.action.type;
-            // Layer rules: conditionA is the layer id, conditionB the state/category hash.
             if (rule.kind == UsmAls::RuleKind::Layer) {
                 out << ", \"layer\": " << rule.conditionA;
                 out << ", \"match\": \"" << JsonEscape(name(
                         static_cast<uint32_t>(rule.conditionB))) << "\"";
             }
-            // Incoming rules carry an optional "coming from" guard: conditionA is
-            // the hash, conditionB picks whether it names a category or a state.
             if (rule.kind == UsmAls::RuleKind::Incoming && rule.conditionA) {
                 out << ", \"from\": \"" << JsonEscape(name(
                         static_cast<uint32_t>(rule.conditionA))) << "\"";
@@ -912,14 +899,10 @@ static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg
                 out << "          \"category\": \"" << JsonEscape(name(category.id)) << "\",\n";
                 out << "          \"flags\": " << category.flags << ",\n";
                 out << "          \"force_entry\": " << ((category.flags & 0x2) != 0) << ",\n";
-                // +0x10 is what category vfunc +0x30 returns: the state used when the
-                // machine is inactive and an explicit request arrives cold.
                 out << "          \"cold_start_state\": \""
                     << JsonEscape(name(category.label)) << "\",\n";
-                // +0x14 is force_transitions.field_0, the fallback for do_cat_force_trans.
                 out << "          \"force_default_state\": \""
                     << JsonEscape(name(category.forcedState)) << "\",\n";
-                // force_transitions: previous state/category -> destination, with a default.
                 out << "          \"force_conditions\": [";
                 for (size_t f = 0; f < category.forceConditions.size(); ++f) {
                     const auto& alter = category.forceConditions[f];
@@ -941,10 +924,6 @@ static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg
                 emitRules(category.layerRules,    "layer",    "          ", false);
                 out << "        }" << (c + 1 < machine.categories.size() ? ",\n" : "\n");
             }
-            // Transition groups: shared rule sets that states and categories reference by
-            // index. Own rules overwrite anything a group produced, so these act as a
-            // fallback - and they are where the landing transitions live, which is why
-            // nothing appeared to target BigJmpLand / SoftJmpLand.
             out << "      ],\n      \"transition_groups\": [\n";
             for (size_t t = 0; t < machine.transitionGroups.size(); ++t) {
                 const auto& group = machine.transitionGroups[t];
@@ -981,8 +960,6 @@ static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg
         }
     }
     out << (firstMeta ? "" : "\n") << "  ],\n  \"params\": {\n";
-    // ai::param_block entries - the tuning get_pb_float/get_pb_int read, including the
-    // per-jump-type height/distance pairs that drive the launch velocity.
     {
         std::map<std::string, std::string> merged;
         for (const auto& file : tool.animationStateMachines) {
@@ -1024,12 +1001,6 @@ static int DumpAlsHeadless(const std::string& packArg, const std::string& outArg
     return 0;
 }
 
-// Dumps every BASE_AI (type 56) parameter block as name/value pairs.
-//
-// Records are 12 bytes - hash, value, type (0 float, 1 int) - and the block is sorted by
-// hash. That sortedness is the check that the record stride and start offset are right; a
-// raw byte scan for a known hash finds false positives all over the pack, which is exactly
-// how a 90-metre "jump_run_height" gets believed.
 static int DumpParamsHeadless(const std::string& packArg, const std::string& outArg) {
     const fs::path packPath = fs::absolute(packArg);
     if (!fs::exists(packPath)) {
@@ -1059,8 +1030,6 @@ static int DumpParamsHeadless(const std::string& packArg, const std::string& out
 
         const uint8_t* base = tool.pcPackData.data() + resource.offset;
 
-        // Find the record array: the start offset whose 12-byte stride yields the longest
-        // run of strictly increasing hashes with a valid type tag.
         size_t bestStart = 0, bestRun = 0;
         for (size_t start = 0; start + 12 <= resource.size && start < 256; start += 4) {
             size_t run = 0;
@@ -1113,10 +1082,6 @@ static int DumpParamsHeadless(const std::string& packArg, const std::string& out
     return 0;
 }
 
-// Dumps the NAL Tentacles component's 15 animated tracks (5 chains x diameter,
-// activity, pull) for every animation in a pack, so they can be rebuilt as
-// engine-side curves. The default pose is all zeros, so without these the
-// tentacles just sit at whatever fixed diameter they were given.
 static int DumpTentacleCurvesHeadless(const std::string& packArg, const std::string& outArg) {
     const fs::path packPath = fs::absolute(packArg);
     if (!fs::exists(packPath)) {
@@ -1145,7 +1110,6 @@ static int DumpTentacleCurvesHeadless(const std::string& packArg, const std::str
         return 3;
     }
 
-    // Chain order matches the pose layout used by the preview renderer.
     static const char* kChainNames[5] = {
         "UpLeftTent", "UpRightTent", "LowLeftTent", "LowRightTent", "Tongue"};
     static const char* kTrackNames[3] = {"Diameter", "Activity", "Pull"};
@@ -1576,7 +1540,39 @@ static int TestVisemePlaybackHeadless(const std::string& packArg) {
     return ok ? 0 : 15;
 }
 
+#ifdef _WIN32
+static bool StdStreamAlreadyConnected(DWORD which) {
+    HANDLE handle = GetStdHandle(which);
+    if (!handle || handle == INVALID_HANDLE_VALUE) return false;
+    DWORD type = GetFileType(handle);
+    return type == FILE_TYPE_CHAR || type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE;
+}
+#endif
+
+static void AttachParentConsoleIfPresent() {
+#ifdef _WIN32
+    const bool haveOut = StdStreamAlreadyConnected(STD_OUTPUT_HANDLE);
+    const bool haveErr = StdStreamAlreadyConnected(STD_ERROR_HANDLE);
+    const bool haveIn = StdStreamAlreadyConnected(STD_INPUT_HANDLE);
+    if (haveOut && haveErr && haveIn) return;
+
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+
+    FILE* reopened = nullptr;
+    if (!haveOut) freopen_s(&reopened, "CONOUT$", "w", stdout);
+    if (!haveErr) freopen_s(&reopened, "CONOUT$", "w", stderr);
+    if (!haveIn) freopen_s(&reopened, "CONIN$", "r", stdin);
+
+    std::ios::sync_with_stdio(true);
+    std::cout.clear();
+    std::cerr.clear();
+    std::cin.clear();
+#endif
+}
+
 int main(int argc, char** argv) {
+    AttachParentConsoleIfPresent();
+
     if (argc >= 3 && std::string(argv[1]) == "--export-pack-glb") {
         return ExportPackGlbHeadless(argv[2]);
     }
@@ -2070,6 +2066,23 @@ int main(int argc, char** argv) {
 
     if (fs::exists("string_hash_dictionary.txt")) tool.LoadDictionary("string_hash_dictionary.txt");
     if (tool.dictionary.empty() && fs::exists("string_hash_dictionary.bin")) tool.LoadBinaryDictionary("string_hash_dictionary.bin");
+    if (tool.dictionary.empty()) tool.LoadEmbeddedDictionary();
+
+    tool.onLoadProgress = [&]() {
+        glfwPollEvents();
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        RenderUI(tool);
+        ImGui::Render();
+        int w, h;
+        glfwGetFramebufferSize(window, &w, &h);
+        glViewport(0, 0, w, h);
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        glfwSwapBuffers(window);
+    };
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -2090,6 +2103,11 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
+
+        if (tool.wantLoadWorld) {
+            tool.wantLoadWorld = false;
+            tool.LoadAllWorldGeometries();
+        }
     }
 
     ImGui_ImplOpenGL3_Shutdown();

@@ -1432,8 +1432,6 @@ void SpiderManTool::UpdateModelOrbitCamera(bool isHovered) {
         camPitch = std::max(-85.0f, std::min(85.0f, camPitch));
     }
 
-    // Persistent orbit radius. Deriving it from camPos each frame would feed back into the
-    // moving focal point below and drift, so keep it as state (seeded from the camera once).
     if (!std::isfinite(orbitDistance) || orbitDistance <= 0.0f) {
         const float dx = camPos[0] - modelCenter[0];
         const float dy = camPos[1] - modelCenter[1];
@@ -1449,8 +1447,6 @@ void SpiderManTool::UpdateModelOrbitCamera(bool isHovered) {
     const float maxDistance = std::max(100.0f, modelRadius * 40.0f);
     orbitDistance = std::max(minDistance, std::min(maxDistance, orbitDistance));
 
-    // Focal point pans from the body centre (zoomed out) up to the head (zoomed in), and
-    // eases back down as you zoom out. t: 0 when far, 1 when close.
     const float farD  = std::max(1.0f, modelRadius * 3.0f);
     const float nearD = std::max(0.05f, modelRadius * 0.8f);
     float t = (farD - orbitDistance) / std::max(0.001f, farD - nearD);
@@ -1681,9 +1677,6 @@ void SpiderManTool::RenderModelPreview() {
         } else if (!anim.is_gen_anim()) {
 
         const NalSkeletonData* animSkel = anim.skeleton ? anim.skeleton.get() : loadedSkeleton.get();
-        // The rig we drive is always the LOADED skeleton. For an inherited clip (a costume variant
-        // playing its base character's animation) animSkel has different bone indices, so component
-        // data must come from the loaded rig or the pose lands on the wrong bones.
         const NalSkeletonData* rigSkel = loadedSkeleton.get();
         int playbackFrameCount = anim.playback_frame_count();
         int frame0 = std::max(0, std::min(currentAnimFrame, std::max(0, playbackFrameCount - 1)));
@@ -1752,10 +1745,6 @@ void SpiderManTool::RenderModelPreview() {
             return nullptr;
         };
 
-        // Component data comes from the rig being driven; the anim's own skeleton is used only to
-        // verify the pose layout matches. An inherited component whose block doesn't line up (a
-        // variant's accessory/ArbitraryPO) returns null here, so it is left at rest rather than
-        // driven with data meant for a different rig.
         auto findComponentForAnim = [&](const NalAnimComponent& comp) -> const NalComponentData* {
             const NalComponentData* rigComp = findComponentIn(rigSkel, comp);
             if (!rigComp) return nullptr;
@@ -2772,6 +2761,7 @@ void SpiderManTool::RenderModelPreview() {
         const auto& m = previewMeshes[i];
         if ((!isWorldMode && m.isHidden) || m.indexCount <= 0) continue;
         if (!isWorldMode && !isInFrustum(m.bboxMin, m.bboxMax)) continue;
+        if (m.isGameToken && !showTokenMarkers) continue;
 
         if (m.isDebugTransparent) {
             blendBucket.push_back(i);
@@ -2939,6 +2929,10 @@ void SpiderManTool::RenderModelPreview() {
     if (showCollision) {
         if (collisionVertCount == 0) BuildCollisionVisual();
         RenderCollisionOverlay();
+    }
+
+    if (showTokenMarkers && (!worldTokenMarkers.empty() || selectedGameTokenIndex >= 0)) {
+        RenderTokenMarkers();
     }
 
     if (showSkeleton && !isWorldMode && skeletonBoneCount > 0) {
@@ -3246,15 +3240,6 @@ void SpiderManTool::BuildSkeletonVisual(const std::vector<uint8_t>& pcmData) {
 
 }
 
-// Rebuilds the collision wireframe from the current model's bounds.
-//
-// The engine never stores a per-model collision shape for actors: collision_capsule::compute_dimensions
-// derives it from the visual bounding sphere every time --
-//     base   = center + Y * (0.125 * R)
-//     end    = base   + Y * (0.500 * R)
-//     radius = 0.25 * R
-// so we reproduce that here rather than inventing our own capsule. The bounding sphere is drawn too,
-// because it is what the broad phase actually rejects against (collide_sphere_entity).
 void SpiderManTool::BuildCollisionVisual() {
     collisionVertCount = 0;
 
@@ -3296,11 +3281,6 @@ void SpiderManTool::BuildCollisionVisual() {
     constexpr int SEG = 32;
     constexpr float TWO_PI = 6.2831853f;
 
-    // --- capsule (green) --------------------------------------------------------------------
-    // Collision is mutually exclusive in the engine (actor.cpp: is_flagged(2)=capsule,
-    // is_flagged(4)=mesh, else no collision at all). A static prop therefore never gets a capsule,
-    // so only skinned actors are given one here -- otherwise we would be inventing a shape the
-    // engine would not have. Skinned/skeletal is our stand-in for the entity's capsule flag.
     const bool isActor = (skeletonBoneCount > 0);
     if (isActor) {
         auto ring = [&](float cy, float rad, float r, float g, float b) {
@@ -3318,7 +3298,6 @@ void SpiderManTool::BuildCollisionVisual() {
             const float px = center[0] + std::cos(a)*capR, pz = center[2] + std::sin(a)*capR;
             addLine(px, capBaseY, pz, px, capEndY, pz, 0.2f, 1.0f, 0.3f);
 
-            // hemisphere arcs closing each end
             for (int s = 0; s < SEG/4; s++) {
                 const float t0 = (float)s / (SEG/4) * (3.14159265f*0.5f);
                 const float t1 = (float)(s+1) / (SEG/4) * (3.14159265f*0.5f);
@@ -3332,11 +3311,6 @@ void SpiderManTool::BuildCollisionVisual() {
         }
     }
 
-    // --- world/prop collision OBBs (cyan): 12 edges each, corners = center +/- X +/- Y +/- Z ---
-    // Collision resources are named after the *pack entry*, not the per-section material name:
-    // entry VCL_AMBULANCE -> VCL_AMBULANCE000. RenderMesh::meshName holds material names
-    // ("muscle", "solid blue spidey"), so matching against that never hits -- match the loaded
-    // entry instead, allowing the trailing NNN index.
     std::string ownerName;
     if (selectedFileIndex >= 0 && selectedFileIndex < (int)entries.size()) {
         ownerName = StrToLower(entries[selectedFileIndex].name);
@@ -3346,9 +3320,6 @@ void SpiderManTool::BuildCollisionVisual() {
 
     std::vector<const CollisionObb*> visibleObbs;
     if (isWorldMode) {
-        // World collision is authored per *region*, not per mesh -- BD.PCPACK holds meshes bdc,
-        // boardsa, bd_seawall... and a single "bd_beach000" covering the lot. There is nothing to
-        // match name-wise, so in world mode show every collision mesh the pack carries.
         for (const auto& group : collisionGroups)
             for (const auto& obb : group.obbs) visibleObbs.push_back(&obb);
     } else if (!ownerName.empty()) {
@@ -3363,16 +3334,12 @@ void SpiderManTool::BuildCollisionVisual() {
         }
     }
 
-    // Single-prop packs frequently carry exactly one collision mesh for the one model they hold;
-    // fall back to it when the name lookup found nothing (dictionary misses are common).
     if (visibleObbs.empty() && !isWorldMode && collisionGroups.size() == 1) {
         for (const auto& obb : collisionGroups[0].obbs) visibleObbs.push_back(&obb);
     }
 
     collisionObbsDrawn = (int)visibleObbs.size();
 
-    // LoadAllWorldGeometries places world geometry through a base transform with X negated, so the
-    // authored collision has to be mirrored the same way to sit on top of it.
     const float mirrorX = isWorldMode ? -1.0f : 1.0f;
 
     for (const auto* obbPtr : visibleObbs) {
@@ -3389,9 +3356,9 @@ void SpiderManTool::BuildCollisionVisual() {
             }
         }
         static const int edges[12][2] = {
-            {0,1},{2,3},{4,5},{6,7},   // along X
-            {0,2},{1,3},{4,6},{5,7},   // along Y
-            {0,4},{1,5},{2,6},{3,7}    // along Z
+            {0,1},{2,3},{4,5},{6,7},
+            {0,2},{1,3},{4,6},{5,7},
+            {0,4},{1,5},{2,6},{3,7}
         };
         for (const auto& e : edges) {
             addLine(corner[e[0]][0], corner[e[0]][1], corner[e[0]][2],
@@ -3400,10 +3367,6 @@ void SpiderManTool::BuildCollisionVisual() {
         }
     }
 
-    // --- bounding sphere (amber): three great circles -----------------------------------------
-    // This is collision_geometry::get_bounding_sphere_radius, the broad-phase reject used by
-    // collide_sphere_entity. It only exists when the entity actually has a collision geometry,
-    // so it is suppressed when there is none to describe.
     if (isActor || collisionObbsDrawn > 0) {
         for (int axis = 0; axis < 3; axis++) {
             for (int i = 0; i < SEG; i++) {
@@ -3461,6 +3424,152 @@ void SpiderManTool::RenderCollisionOverlay() {
     glEnable(GL_DEPTH_TEST);
     glLineWidth(1.0f);
     glDrawArrays(GL_LINES, 0, collisionVertCount);
+    glBindVertexArray(0);
+}
+
+static void TokenColor(MarkerType t, float out[3]) {
+    switch (t) {
+        case MarkerType::Comic:          out[0]=1.0f; out[1]=0.84f; out[2]=0.0f;  break;
+        case MarkerType::Electric:       out[0]=0.2f; out[1]=0.6f;  out[2]=1.0f;  break;
+        case MarkerType::TrickRace:      out[0]=0.0f; out[1]=1.0f;  out[2]=0.4f;  break;
+        case MarkerType::VenomTrickRace: out[0]=0.8f; out[1]=0.0f;  out[2]=0.9f;  break;
+        case MarkerType::StormRace:      out[0]=0.0f; out[1]=0.9f;  out[2]=0.9f;  break;
+        case MarkerType::CombatTour:     out[0]=1.0f; out[1]=0.2f;  out[2]=0.2f;  break;
+        default:                        out[0]=1.0f; out[1]=1.0f;  out[2]=1.0f;  break;
+    }
+}
+
+void GameTokenColor(int type, float out[3]) {
+    switch (type) {
+        case GTOKEN_LANDMARK: out[0]=0.6f; out[1]=0.8f;  out[2]=1.0f;  break;
+        case GTOKEN_COMIC:    out[0]=1.0f; out[1]=0.84f; out[2]=0.0f;  break;
+        case GTOKEN_SECRET:   out[0]=0.9f; out[1]=0.9f;  out[2]=0.9f;  break;
+        case GTOKEN_MISSION:  out[0]=1.0f; out[1]=0.5f;  out[2]=0.0f;  break;
+        case GTOKEN_RACE:     out[0]=0.0f; out[1]=1.0f;  out[2]=0.4f;  break;
+        case GTOKEN_VENOM:    out[0]=0.8f; out[1]=0.0f;  out[2]=0.9f;  break;
+        case GTOKEN_COMBAT:   out[0]=1.0f; out[1]=0.2f;  out[2]=0.2f;  break;
+        case GTOKEN_HEALTH:   out[0]=0.2f; out[1]=1.0f;  out[2]=0.2f;  break;
+        case GTOKEN_JS_RACE:  out[0]=0.0f; out[1]=0.9f;  out[2]=0.9f;  break;
+        default:              out[0]=1.0f; out[1]=1.0f;  out[2]=1.0f;  break;
+    }
+}
+
+static void EmitDiamond(std::vector<float>& verts, float px, float py, float pz,
+                        float S, const float col[3], bool highlight) {
+    float r = col[0], g = col[1], b = col[2];
+    if (highlight) { r = std::min(r + 0.3f, 1.0f); g = std::min(g + 0.3f, 1.0f); b = std::min(b + 0.3f, 1.0f); }
+    float c[3] = {r, g, b};
+    float top[3] = {px, py + S*2, pz};
+    float bot[3] = {px, py - S*2, pz};
+    float mid[4][3] = {
+        {px + S, py, pz}, {px, py, pz + S},
+        {px - S, py, pz}, {px, py, pz - S}
+    };
+    for (int i = 0; i < 4; i++) {
+        int j = (i + 1) % 4;
+        for (int k : {0,1,2}) verts.push_back(top[k]);
+        for (int k = 0; k < 3; k++) verts.push_back(c[k]);
+        for (int k = 0; k < 3; k++) verts.push_back(mid[i][k]);
+        for (int k = 0; k < 3; k++) verts.push_back(c[k]);
+        for (int k = 0; k < 3; k++) verts.push_back(mid[j][k]);
+        for (int k = 0; k < 3; k++) verts.push_back(c[k]);
+        for (int k = 0; k < 3; k++) verts.push_back(bot[k]);
+        for (int k = 0; k < 3; k++) verts.push_back(c[k]);
+        for (int k = 0; k < 3; k++) verts.push_back(mid[j][k]);
+        for (int k = 0; k < 3; k++) verts.push_back(c[k]);
+        for (int k = 0; k < 3; k++) verts.push_back(mid[i][k]);
+        for (int k = 0; k < 3; k++) verts.push_back(c[k]);
+    }
+}
+
+void SpiderManTool::RenderTokenMarkers() {
+    if (skeletonProgram == 0) return;
+
+    std::vector<float> verts;
+    std::vector<float> lineVerts;
+    verts.reserve((worldTokenMarkers.size() + 4) * 24 * 6);
+
+    for (const auto& tm : worldTokenMarkers) {
+        float col[3]; TokenColor(tm.kind, col);
+        EmitDiamond(verts, tm.position[0], tm.position[1], tm.position[2], 3.0f, col, false);
+    }
+
+    const bool haveSelection = selectedGameTokenIndex >= 0 &&
+                               selectedGameTokenIndex < (int)gameTokenDefs.size();
+    if (haveSelection) {
+        const auto& gd = gameTokenDefs[selectedGameTokenIndex];
+        float col[3]; GameTokenColor(gd.type, col);
+        EmitDiamond(verts, gd.position[0], gd.position[1] + 8.0f, gd.position[2], 2.5f, col, true);
+
+        if (showRaceWaypoints && gd.raceIndex >= 0 && gd.raceIndex < (int)raceDefs.size()) {
+            const auto& race = raceDefs[gd.raceIndex];
+            for (size_t w = 0; w < race.waypoints.size(); w++) {
+                const auto& p = race.waypoints[w];
+                float t = race.waypoints.size() > 1
+                            ? (float)w / (float)(race.waypoints.size() - 1) : 0.0f;
+                float c[3] = { col[0] + (1.0f - col[0]) * t,
+                               col[1] + (1.0f - col[1]) * t,
+                               col[2] + (1.0f - col[2]) * t };
+                EmitDiamond(verts, p[0], p[1], p[2], 4.0f, c, false);
+                if (w + 1 < race.waypoints.size()) {
+                    const auto& q = race.waypoints[w + 1];
+                    for (int k = 0; k < 3; k++) lineVerts.push_back(p[k]);
+                    for (int k = 0; k < 3; k++) lineVerts.push_back(c[k]);
+                    for (int k = 0; k < 3; k++) lineVerts.push_back(q[k]);
+                    for (int k = 0; k < 3; k++) lineVerts.push_back(c[k]);
+                }
+            }
+        }
+    }
+
+    if (verts.empty() && lineVerts.empty()) return;
+
+    if (!tokenMarkerVao) {
+        glGenVertexArrays(1, &tokenMarkerVao);
+        glGenBuffers(1, &tokenMarkerVbo);
+    }
+    std::vector<float> combined = verts;
+    const size_t lineFirstVertex = combined.size() / 6;
+    combined.insert(combined.end(), lineVerts.begin(), lineVerts.end());
+
+    glBindVertexArray(tokenMarkerVao);
+    glBindBuffer(GL_ARRAY_BUFFER, tokenMarkerVbo);
+    glBufferData(GL_ARRAY_BUFFER, combined.size() * sizeof(float), combined.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glUseProgram(skeletonProgram);
+    float fov = 1.0f, aspect = 3840.0f / 2160.0f;
+    float znear = 0.1f, zfar = 20000.0f;
+    float proj[16] = {0};
+    float tanHalfFov = tan(fov / 2.0f);
+    proj[0] = 1.0f / (aspect * tanHalfFov);
+    proj[5] = 1.0f / tanHalfFov;
+    proj[10] = -(zfar + znear) / (zfar - znear);
+    proj[11] = -1.0f;
+    proj[14] = -(2.0f * zfar * znear) / (zfar - znear);
+    float view[16];
+    float target[3] = { camPos[0]+camFront[0], camPos[1]+camFront[1], camPos[2]+camFront[2] };
+    LookAt(camPos, target, camUp, view);
+
+    glUniformMatrix4fv(glGetUniformLocation(skeletonProgram, "projection"), 1, GL_FALSE, proj);
+    glUniformMatrix4fv(glGetUniformLocation(skeletonProgram, "view"), 1, GL_FALSE, view);
+
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    if (!verts.empty()) {
+        glDrawArrays(GL_TRIANGLES, 0, (int)(verts.size() / 6));
+    }
+    if (!lineVerts.empty()) {
+        glDisable(GL_DEPTH_TEST);
+        glLineWidth(3.0f);
+        glDrawArrays(GL_LINES, (int)lineFirstVertex, (int)(lineVerts.size() / 6));
+        glLineWidth(1.0f);
+        glEnable(GL_DEPTH_TEST);
+    }
+    glEnable(GL_CULL_FACE);
     glBindVertexArray(0);
 }
 
@@ -3677,7 +3786,7 @@ void SpiderManTool::StoreActivePreviewTab() {
     selectedMeshPcmData.clear();
     showWorldMeshDetails = false;
     showSkeleton = false;
-    collisionVertCount = 0;   // bounds changed; overlay rebuilds on next draw
+    collisionVertCount = 0;
     selectedBoneIndex = -1;
     isRotatingBone = false;
     boneRotationAngle = 0.0f;
@@ -3917,6 +4026,7 @@ void SpiderManTool::LoadPreview(int index) {
             AddMeshFromDataWithTransform(pcmData, e.name, nullptr, loadedPCPackPath, e.offset, transformMatrix);
 
             LoadPackEntities(loadedPCPackPath, transformMatrix);
+            ParseTokenDefList(loadedPCPackPath);
 
             LoadSkybox();
         } else {
@@ -4154,6 +4264,71 @@ int SpiderManTool::PickMeshAtScreenPos(float screenX, float screenY, float vpWid
     return closestMesh;
 }
 
+static bool RayIntersectSphere(const float origin[3], const float dir[3],
+                               const float center[3], float radius, float& t) {
+    float oc[3] = { origin[0]-center[0], origin[1]-center[1], origin[2]-center[2] };
+    float b = oc[0]*dir[0] + oc[1]*dir[1] + oc[2]*dir[2];
+    float c = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - radius*radius;
+    float disc = b*b - c;
+    if (disc < 0) return false;
+    t = -b - sqrtf(disc);
+    if (t < 0) t = -b + sqrtf(disc);
+    return t > 0;
+}
+
+static float DistanceToMeshBounds(const RenderMesh& mesh, int instanceIndex, const float from[3]) {
+    const float* lo = mesh.bboxMin;
+    const float* hi = mesh.bboxMax;
+    if (instanceIndex >= 0 && instanceIndex < (int)mesh.instances.size()) {
+        lo = mesh.instances[instanceIndex].bboxMin;
+        hi = mesh.instances[instanceIndex].bboxMax;
+    }
+    float d = 0.0f;
+    for (int a = 0; a < 3; a++) {
+        float c = (lo[a] + hi[a]) * 0.5f;
+        float delta = c - from[a];
+        d += delta * delta;
+    }
+    return sqrtf(d);
+}
+
+int SpiderManTool::PickGameTokenAtScreenPos(float screenX, float screenY, float vpWidth, float vpHeight) {
+    if (gameTokenDefs.empty()) return -1;
+
+    float ndcX = (2.0f * screenX / vpWidth) - 1.0f;
+    float ndcY = 1.0f - (2.0f * screenY / vpHeight);
+    const float fbAspect = 3840.0f / 2160.0f;
+    float fov = 1.0f;
+    float tanHalfFov = tan(fov / 2.0f);
+
+    float right[3]; Cross(camFront, camUp, right); Normalize(right);
+    float up[3]; Cross(right, camFront, up); Normalize(up);
+    float rayDir[3] = {
+        camFront[0] + right[0]*ndcX*tanHalfFov*fbAspect + up[0]*ndcY*tanHalfFov,
+        camFront[1] + right[1]*ndcX*tanHalfFov*fbAspect + up[1]*ndcY*tanHalfFov,
+        camFront[2] + right[2]*ndcX*tanHalfFov*fbAspect + up[2]*ndcY*tanHalfFov
+    };
+    Normalize(rayDir);
+    float rayOrigin[3] = { camPos[0], camPos[1], camPos[2] };
+
+    int closest = -1;
+    float closestT = 1e30f;
+    for (int i = 0; i < (int)gameTokenDefs.size(); i++) {
+        const float* pos = gameTokenDefs[i].position;
+        float dx = pos[0] - rayOrigin[0];
+        float dy = pos[1] - rayOrigin[1];
+        float dz = pos[2] - rayOrigin[2];
+        float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+        float radius = std::max(3.0f, std::min(dist * 0.02f, 12.0f));
+        float t;
+        if (RayIntersectSphere(rayOrigin, rayDir, pos, radius, t) && t < closestT) {
+            closestT = t;
+            closest = i;
+        }
+    }
+    return closest;
+}
+
 void SpiderManTool::HandleMeshPicking(float viewportX, float viewportY, float viewportWidth, float viewportHeight) {
     if (!isWorldMode || !isModelLoaded) return;
 
@@ -4161,23 +4336,34 @@ void SpiderManTool::HandleMeshPicking(float viewportX, float viewportY, float vi
     int pickedMesh = PickMeshAtScreenPos(viewportX, viewportY, viewportWidth, viewportHeight,
                                          &pickedInstance);
 
+    if (showTokenMarkers && !gameTokenDefs.empty()) {
+        int pickedToken = PickGameTokenAtScreenPos(viewportX, viewportY, viewportWidth, viewportHeight);
+        if (pickedToken >= 0) {
+            bool tokenIsInFront = true;
+            if (pickedMesh >= 0 && !previewMeshes[pickedMesh].isGameToken) {
+                const float* tp = gameTokenDefs[pickedToken].position;
+                float dx = tp[0] - camPos[0], dy = tp[1] - camPos[1], dz = tp[2] - camPos[2];
+                float tokenDist = sqrtf(dx*dx + dy*dy + dz*dz);
+                float meshDist = DistanceToMeshBounds(previewMeshes[pickedMesh], pickedInstance, camPos);
+                tokenIsInFront = tokenDist <= meshDist + 5.0f;
+            }
+            if (tokenIsInFront) {
+                selectedGameTokenIndex = pickedToken;
+                showTokenDetail = true;
+                selectedMeshIndex = -1;
+                selectedMeshInstanceIndex = -1;
+                return;
+            }
+        }
+    }
+
+    selectedGameTokenIndex = -1;
+
     if (pickedMesh >= 0) {
         selectedMeshIndex = pickedMesh;
         selectedMeshInstanceIndex = pickedInstance;
         LoadSelectedMeshPcmData();
         showWorldMeshDetails = true;
-
-        const auto& m = previewMeshes[pickedMesh];
-        const std::string selectedName =
-            (pickedInstance >= 0 && pickedInstance < (int)m.instances.size() &&
-             !m.instances[pickedInstance].name.empty())
-                ? m.instances[pickedInstance].name
-                : m.meshName;
-        if (!selectedName.empty()) {
-
-        } else {
-
-        }
     }
 }
 

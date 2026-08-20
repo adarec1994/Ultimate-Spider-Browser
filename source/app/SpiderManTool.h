@@ -65,16 +65,66 @@ struct FileEntry {
     std::vector<std::string> subItems;
 };
 
-// Which of the world loader's four passes produced a mesh. Lets the viewer group and export them
-// separately -- they have genuinely different placement semantics (zone/interior geometry is placed
-// once, conglomerate members carry a relative po, lego is GPU-instanced).
+enum class MarkerType : uint8_t {
+    Comic,
+    Electric,
+    TrickRace,
+    VenomTrickRace,
+    StormRace,
+    CombatTour,
+    Unknown,
+};
+
+enum GameTokenType : int {
+    GTOKEN_LANDMARK = 0,
+    GTOKEN_COMIC    = 1,
+    GTOKEN_SECRET   = 2,
+    GTOKEN_MISSION  = 3,
+    GTOKEN_RACE     = 4,
+    GTOKEN_VENOM    = 5,
+    GTOKEN_COMBAT   = 6,
+    GTOKEN_HEALTH   = 7,
+    GTOKEN_JS_RACE  = 8,
+    GTOKEN_TYPE_COUNT = 9,
+};
+
+const char* GameTokenTypeName(int type);
+const char* GameTokenTextureName(int type);
+void GameTokenColor(int type, float out[3]);
+
+struct GameTokenDef {
+    std::string name;
+    float position[3] = {};
+    int type = -1;
+    int tokenId = -1;
+    int categoryIndex = -1;
+    int unlockIndex = -1;
+    int raceIndex = -1;
+};
+
+struct RaceDef {
+    std::string name;
+    std::string zone;
+    bool isVenom = false;
+    float medalTimes[4] = {};
+    std::vector<std::array<float, 3>> waypoints;
+};
+
+struct TokenMarker {
+    MarkerType kind = MarkerType::Unknown;
+    float position[3] = {};
+    std::string name;
+    std::string zone;
+    int gameTokenIdx = -1;
+};
+
 enum class WorldMeshKind : uint8_t {
-    None = 0,      // model preview, not world geometry
-    Zone,          // LoadWorldZoneChunks  - city shell, streets, terrain
-    Interior,      // LoadWorldInteriorMeshes
-    SceneEntity,   // simple single-mesh scene placements
-    Conglomerate,  // multi-part scene entities (BuildConglomerateMemberPlacements)
-    Lego,          // batched/instanced small props
+    None = 0,
+    Zone,
+    Interior,
+    SceneEntity,
+    Conglomerate,
+    Lego,
     Ocean,
     Skybox,
 };
@@ -112,6 +162,8 @@ struct RenderMesh {
 
     bool isWater = false;
     bool skipPicking = false;
+    bool isGameToken = false;
+    int gameTokenType = -1;
     WorldMeshKind worldKind = WorldMeshKind::None;
     uint32_t shaderType = 0;
     bool isPersonMaterial = false;
@@ -398,17 +450,11 @@ public:
     void BuildSkeletonVisual(const std::vector<uint8_t>& pcmData);
     void RenderSkeletonOverlay();
 
-    // Collision overlay. USM has no authored collision spheres: collision_geometry defines only
-    // CAPSULE and MESH, and an actor's capsule is *derived* at runtime from the model's bounding
-    // sphere (collision_capsule::compute_dimensions). BuildCollisionVisual reproduces that formula
-    // exactly, so what's drawn is what the engine would collide with.
     bool showCollision = false;
     unsigned int collisionVao = 0;
     unsigned int collisionVbo = 0;
     int collisionVertCount = 0;
 
-    // World/prop collision: an OBB tree from a 'COLL' resource. Axes are pre-scaled by their
-    // half-extent, so the corners are center +/- axisX +/- axisY +/- axisZ.
     struct CollisionObb {
         float center[3];
         float radius;
@@ -416,9 +462,6 @@ public:
         float axisY[3];
         float axisZ[3];
     };
-    // Collision resources are named "<MESHNAME>" + a 3-digit index (VCL_AMBULANCE -> VCL_AMBULANCE000),
-    // so a group is matched back to the mesh it belongs to by that name, and only the groups
-    // belonging to currently loaded meshes are drawn.
     struct CollisionGroup {
         std::string name;
         std::vector<CollisionObb> obbs;
@@ -426,7 +469,24 @@ public:
     std::vector<CollisionGroup> collisionGroups;
     int collisionObbsDrawn = 0;
 
-    // Stamped onto every mesh the world loader creates; each pass sets it before adding meshes.
+    std::vector<TokenMarker> worldTokenMarkers;
+    std::vector<GameTokenDef> gameTokenDefs;
+    std::vector<RaceDef> raceDefs;
+    bool showTokenMarkers = true;
+    bool showTokenDetail = false;
+    bool showRaceWaypoints = true;
+    int selectedGameTokenIndex = -1;
+    void ParseTokenDefList(const std::string& packFilePath);
+    void ParseRaceScriptInstances(const std::string& packFilePath);
+    int PickGameTokenAtScreenPos(float screenX, float screenY, float vpWidth, float vpHeight);
+    void LoadGameTokenMeshes();
+    void ResolveGameTokenLinks();
+    unsigned int GetLandmarkImage(int landmarkIndex, bool big = false);
+    unsigned int GetComicCoverImage(int coverIndex);
+    static const char* LandmarkDisplayName(int landmarkIndex);
+    static const char* LandmarkTextureSuffix(int landmarkIndex);
+    static int LandmarkCount();
+
     WorldMeshKind currentWorldKind = WorldMeshKind::None;
     void ExportWorldMeshesByKind(const std::vector<WorldMeshKind>& kinds, const std::string& label);
 
@@ -435,6 +495,9 @@ public:
     void AppendCollisionGroups(const std::vector<uint8_t>& packData, const PackDirectory& dir);
     void BuildCollisionVisual();
     void RenderCollisionOverlay();
+    void RenderTokenMarkers();
+    unsigned int tokenMarkerVao = 0;
+    unsigned int tokenMarkerVbo = 0;
     int PickBoneAtScreenPos(float screenX, float screenY, float vpW, float vpH);
     void ApplyBoneRotation(int boneIdx, float angle, int axis);
     void ResetBoneRotation();
@@ -445,10 +508,7 @@ public:
     void ComputeNALBonePositions();
     float modelCenter[3] = {0.0f, 0.0f, 0.0f};
     float modelRadius = 1.0f;
-    // Orbit/zoom focal point. For a full-body character this is the head, so zooming in
-    // homes in on the face; for compact meshes it falls back to the model centre.
     float modelHeadTarget[3] = {0.0f, 0.0f, 0.0f};
-    // Persistent orbit radius, so the zoom-driven centre<->head focal pan stays stable.
     float orbitDistance = 0.0f;
     float camPos[3] = {0.0f, 10.0f, 50.0f};
     float camFront[3] = {0.0f, 0.0f, -1.0f};
@@ -464,8 +524,10 @@ public:
     void SaveConfig();
     void LoadConfig();
     void ScanDirectory();
+    void ParseDictionaryStream(std::istream& file);
     void LoadDictionary(const std::string& path);
     void LoadBinaryDictionary(const std::string& path);
+    void LoadEmbeddedDictionary();
     void OpenPCPack(const std::string& path);
     void LoadAnimationStateMachinesForCurrentPack();
     bool PcmModelHasSkeleton(int entryIndex) const;
@@ -500,8 +562,6 @@ public:
     void AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName = "", std::function<unsigned int(uint32_t)> textureResolver = nullptr, const std::string& sourcePack = "", uint32_t sourceOffset = 0, const float* transform = nullptr, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
     void AddMeshInstancesFromDataBatched(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const std::vector<std::array<float, 16>>& transforms, uint32_t onlyMeshOffset = 0xFFFFFFFFu);
     struct PendingWorldInstanceBatch {
-        // Which loader pass queued this. Captured at queue time because the batch is materialised
-        // later, when currentWorldKind no longer reflects the pass that produced it.
         WorldMeshKind kind = WorldMeshKind::None;
         std::vector<uint8_t> pcmData;
         std::string modelName;
@@ -521,6 +581,12 @@ public:
     void LoadAllWorldGeometries();
     void LoadPackEntities(const std::string& packFilePath, const float* baseTransform);
 
+    bool wantLoadWorld = false;
+    bool isLoadingWorld = false;
+    float worldLoadProgress = 0.0f;
+    std::string worldLoadPhase;
+    std::function<void()> onLoadProgress;
+
     std::vector<GlobalSearchResult> globalSearchResults;
     int selectedGlobalSearchIndex = -1;
     bool isGlobalSearchMode = false;
@@ -530,49 +596,10 @@ public:
 
     void ExportSelectedWorldMesh(bool asGlb);
 
-    // World scene export. Runs stepped so the UI can show progress: ExtractAllWorldMeshes() loads
-    // the world itself (the caller does not need to have it loaded) and builds the work list, then
-    // WorldExportStep() is pumped once per frame until exportProgress == exportTotal.
-    void ExtractAllWorldMeshes();
-    void WorldExportStep(int itemsThisFrame);
-
-    struct WorldExportItem {
-        int meshIndex = -1;          // index into previewMeshes
-        std::string relPath;         // "glb/<category>/<name>.glb"
-        std::string outFile;         // absolute path
-        std::string name;
-        std::string category;
-        std::string textureName;
-        uint32_t textureHash = 0;
-        // Material's shader name ("usstreet", "smsimple", "usperson"...). Read from material
-        // offset +0x04; it selects which of the engine's shaders drew this mesh, so it is the
-        // right hint for picking a matching material on the importing side.
-        std::string shaderName;
-        // Zone (district pack) this mesh came from; zone chunks are grouped into one folder
-        // per zone.
-        std::string pcmName;
-    };
-    struct WorldExportPlacement {
-        int meshId = 0;
-        std::string name;
-        std::array<float, 16> transform{};
-    };
-
-    bool isExportingWorld = false;
-    int exportProgress = 0;
-    int exportTotal = 0;
-    std::string exportCurrentItem;
-    std::vector<WorldExportItem> exportItems;
-    std::vector<WorldExportPlacement> exportPlacements;
-    std::vector<RenderMesh> exportSavedMeshes;
-    std::string exportRootDir;
-
     std::shared_ptr<NalSkeletonData> loadedSkeleton;
     std::shared_ptr<NalAnimFile>     loadedAnimFile;
     UsmMorph::File loadedMorphFile;
     std::vector<float> morphTargetWeights;
-    // One-shot request (consumed by the UI): when a model with morph targets is
-    // loaded or restored, pop the Animations panel to the front on its Morphs tab.
     bool focusMorphsTab = false;
     std::vector<UsmViseme::Stream> loadedVisemeStreams;
     int selectedVisemeIndex = -1;
@@ -599,19 +626,11 @@ public:
     void BuildGlobalSkeletonIndex();
     std::shared_ptr<NalSkeletonData> LoadSkeletonFromLocation(const SkeletonLocation& loc);
 
-    // Face morphs are keyed by mesh hash but may ship in a different pack than the mesh
-    // (e.g. a CH_VWR_* character viewer holds the head mesh, while the morph only lives in
-    // a cutscene/IGC pack). This index lets LoadMorphForCurrentModel resolve a morph from
-    // any pack by mesh hash. Built lazily on first use.
     struct MorphLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
     std::map<uint32_t, MorphLocation> globalMorphIndex;
     bool globalMorphIndexBuilt = false;
     void BuildGlobalMorphIndex();
 
-    // Animations, like skeletons, may live in a different pack than the mesh: a character loaded
-    // from a cutscene pack has no anim file; its clips ship in its CH_VWR viewer/costume pack.
-    // Maps a skeleton hash -> anim-file locations in packs that also contain that skeleton, so a
-    // model can pull its animations cross-pack when the current pack has none.
     struct AnimFileLocation { std::string packPath; uint32_t offset = 0; uint32_t size = 0; };
     std::map<uint32_t, std::vector<AnimFileLocation>> globalAnimIndex;
     bool globalAnimIndexBuilt = false;
@@ -710,8 +729,6 @@ public:
     void LoadAnimationForCurrentPack();
     void LoadVisemeStreamsForCurrentPack();
     void LoadMorphForCurrentModel(uint32_t meshHash);
-    // Side-effect-free morph resolver (current pack, then global index) shared by the viewer
-    // loader and the GLB exporter. Returns the raw .pcmorph bytes for a mesh hash.
     bool FetchMorphBytesForHash(uint32_t meshHash, std::vector<uint8_t>& out);
     void ApplyMorphTargets();
     void UpdateAnimationPlayback(float deltaTime);

@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
+
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+
 project(USM)
 
 if(POLICY CMP0169)
@@ -6,6 +11,9 @@ if(POLICY CMP0169)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
+
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(USE_MSVC_RUNTIME_LIBRARY_DLL OFF CACHE BOOL "" FORCE)
 
 find_package(OpenGL REQUIRED)
 
@@ -108,26 +116,42 @@ target_link_libraries(imgui_node_editor PUBLIC imgui)
 
 set(PLATFORM_SOURCES "")
 if(WIN32)
-    list(APPEND PLATFORM_SOURCES resource.rc)
+    list(APPEND PLATFORM_SOURCES res/resource.rc)
 endif()
 
-add_executable(USM
+add_executable(USM WIN32
         main.cpp
-        Interface.cpp
-        AnimationStateMachineView.cpp
-        SpiderManTool.cpp
-        Archive.cpp
-        AnimationStateMachine.cpp
-        Render.cpp
-        Model.cpp
-        World.cpp
+        app/Interface.cpp
+        app/AnimationStateMachineView.cpp
+        app/SpiderManTool.cpp
+        core/Archive.cpp
+        formats/AnimationStateMachine.cpp
+        render/Render.cpp
+        render/Model.cpp
+        world/World.cpp
         ${imguifiledialog_SOURCE_DIR}/ImGuiFileDialog.cpp
         ${PLATFORM_SOURCES}
 )
 
 target_compile_definitions(USM PRIVATE USE_STD_FILESYSTEM)
 
+if(MSVC)
+    target_link_options(USM PRIVATE /ENTRY:mainCRTStartup)
+endif()
+
+if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/res/string_hash_dictionary.txt")
+    set_property(SOURCE res/resource.rc APPEND PROPERTY OBJECT_DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/res/string_hash_dictionary.txt")
+endif()
+
 target_include_directories(USM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/app
+        ${CMAKE_CURRENT_SOURCE_DIR}/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/formats
+        ${CMAKE_CURRENT_SOURCE_DIR}/nal
+        ${CMAKE_CURRENT_SOURCE_DIR}/render
+        ${CMAKE_CURRENT_SOURCE_DIR}/world
+        ${CMAKE_CURRENT_SOURCE_DIR}/res
         ${imgui_SOURCE_DIR}
         ${imgui_SOURCE_DIR}/backends
         ${glfw_SOURCE_DIR}/include
@@ -138,17 +162,9 @@ target_include_directories(USM PRIVATE
 
 target_link_libraries(USM PRIVATE imgui imgui_node_editor glfw glad OpenGL::GL)
 
-if(EXISTS "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/res/spider-browser.png")
     configure_file(
-            "${CMAKE_SOURCE_DIR}/string_hash_dictionary.txt"
-            "${CMAKE_CURRENT_BINARY_DIR}/string_hash_dictionary.txt"
-            COPYONLY
-    )
-endif()
-
-if(EXISTS "${CMAKE_SOURCE_DIR}/spider-browser.png")
-    configure_file(
-            "${CMAKE_SOURCE_DIR}/spider-browser.png"
+            "${CMAKE_CURRENT_SOURCE_DIR}/res/spider-browser.png"
             "${CMAKE_CURRENT_BINARY_DIR}/spider-browser.png"
             COPYONLY
     )

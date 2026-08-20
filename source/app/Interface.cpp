@@ -30,9 +30,32 @@ bool IsWorldInteriorPack(const std::string& stemName) {
 }
 
 void RenderUI(SpiderManTool& tool) {
-    // Pump the world export a slice at a time so the progress bar below actually animates.
-    if (tool.isExportingWorld) {
-        tool.WorldExportStep(8);
+    if (tool.isLoadingWorld) {
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::Begin("WorldLoadBg", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
+
+        ImVec2 center = ImVec2(ImGui::GetWindowWidth() / 2.0f, ImGui::GetWindowHeight() / 2.0f);
+        float boxWidth = 420.0f;
+        float boxHeight = 100.0f;
+        ImGui::SetCursorPos(ImVec2(center.x - boxWidth / 2.0f, center.y - boxHeight / 2.0f));
+        ImGui::BeginChild("WorldLoadContent", ImVec2(boxWidth, boxHeight), true, ImGuiWindowFlags_NoScrollbar);
+
+        const char* phase = tool.worldLoadPhase.empty() ? "Loading world..." : tool.worldLoadPhase.c_str();
+        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize(phase).x) / 2.0f);
+        ImGui::Text("%s", phase);
+        ImGui::Spacing();
+        ImGui::ProgressBar(tool.worldLoadProgress, ImVec2(-1, 20), "");
+        ImGui::Spacing();
+
+        char pct[32];
+        snprintf(pct, sizeof(pct), "%d%%", (int)(tool.worldLoadProgress * 100.0f));
+        ImGui::SetCursorPosX((boxWidth - ImGui::CalcTextSize(pct).x) / 2.0f);
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", pct);
+
+        ImGui::EndChild();
+        ImGui::End();
+        return;
     }
 
     if (tool.currentState == SpiderManTool::STATE_LOADING && tool.isIndexing) {
@@ -110,6 +133,7 @@ void RenderUI(SpiderManTool& tool) {
                 if (dictPath.empty() && fs::exists(targetDict)) dictPath = targetDict.string();
                 if (dictPath.empty()) { try { for (const auto& entry : fs::recursive_directory_iterator(tool.searchPath)) { if (entry.is_regular_file() && entry.path().filename() == targetDict) { dictPath = entry.path().string(); break; } } } catch (...) {} }
                 if (!dictPath.empty()) tool.LoadDictionary(dictPath);
+                if (tool.dictionary.empty()) tool.LoadEmbeddedDictionary();
 
                 tool.ScanDirectory();
                 std::sort(tool.foundPacks.begin(), tool.foundPacks.end());
@@ -203,9 +227,6 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::Image((void*)(intptr_t)tool.viewportTextureId, winSize, ImVec2(0,1), ImVec2(1,0));
         bool viewportImageHovered = ImGui::IsItemHovered();
 
-        // World export menu. RMB is also the fly-camera drag, so only treat a right-click as a
-        // context menu when the mouse didn't move -- otherwise the menu pops every time you finish
-        // looking around.
         if (tool.isWorldMode && viewportImageHovered &&
             ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
             !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Right)) {
@@ -299,8 +320,6 @@ void RenderUI(SpiderManTool& tool) {
                                    instanceName.empty() ? ("Mesh " + std::to_string(tool.selectedMeshIndex)).c_str() : instanceName.c_str());
             }
 
-            // World collision is region-scoped (one COLL per district, not per mesh), so in world
-            // mode every collision mesh the pack carries is shown.
             ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 70));
             if (ImGui::Checkbox("Show Collision", &tool.showCollision)) {
                 tool.collisionVertCount = 0;
@@ -314,15 +333,20 @@ void RenderUI(SpiderManTool& tool) {
                     ImGui::TextColored(ImVec4(0.8f, 0.5f, 0.4f, 0.9f), "none in this pack");
                 }
             }
+
+            ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 95));
+            ImGui::Checkbox("Show Tokens", &tool.showTokenMarkers);
+            if (!tool.worldTokenMarkers.empty() || !tool.gameTokenDefs.empty()) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.84f, 0.0f, 0.9f), "%d markers, %d game tokens",
+                                   (int)tool.worldTokenMarkers.size(), (int)tool.gameTokenDefs.size());
+            }
         } else {
             ImGui::SetCursorPos(ImVec2(20, viewportOverlayTop + 20));
             if (ImGui::Checkbox("Show Collision", &tool.showCollision)) {
-                tool.collisionVertCount = 0;   // force a rebuild on next draw
+                tool.collisionVertCount = 0;
             }
             if (tool.showCollision) {
-                // The engine gives an entity a capsule OR a collision mesh OR nothing
-                // (actor.cpp: is_flagged(2) / is_flagged(4) / set_colgeom(nullptr)), so report
-                // which of the three this model actually is rather than always drawing both.
                 ImGui::SameLine();
                 if (tool.collisionObbsDrawn > 0) {
                     ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 0.9f), "mesh: %d OBBs",
@@ -449,19 +473,10 @@ void RenderUI(SpiderManTool& tool) {
     }
     const bool hasVisemeAnimations = !tool.isWorldMode && tool.activePreviewTab >= 0 &&
         tool.loadedMorphFile.valid && !tool.loadedVisemeStreams.empty();
-    // A model "has morphs" whenever it carries a valid morph file with at least one
-    // adjustable target (index 0 is the neutral base), regardless of whether it also
-    // ships viseme lip-sync streams.
     const bool hasMorphs = !tool.isWorldMode && tool.activePreviewTab >= 0 &&
         tool.loadedMorphFile.valid && tool.morphTargetWeights.size() > 1;
-    // When a model with morph targets was just loaded/restored, surface this panel and
-    // jump straight to the Morphs tab. One-shot: consume the request once we can honor it.
     const bool focusMorphs = tool.focusMorphsTab && hasMorphs;
     if (hasMorphs) tool.focusMorphsTab = false;
-    // One docked panel holding an inner tab bar (Animations / Morphs). It is locked to its dock
-    // slot: NoTabBar hides the dock node's own tab bar — that removes both the redundant outer
-    // "Animations" container AND the "hide tab bar" corner menu (▼) — while the inner tab bar
-    // supplies the two tabs. NoCloseButton = can't be closed; NoMove = can't be dragged/undocked.
     if (hasCompatibleAnimations || hasVisemeAnimations || hasMorphs) {
         ImGuiWindowClass lockClass;
         lockClass.DockNodeFlagsOverrideSet =
@@ -473,8 +488,6 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
             ImGui::SetNextWindowFocus();
         }
-        // Keep this window's name exactly "Animations" — it is docked by that name in imgui.ini
-        // (DockId 0x00000004); renaming it detaches it from the saved dock slot.
         if (ImGui::Begin("Animations", nullptr, ImGuiWindowFlags_NoMove)) {
             if (ImGui::BeginTabBar("##AnimMorphTabs")) {
                 if ((hasCompatibleAnimations || hasVisemeAnimations) &&
@@ -526,9 +539,6 @@ void RenderUI(SpiderManTool& tool) {
                         tool.isAnimPlaying = false;
                     }
                     ImGui::Separator();
-                    // The .pcmorph stores targets by index (the game keeps no per-target names):
-                    // target 0 is the neutral base, targets 1..RETAIL_CHANNEL_COUNT are the viseme
-                    // lip-sync channels, the rest are expression/blink shapes.
                     for (int i = 1; i < (int)tool.morphTargetWeights.size(); ++i) {
                         char label[64];
                         if (i <= (int)UsmViseme::RETAIL_CHANNEL_COUNT)
@@ -560,19 +570,24 @@ void RenderUI(SpiderManTool& tool) {
             ImGui::Separator();
 
             if (ImGui::Selectable("Load World", false)) {
-                tool.LoadAllWorldGeometries();
+                tool.wantLoadWorld = true;
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Click to load all world areas");
             }
 
-            if (ImGui::Selectable("Extract All World Meshes", false, ImGuiSelectableFlags_AllowDoubleClick)) {
+            if (ImGui::Selectable("Export World To GLB", false, ImGuiSelectableFlags_AllowDoubleClick)) {
                 if (ImGui::IsMouseDoubleClicked(0)) {
-                    tool.ExtractAllWorldMeshes();
+                    tool.ExportWorldMeshesByKind({WorldMeshKind::Zone,
+                                                  WorldMeshKind::SceneEntity,
+                                                  WorldMeshKind::Interior,
+                                                  WorldMeshKind::Conglomerate,
+                                                  WorldMeshKind::Lego},
+                                                 "nyc");
                 }
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Double-click to extract all unique PCM meshes as GLB + DDS");
+                ImGui::SetTooltip("Double-click to export the loaded world as a single GLB");
             }
             ImGui::Separator();
 
@@ -1121,34 +1136,357 @@ void RenderUI(SpiderManTool& tool) {
         ImGui::End();
     }
 
-    // World export progress. Modal so the meshes being written aren't disturbed mid-flight.
-    if (tool.isExportingWorld) {
-        ImGuiViewport* evp = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(ImVec2(evp->Pos.x + evp->Size.x * 0.5f,
-                                       evp->Pos.y + evp->Size.y * 0.5f),
-                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(460, 0));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
-        ImGui::Begin("Exporting World", nullptr,
-                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoTitleBar);
+    if (tool.showTokenMarkers && (!tool.worldTokenMarkers.empty() || !tool.gameTokenDefs.empty())) {
+        ImGui::SetNextWindowSize(ImVec2(480, 500), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Token Markers###TokenMarkers", &tool.showTokenMarkers)) {
+            auto markerLabel = [](MarkerType t) -> const char* {
+                switch (t) {
+                    case MarkerType::Comic:          return "Comic";
+                    case MarkerType::Electric:        return "Electric";
+                    case MarkerType::TrickRace:       return "Trick Race";
+                    case MarkerType::VenomTrickRace:  return "Venom Trick Race";
+                    case MarkerType::StormRace:       return "Storm Race";
+                    case MarkerType::CombatTour:      return "Combat Tour";
+                    default:                         return "Unknown";
+                }
+            };
+            auto markerColor = [](MarkerType t) -> ImVec4 {
+                switch (t) {
+                    case MarkerType::Comic:          return ImVec4(1.0f, 0.84f, 0.0f, 1.0f);
+                    case MarkerType::Electric:       return ImVec4(0.2f, 0.6f, 1.0f, 1.0f);
+                    case MarkerType::TrickRace:      return ImVec4(0.0f, 1.0f, 0.4f, 1.0f);
+                    case MarkerType::VenomTrickRace:  return ImVec4(0.8f, 0.0f, 0.9f, 1.0f);
+                    case MarkerType::StormRace:      return ImVec4(0.0f, 0.9f, 0.9f, 1.0f);
+                    case MarkerType::CombatTour:     return ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
+                    default:                        return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+                }
+            };
+            auto gameTokenLabel = [](int t) -> const char* {
+                switch (t) {
+                    case GTOKEN_COMIC:    return "Comic";
+                    case GTOKEN_LANDMARK: return "Landmark";
+                    case GTOKEN_RACE:     return "Race";
+                    case GTOKEN_JS_RACE:  return "JS Race";
+                    case GTOKEN_SECRET:   return "Secret";
+                    case GTOKEN_COMBAT:   return "Combat";
+                    case GTOKEN_VENOM:    return "Venom";
+                    case GTOKEN_HEALTH:   return "Health";
+                    case GTOKEN_MISSION:  return "Mission";
+                    default:              return "Unknown";
+                }
+            };
+            auto gameTokenColor = [](int t) -> ImVec4 {
+                switch (t) {
+                    case GTOKEN_COMIC:    return ImVec4(1.0f, 0.84f, 0.0f, 1.0f);
+                    case GTOKEN_LANDMARK: return ImVec4(0.3f, 0.8f, 1.0f, 1.0f);
+                    case GTOKEN_RACE:     return ImVec4(0.0f, 1.0f, 0.4f, 1.0f);
+                    case GTOKEN_JS_RACE:  return ImVec4(0.0f, 0.8f, 0.3f, 1.0f);
+                    case GTOKEN_SECRET:   return ImVec4(0.9f, 0.9f, 0.9f, 1.0f);
+                    case GTOKEN_COMBAT:   return ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
+                    case GTOKEN_VENOM:    return ImVec4(0.8f, 0.0f, 0.9f, 1.0f);
+                    case GTOKEN_HEALTH:   return ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+                    case GTOKEN_MISSION:  return ImVec4(1.0f, 0.6f, 0.0f, 1.0f);
+                    default:              return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+                }
+            };
 
-        ImGui::TextColored(ImVec4(1, 1, 1, 0.9f), "Exporting world to GLB + nyc.json");
-        ImGui::Spacing();
+            static int tokenTab = 0;
+            int& selectedGameToken = tool.selectedGameTokenIndex;
 
-        const float frac = (tool.exportTotal > 0)
-            ? (float)tool.exportProgress / (float)tool.exportTotal : 0.0f;
-        char overlay[64];
-        snprintf(overlay, sizeof(overlay), "%d / %d meshes",
-                 tool.exportProgress, tool.exportTotal);
-        ImGui::ProgressBar(frac, ImVec2(-1, 22), overlay);
+            if (!tool.gameTokenDefs.empty() && !tool.worldTokenMarkers.empty()) {
+                if (ImGui::RadioButton("Entities", tokenTab == 0)) tokenTab = 0;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Game Tokens", tokenTab == 1)) tokenTab = 1;
+            } else {
+                tokenTab = tool.gameTokenDefs.empty() ? 0 : 1;
+            }
 
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "%s",
-                           tool.exportCurrentItem.empty() ? "..." : tool.exportCurrentItem.c_str());
+            if (tokenTab == 0 && !tool.worldTokenMarkers.empty()) {
+                int counts[7] = {};
+                for (const auto& tm : tool.worldTokenMarkers)
+                    counts[(int)tm.kind]++;
+
+                ImGui::Text("Total: %d markers", (int)tool.worldTokenMarkers.size());
+                for (int i = 0; i < 7; i++) {
+                    if (counts[i] > 0) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(markerColor((MarkerType)i), " %s:%d",
+                                           markerLabel((MarkerType)i), counts[i]);
+                    }
+                }
+                ImGui::Separator();
+
+                if (ImGui::BeginTable("tokens", 4,
+                        ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 100);
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Zone", ImGuiTableColumnFlags_WidthFixed, 80);
+                    ImGui::TableSetupColumn("Position", ImGuiTableColumnFlags_WidthFixed, 160);
+                    ImGui::TableHeadersRow();
+
+                    for (int i = 0; i < (int)tool.worldTokenMarkers.size(); i++) {
+                        const auto& tm = tool.worldTokenMarkers[i];
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextColored(markerColor(tm.kind), "%s", markerLabel(tm.kind));
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(tm.name.c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(tm.zone.c_str());
+                        ImGui::TableNextColumn();
+                        if (ImGui::SmallButton(("Go##tk" + std::to_string(i)).c_str())) {
+                            tool.camPos[0] = tm.position[0];
+                            tool.camPos[1] = tm.position[1] + 30.0f;
+                            tool.camPos[2] = tm.position[2] + 30.0f;
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("%.0f, %.0f, %.0f",
+                                    tm.position[0], tm.position[1], tm.position[2]);
+                    }
+                    ImGui::EndTable();
+                }
+            }
+
+            if (tokenTab == 1 && !tool.gameTokenDefs.empty()) {
+                int gtCounts[9] = {};
+                for (const auto& gd : tool.gameTokenDefs) {
+                    if (gd.type >= 0 && gd.type < 9) gtCounts[gd.type]++;
+                }
+
+                ImGui::Text("Total: %d tokens", (int)tool.gameTokenDefs.size());
+                for (int i = 0; i < 9; i++) {
+                    if (gtCounts[i] > 0) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(gameTokenColor(i), " %s:%d",
+                                           gameTokenLabel(i), gtCounts[i]);
+                    }
+                }
+                ImGui::Separator();
+
+                static int gtFilterType = -1;
+                ImGui::SetNextItemWidth(120);
+                if (ImGui::BeginCombo("Filter##gtfilter",
+                        gtFilterType < 0 ? "All" : gameTokenLabel(gtFilterType))) {
+                    if (ImGui::Selectable("All", gtFilterType < 0)) gtFilterType = -1;
+                    for (int i = 0; i < 9; i++) {
+                        if (gtCounts[i] > 0 && ImGui::Selectable(gameTokenLabel(i), gtFilterType == i))
+                            gtFilterType = i;
+                    }
+                    ImGui::EndCombo();
+                }
+
+                if (ImGui::BeginTable("gtokens", 4,
+                        ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable,
+                        ImVec2(0, ImGui::GetContentRegionAvail().y - (selectedGameToken >= 0 ? 110 : 0)))) {
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80);
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 40);
+                    ImGui::TableSetupColumn("Position", ImGuiTableColumnFlags_WidthFixed, 160);
+                    ImGui::TableHeadersRow();
+
+                    for (int i = 0; i < (int)tool.gameTokenDefs.size(); i++) {
+                        const auto& gd = tool.gameTokenDefs[i];
+                        if (gtFilterType >= 0 && gd.type != gtFilterType) continue;
+
+                        ImGui::TableNextRow();
+                        bool isSelected = (selectedGameToken == i);
+                        ImGui::TableNextColumn();
+                        ImGui::TextColored(gameTokenColor(gd.type), "%s", gameTokenLabel(gd.type));
+                        ImGui::TableNextColumn();
+                        std::string label = gd.name;
+                        if (label.empty()) label = std::string(gameTokenLabel(gd.type)) + " token";
+                        if (gd.type == GTOKEN_LANDMARK && gd.unlockIndex >= 0)
+                            label += std::string("  -  ") + SpiderManTool::LandmarkDisplayName(gd.unlockIndex);
+                        else if (gd.type == GTOKEN_COMIC && gd.unlockIndex >= 1)
+                            label += "  -  cover #" + std::to_string(gd.unlockIndex);
+                        else if (gd.raceIndex >= 0 && gd.raceIndex < (int)tool.raceDefs.size())
+                            label += "  -  " + std::to_string((int)tool.raceDefs[gd.raceIndex].waypoints.size()) + " checkpoints";
+                        label += "##gtrow" + std::to_string(i);
+
+                        if (ImGui::Selectable(label.c_str(), isSelected,
+                                ImGuiSelectableFlags_SpanAllColumns)) {
+                            selectedGameToken = isSelected ? -1 : i;
+                            if (selectedGameToken >= 0) tool.showTokenDetail = true;
+                        }
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%d", gd.tokenId);
+                        ImGui::TableNextColumn();
+                        if (ImGui::SmallButton(("Go##gt" + std::to_string(i)).c_str())) {
+                            tool.camPos[0] = gd.position[0];
+                            tool.camPos[1] = gd.position[1] + 30.0f;
+                            tool.camPos[2] = gd.position[2] + 30.0f;
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("%.0f, %.0f, %.0f",
+                                    gd.position[0], gd.position[1], gd.position[2]);
+                    }
+                    ImGui::EndTable();
+                }
+
+                if (selectedGameToken >= 0 && selectedGameToken < (int)tool.gameTokenDefs.size()) {
+                    const auto& sel = tool.gameTokenDefs[selectedGameToken];
+                    ImGui::Separator();
+                    ImGui::TextColored(gameTokenColor(sel.type), "%s", gameTokenLabel(sel.type));
+                    ImGui::SameLine();
+                    ImGui::Text(" \"%s\"", sel.name.c_str());
+                    ImGui::Text("Position: (%.1f, %.1f, %.1f)",
+                                sel.position[0], sel.position[1], sel.position[2]);
+                    if (ImGui::Button("Open Details", ImVec2(-1, 0))) tool.showTokenDetail = true;
+                }
+            }
+        }
         ImGui::End();
-        ImGui::PopStyleVar();
+    }
+
+    if (tool.showTokenDetail &&
+        tool.selectedGameTokenIndex >= 0 &&
+        tool.selectedGameTokenIndex < (int)tool.gameTokenDefs.size()) {
+
+        const auto& sel = tool.gameTokenDefs[tool.selectedGameTokenIndex];
+
+        ImGui::SetNextWindowSize(ImVec2(520, 620), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Token Details###TokenDetail", &tool.showTokenDetail)) {
+
+            float tc[3];
+            GameTokenColor(sel.type, tc);
+            const ImVec4 typeColor(tc[0], tc[1], tc[2], 1.0f);
+
+            ImGui::TextColored(typeColor, "%s", GameTokenTypeName(sel.type));
+            if (!sel.name.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", sel.name.c_str());
+            }
+            ImGui::Text("Position: (%.1f, %.1f, %.1f)",
+                        sel.position[0], sel.position[1], sel.position[2]);
+            if (ImGui::Button("Fly Camera Here")) {
+                tool.camPos[0] = sel.position[0];
+                tool.camPos[1] = sel.position[1] + 30.0f;
+                tool.camPos[2] = sel.position[2] + 30.0f;
+            }
+            ImGui::Separator();
+
+            auto drawImage = [](unsigned int tex, float maxH) {
+                if (!tex) return false;
+                GLint texW = 0, texH = 0;
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &texW);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &texH);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                if (texW <= 0 || texH <= 0) { texW = 4; texH = 3; }
+
+                const float availW = ImGui::GetContentRegionAvail().x;
+                const float aspect = (float)texW / (float)texH;
+                float w = availW;
+                float h = w / aspect;
+                if (h > maxH) { h = maxH; w = h * aspect; }
+                if (w < availW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availW - w) * 0.5f);
+                ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(w, h));
+                return true;
+            };
+
+            if (sel.type == GTOKEN_COMIC) {
+                if (sel.unlockIndex >= 1) {
+                    ImGui::Text("Unlocks comic cover #%d of 75", sel.unlockIndex);
+                    unsigned int tex = tool.GetComicCoverImage(sel.unlockIndex);
+                    if (!drawImage(tex, 430.0f)) {
+                        ImGui::TextDisabled("Cover texture U_COV_%02d_COV not found in the loaded packs.",
+                                            sel.unlockIndex);
+                    }
+                } else {
+                    ImGui::TextDisabled("Could not derive a cover number from this token's name.");
+                }
+
+            } else if (sel.type == GTOKEN_LANDMARK) {
+                if (sel.unlockIndex >= 0) {
+                    ImGui::TextColored(ImVec4(0.85f, 0.92f, 1.0f, 1.0f), "%s",
+                                       SpiderManTool::LandmarkDisplayName(sel.unlockIndex));
+                    unsigned int tex = tool.GetLandmarkImage(sel.unlockIndex, false);
+                    if (!drawImage(tex, 300.0f)) {
+                        ImGui::TextDisabled("Landmark texture U_I_FULL_%s not found in the loaded packs.",
+                                            SpiderManTool::LandmarkTextureSuffix(sel.unlockIndex));
+                    }
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("Texture: U_I_FULL_%s",
+                                        SpiderManTool::LandmarkTextureSuffix(sel.unlockIndex));
+                } else {
+                    ImGui::TextDisabled("No landmark building was found near this token.");
+                }
+
+            } else if (sel.raceIndex >= 0 && sel.raceIndex < (int)tool.raceDefs.size()) {
+                const auto& race = tool.raceDefs[sel.raceIndex];
+                ImGui::Text("%s", race.name.c_str());
+                ImGui::TextDisabled("Zone %s%s", race.zone.c_str(),
+                                    race.isVenom ? "  (Venom race)" : "");
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(1, 1, 1, 0.85f), "Medal times");
+                if (ImGui::BeginTable("medals", 2,
+                        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+                    static const char* kMedalNames[4] = { "Ultimate", "Gold", "Silver", "Bronze" };
+                    static const ImVec4 kMedalColors[4] = {
+                        ImVec4(0.60f, 0.90f, 1.00f, 1.0f),
+                        ImVec4(1.00f, 0.84f, 0.20f, 1.0f),
+                        ImVec4(0.80f, 0.80f, 0.85f, 1.0f),
+                        ImVec4(0.80f, 0.52f, 0.25f, 1.0f),
+                    };
+                    for (int m = 0; m < 4; m++) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextColored(kMedalColors[m], "%s", kMedalNames[m]);
+                        ImGui::TableNextColumn();
+                        float t = race.medalTimes[m];
+                        ImGui::Text("%d:%05.2f  (%.0fs)", (int)(t / 60.0f), fmodf(t, 60.0f), t);
+                    }
+                    ImGui::EndTable();
+                }
+
+                ImGui::Spacing();
+                ImGui::Checkbox("Draw route in viewport", &tool.showRaceWaypoints);
+                ImGui::Text("Checkpoints: %d", (int)race.waypoints.size());
+
+                if (ImGui::BeginTable("checkpoints", 3,
+                        ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable,
+                        ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 34);
+                    ImGui::TableSetupColumn("Position", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 46);
+                    ImGui::TableHeadersRow();
+                    for (int w = 0; w < (int)race.waypoints.size(); w++) {
+                        const auto& p = race.waypoints[w];
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        if (w == 0)                                   ImGui::TextDisabled("S");
+                        else if (w == (int)race.waypoints.size() - 1) ImGui::TextDisabled("F");
+                        else                                          ImGui::Text("%d", w);
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%.1f, %.1f, %.1f", p[0], p[1], p[2]);
+                        ImGui::TableNextColumn();
+                        if (ImGui::SmallButton(("Go##cp" + std::to_string(w)).c_str())) {
+                            tool.camPos[0] = p[0];
+                            tool.camPos[1] = p[1] + 30.0f;
+                            tool.camPos[2] = p[2] + 30.0f;
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+
+            } else if (sel.type == GTOKEN_RACE || sel.type == GTOKEN_VENOM ||
+                       sel.type == GTOKEN_JS_RACE) {
+                ImGui::TextDisabled("No race definition matched this token.");
+                ImGui::TextDisabled("%d races were parsed from the loaded packs.",
+                                    (int)tool.raceDefs.size());
+            } else {
+                ImGui::TextDisabled("%s tokens carry no unlockable art.",
+                                    GameTokenTypeName(sel.type));
+            }
+        }
+        ImGui::End();
     }
 
     if (tool.notificationTimer > 0.0f) {

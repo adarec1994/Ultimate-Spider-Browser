@@ -2723,7 +2723,6 @@ static void TransformNormal(float& nx, float& ny, float& nz, const float* m) {
 bool SpiderManTool::FetchMorphBytesForHash(uint32_t meshHash, std::vector<uint8_t>& out) {
     out.clear();
 
-    // 1) Prefer a morph co-located in the currently open pack.
     if (!pcPackData.empty()) {
         for (const auto& resource : currentDir.resources) {
             if (resource.type == RES_KEY_MORPH && resource.hash == meshHash &&
@@ -2736,9 +2735,6 @@ bool SpiderManTool::FetchMorphBytesForHash(uint32_t meshHash, std::vector<uint8_
         }
     }
 
-    // 2) Otherwise resolve the same mesh's morph from any other pack. Character-viewer
-    //    packs (CH_VWR_*) ship the head mesh but not the morph, which only lives in the
-    //    cutscene/IGC packs; the mesh hash is identical there, so the morph still matches.
     BuildGlobalMorphIndex();
     auto it = globalMorphIndex.find(meshHash);
     if (it != globalMorphIndex.end() && it->second.size != 0) {
@@ -2770,7 +2766,6 @@ void SpiderManTool::LoadMorphForCurrentModel(uint32_t meshHash) {
 
     morphTargetWeights.assign(loadedMorphFile.sets.size(), 0.0f);
 
-    // A model that actually has adjustable morph targets should surface its Morphs tab.
     if (morphTargetWeights.size() > 1) focusMorphsTab = true;
 }
 
@@ -2869,7 +2864,7 @@ void SpiderManTool::FlushPendingWholeWorldInstances() {
         drawMeshCount += previewMeshes.size() - firstMesh;
         for (size_t meshIndex = firstMesh; meshIndex < previewMeshes.size(); ++meshIndex) {
             RenderMesh& mesh = previewMeshes[meshIndex];
-            mesh.worldKind = batch.kind;   // restore the pass that queued it
+            mesh.worldKind = batch.kind;
             const size_t namedCount = std::min(mesh.instances.size(), batch.instanceNames.size());
             for (size_t instanceIndex = 0; instanceIndex < namedCount; ++instanceIndex) {
                 mesh.instances[instanceIndex].name = batch.instanceNames[instanceIndex];
@@ -2887,7 +2882,8 @@ void SpiderManTool::InstanceWholeWorldMeshes() {
 
     auto makeKey = [](const RenderMesh& mesh) {
         std::ostringstream key;
-        key << mesh.sourcePack << '|'
+        key << static_cast<int>(mesh.worldKind) << '|'
+            << mesh.sourcePack << '|'
             << mesh.sourceOffset << '|'
             << mesh.sourceSize << '|'
             << mesh.sourceMeshOffset << '|'
@@ -3245,7 +3241,11 @@ void SpiderManTool::BatchWorldMeshesByType() {
 void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcmData, std::string modelName, std::function<unsigned int(uint32_t)> textureResolver, const std::string& sourcePack, uint32_t sourceOffset, const float* transform, uint32_t onlyMeshOffset) {
     if (collectWholeWorldInstances && transform && !sourcePack.empty()) {
         std::ostringstream key;
-        key << sourcePack << '|' << sourceOffset << '|' << pcmData.size() << '|' << onlyMeshOffset;
+        key << static_cast<int>(currentWorldKind) << '|'
+            << sourcePack << '|'
+            << sourceOffset << '|'
+            << pcmData.size() << '|'
+            << onlyMeshOffset;
         PendingWorldInstanceBatch& batch = pendingWholeWorldInstances[key.str()];
         if (batch.transforms.empty()) {
             batch.pcmData = pcmData;
@@ -3253,8 +3253,6 @@ void SpiderManTool::AddMeshFromDataWithTransform(const std::vector<uint8_t>& pcm
             batch.sourcePack = sourcePack;
             batch.sourceOffset = sourceOffset;
             batch.onlyMeshOffset = onlyMeshOffset;
-            // Record the kind now: the batch is created later by FlushPendingWholeWorldInstances,
-            // by which point currentWorldKind has moved on to whichever pass ran last.
             batch.kind = currentWorldKind;
         }
         std::array<float, 16> placement{};
@@ -4322,16 +4320,9 @@ void SpiderManTool::LoadModelToGL(int index) {
             modelCenter[2] = cz;
             modelRadius = std::max(0.5f, diagonal * 0.5f);
 
-            // Focal point the orbit/zoom camera targets. A tall silhouette is a full-body
-            // character whose head sits near the top; a compact mesh (bust/head/prop) is
-            // already centred on its head. This is what "zoom towards the head" homes in on.
             const float width     = maxP[0] - minP[0];
             const float depth     = maxP[2] - minP[2];
             const float height    = maxP[1] - minP[1];
-            // Use the THINNEST horizontal axis (front-to-back depth for a character), not the
-            // widest: bind poses are usually T/A-posed, so arms make width ~= height and a
-            // width-based test wrongly reads a standing figure as "compact". A standing body
-            // is much taller than deep; a bust/head/prop is roughly as tall as it is thick.
             const float thickness = std::min(width, depth);
             const float headY     = (height > thickness * 1.8f) ? (minP[1] + 0.90f * height) : cy;
             modelHeadTarget[0] = cx;
@@ -4341,7 +4332,7 @@ void SpiderManTool::LoadModelToGL(int index) {
             camYaw = 90.0f;
             camPitch = 18.0f;
             const float distance = modelRadius * 3.2f;
-            orbitDistance = distance;   // start zoomed out, framed on the body centre
+            orbitDistance = distance;
             const float yaw = camYaw * 3.14159265358979323846f / 180.0f;
             const float pitch = camPitch * 3.14159265358979323846f / 180.0f;
             const float horizontal = cosf(pitch) * distance;
@@ -4384,7 +4375,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         std::vector<float> pos, norm, uvs, weights;
         std::vector<uint16_t> joints, indices;
         float minP[3], maxP[3];
-        int sectionIndex = -1;   // PCM first-LOD section index, for aligning morph deltas
+        int sectionIndex = -1;
     };
     std::vector<SubmeshData> submeshes;
     std::vector<float> allIBMs;
@@ -4560,12 +4551,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 sm.indices = newIndices;
             }
 
-            // Convert the source winding to glTF's convention (counter-clockwise = front-facing).
-            // The game draws these with D3DCULL_CW, the opposite rule, so passing the indices
-            // through unchanged yields geometry that reads as inside-out anywhere culling is
-            // actually enforced. Blender hides it (every exported material is doubleSided), but
-            // importers that respect the spec render the back faces. Runs after the strip
-            // conversion above, so sm.indices is a plain triangle list either way.
             for (size_t i = 0; i + 2 < sm.indices.size(); i += 3) {
                 std::swap(sm.indices[i + 1], sm.indices[i + 2]);
             }
@@ -4586,12 +4571,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         }
     }
 
-    // Ground the model on Y=0. USM authors character geometry around a pelvis-height origin, so a
-    // raw export lands half below the floor when imported. This vertex-based offset is the fallback
-    // for static meshes; skinned characters refine it to the foot bones below (a stray sole/cloth
-    // vertex under the feet would otherwise over-lift the model). For a skinned mesh glTF ignores
-    // the mesh node's own transform, so the lift must sit on the joints' shared parent (the
-    // "Skeleton" node); for a static mesh it goes on the mesh node itself.
     float groundOffsetY = 0.0f;
     {
         float minY = 1e9f;
@@ -4608,8 +4587,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
     }
 
     SkinningGLBWriter writer;
-    // Resolve the mesh's morph (blend shapes) for export. Keyed by mesh hash; may live in
-    // another pack (see FetchMorphBytesForHash). Side-effect-free — does not touch UI state.
     UsmMorph::File morphFile;
     if (meshHash != 0) {
         std::vector<uint8_t> morphBytes;
@@ -4775,9 +4752,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         uint32_t logicalBoneCount = entityMapMatches
             ? (uint32_t)activeBoneMapping.logicalToMesh.size()
             : totalBones;
-        // ArbitraryPO chain bones (Venom's tentacles and tongue) sit past the skinning bones, so
-        // the logical range has to be widened to reach them - otherwise both this exporter and
-        // GlbBuildAnimationWorldMatricesForFrame clip them off before they can be written.
         if (exportSkeleton) {
             for (const auto& component : exportSkeleton->components) {
                 if (component.type_id != NalCompType::ArbitraryPO) continue;
@@ -4815,13 +4789,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 logicalBindMatrices[logical][15] = 1.0f;
             }
         }
-        // Non-skinning chain bones (ArbitraryPO) - Venom's tentacles and tongue.
-        //
-        // The PCM's bone-matrix table only covers bones that vertices are weighted to, so these
-        // never reached the export even though the animation path already evaluates them (see the
-        // arb_nodes loop in GlbBuildAnimationWorldMatricesForFrame). They drive procedural geometry
-        // rather than skin, but they still have to exist as nodes or their animation has nowhere
-        // to land. Their rest pose is stored absolutely, which suits the flat skeleton written here.
         struct GlbExtraBone {
             int logical = -1;
             std::string name;
@@ -4842,15 +4809,11 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                     const int logical = node.my_matrix_ix;
                     if (logical < 0 || logical >= (int)logicalBoneCount) continue;
                     if (node.name.empty()) continue;
-                    if (exportLogicalToMesh[logical] >= 0) continue;  // already a skinning bone
+                    if (exportLogicalToMesh[logical] >= 0) continue;
 
                     GlbExtraBone bone;
                     bone.logical = logical;
                     bone.name = node.name;
-                    // arb_skel_quats/positions only hold entries for channels the animation
-                    // does NOT drive - for animated channels the index refers to the animation's
-                    // own array instead, so reading it here would pull an unrelated bone's rest
-                    // value. Venom's chains are all pos_anim, hence no authored rest position.
                     if (!node.is_quat_anim && node.quat_ix < arbComponent->arb_skel_quats.size()) {
                         const GlbExportQuat q =
                             GlbQuatFromNal(arbComponent->arb_skel_quats[node.quat_ix]);
@@ -4866,8 +4829,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                         bone.translation[2] = p[2];
                     }
 
-                    // Seed the bind matrix too, so an animation that leaves a chain alone still
-                    // poses it at rest instead of collapsing it onto the origin.
                     const float x = bone.rotation[0], y = bone.rotation[1];
                     const float z = bone.rotation[2], w = bone.rotation[3];
                     logicalBindMatrices[logical] = {
@@ -4884,9 +4845,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         GlbBuildRestLocalMatrices(logicalBindMatrices, exportSkeleton,
                                   restLocalMatrices, restLocalQuatNal);
 
-        // Prefer grounding to the lowest foot/toe joint over the lowest vertex: the foot bone is
-        // the real ground-contact reference, and it's immune to stray sub-foot geometry that made
-        // the vertex-based lift float the character too high.
         float skelOffsetY = groundOffsetY;
         {
             auto isFootBone = [&](int logical) {
@@ -4900,11 +4858,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                        lower.find("toe") != std::string::npos;
             };
 
-            // Ground against an animated pose, not the bind pose. USM's bind pose stands with the
-            // legs fully extended - Venom's toes sit ~0.8 units below anything an animation
-            // reaches - so lifting by the bind-pose foot puts the T-pose on the floor and leaves
-            // every animation hovering. An idle is the right reference: it's the resting pose the
-            // rest of the animation set is authored around.
             float minFootY = 1e9f;
             if (loadedAnimFile && exportSkeleton && !restLocalMatrices.empty()) {
                 const NalAnimEntry* reference = nullptr;
@@ -4943,8 +4896,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 }
             }
 
-            // No animation to measure (static props, or a mesh exported on its own): fall back to
-            // the bind-pose foot, which is all that's available.
             if (minFootY > 1e8f) {
                 for (uint32_t bi = 0; bi < totalBones; ++bi) {
                     const int logical = exportMeshToLogical.empty() ? (int)bi : exportMeshToLogical[bi];
@@ -4989,8 +4940,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         for (const auto& bone : extraBones) {
             int boneNode = writer.AddNode(bone.name, -1, -1, nullptr, {},
                                           bone.translation, bone.rotation);
-            // Route this logical bone through the mesh-bone table that the animation writer
-            // indexes with, so its channels resolve to the node just created.
             exportLogicalToMesh[bone.logical] = (int)boneNodeIndices.size();
             boneNodeIndices.push_back(boneNode);
             writer.AddJoint(boneNode);
@@ -5003,8 +4952,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             if (!InvertMatrix(mat.data(), inv)) GlbMat4Identity(inv);
             for (int i = 0; i < 16; i++) ibmData.push_back(inv[i]);
         }
-        // No vertex is weighted to a chain bone, so its inverse bind matrix never affects a
-        // vertex; identity just keeps the accessor length in step with the joint list.
         for (size_t extra = 0; extra < extraBones.size(); ++extra) {
             float identity[16];
             GlbMat4Identity(identity);
@@ -5014,11 +4961,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
         ibmAccessor = writer.AddAccessor(ibmView, 5126, (int)exportedJointCount, "MAT4");
     }
 
-    // Merged model: every submesh becomes a primitive of ONE glTF mesh -> a single object in
-    // Blender (the character's parts aren't modular). glTF requires all primitives in a mesh to
-    // share the same morph-target count, so every primitive declares the full set: face sections
-    // carry real POSITION deltas; all other primitives point at zero accessors (no bufferView =
-    // all zeros, free), so the shape keys exist consistently but move only the face.
     auto sectionHasData = [&](int sectionIndex, int vertCount, size_t t) {
         return morphFile.valid && sectionIndex >= 0 && vertCount > 0 && t < morphFile.sets.size() &&
                sectionIndex < (int)morphFile.sets[t].sections.size() &&
@@ -5035,7 +4977,7 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                 if (sectionHasData(sm.sectionIndex, vc, t)) anyReal = true;
             if (anyReal) break;
         }
-        if (!anyReal) morphTargetCount = 0;   // morph didn't match this mesh; don't add dead keys
+        if (!anyReal) morphTargetCount = 0;
     }
 
     int meshIdx = writer.StartMesh(modelName);
@@ -5085,7 +5027,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
                     int dView = writer.AddBufferView(built.data(), built.size() * sizeof(float), 34962);
                     morphPosAccessors.push_back(writer.AddAccessor(dView, 5126, vertCount, "VEC3", dmin, dmax));
                 } else {
-                    // This shape key doesn't move this primitive: free all-zero accessor.
                     morphPosAccessors.push_back(writer.AddZeroAccessor(vertCount, "VEC3", 5126));
                 }
             }
@@ -5118,9 +5059,6 @@ void SpiderManTool::ConvertPCM(const std::vector<uint8_t>& pcmData, const std::s
             if (anim.skeleton &&
                 !nal_skeleton_pose_inheritable(anim.skeleton.get(), loadedSkeleton.get()))
                 continue;
-            // Drive the rig we're exporting, not the rig the clip was authored for: inherited
-            // clips (a costume variant playing its base character's set) reference a base skeleton
-            // whose bone indices differ, so using it here would land the pose on the wrong bones.
             const NalSkeletonData& poseSkeleton = *loadedSkeleton;
             exportedAnimations += GlbAddAnimationToWriter(
                 writer,
@@ -5704,13 +5642,6 @@ void SpiderManTool::ExportSelectedWorldMesh(bool asGlb) {
     }
 }
 
-// Bulk-exports every loaded world mesh of the given kinds into a single GLB.
-//
-// The world loader produces four distinct classes of geometry (zone chunks, interiors, scene
-// entities / conglomerates, and batched lego props) with different placement semantics, so they
-// are exported separately rather than as one undifferentiated dump. Instanced meshes emit one
-// node per placement sharing a single mesh, which is what keeps a lego export from exploding
-// into thousands of duplicated vertex buffers.
 void SpiderManTool::ExportWorldMeshesByKind(const std::vector<WorldMeshKind>& kinds,
                                             const std::string& label) {
     auto wanted = [&](WorldMeshKind k) {
@@ -5727,7 +5658,6 @@ void SpiderManTool::ExportWorldMeshesByKind(const std::vector<WorldMeshKind>& ki
         if (!wanted(mesh.worldKind)) continue;
         if (mesh.positions.empty() || mesh.indices.empty()) continue;
 
-        // Strips need converting to a list, flipping every odd triangle to keep winding uniform.
         std::vector<uint16_t> tris;
         if (mesh.mode == GL_TRIANGLE_STRIP) {
             for (size_t i = 0; i + 2 < mesh.indices.size(); ++i) {
@@ -5741,8 +5671,6 @@ void SpiderManTool::ExportWorldMeshesByKind(const std::vector<WorldMeshKind>& ki
         }
         if (tris.empty()) continue;
 
-        // Source winding is D3D's (drawn with D3DCULL_CW); glTF wants counter-clockwise front
-        // faces, so reverse each triangle -- same correction as WriteGLB and the model exporter.
         for (size_t i = 0; i + 2 < tris.size(); i += 3) std::swap(tris[i + 1], tris[i + 2]);
 
         float mn[3] = { 1e30f,  1e30f,  1e30f};
@@ -5814,7 +5742,6 @@ void SpiderManTool::ExportWorldMeshesByKind(const std::vector<WorldMeshKind>& ki
         writer.EndMesh();
         ++exportedMeshes;
 
-        // One node per placement; instanced meshes reuse the single mesh above.
         if (mesh.instances.empty()) {
             writer.AddToScene(writer.AddNode(name, meshIdx));
             ++exportedNodes;

@@ -136,8 +136,6 @@ private:
         readPointerTable(vectorOffset);
         for (int index = 0; index < total; ++index) {
             const size_t object = read(0xC, 4);
-            // 0x00 name hash, 0x04 type, 0x08 value. Types 3/4/5 append extra payload
-            // (vector, variance, ...) which we skip but do not decode.
             Param param;
             param.name = u32(object);
             param.type = i32(object + 4);
